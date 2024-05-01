@@ -2,7 +2,7 @@ load FSU_cu_test_rank2.mat;
 
 tic;
 SU_rank2= cufinufftf2d1(single(st.om(:,1)),single(st.om(:,2)), filtFSU_rank2, 1, 1e-5, 320,320, 280*320, 56*12 * 2); 
-SU_rank2 = fft(reshape(SU_rank2, 320,320,56,12,2),[],3);
+SU_rank2 = ifft(reshape(SU_rank2, 320,320,56,12,2),[],3);
 toc;
 
 U_rank2 = squeeze(sum(SU_rank2 .*conj(SEs),4));
