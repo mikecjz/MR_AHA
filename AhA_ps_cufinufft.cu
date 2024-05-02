@@ -226,11 +226,13 @@ __global__ void KspaceUpdate(cuFloatComplex *d_k, cuFloatComplex *d_Phi2, cuFloa
 
                 cuFloatComplex tempValue = {0.0f,0.0f};
                 //Vector Matrix Multiplications
-                for (int innerL = 0; innerL < L, innerL ++;)
+                for (int innerL = 0; innerL < L; innerL++)
                 {
                     size_t k_index = (((innerL * Ncoils + coil) * Nz + z) * Nx + x) * Ntrajs + traj;
-                    size_t Phi2_index = (((innerL * L + L) * l) * Nz + z) * Ntrajs + traj;
-                    tempValue =  cuCaddf(tempValue, cuCmulf(d_k[k_index], d_Phi2[Phi2_index]));
+                    //size_t Phi2_index = (((innerL * L + L) * l) * Nz + z) * Ntrajs + traj;
+                    size_t Phi2_index = ((z * Ntrajs + traj) * L + innerL) * L + l;
+                    
+                    tempValue  =  cuCaddf(tempValue, cuCmulf(d_k[k_index], d_Phi2[Phi2_index]));
                 }
 
                 temp[out_idx] = tempValue;
@@ -324,7 +326,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     L = (int64_t)phi2Dims[0];
     Phi2 = mxGetComplexSingles(prhs[3]);
 
-    // Ntrans;
+    Ntrans = Nz * Ncoils * L;
 
     // ==========Initialize the MathWorks GPU API. ========== //
     mxInitGPU();
@@ -412,6 +414,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     // =========Block-Diagonal kspace update ========/
     cudaMalloc(&temp, Ntrajs * Nx * Nz * Ncoils * L * sizeof(cuFloatComplex));
+    //cudaMemset(temp, 0, Ntrajs * Nx * Nz * Ncoils * L * sizeof(cuFloatComplex));
 
     dim3 blockSizeBlkdiag(16, 16, 1);
     dim3 gridSizeBlkdiag((Ntrajs + 15) / 16, (Nx + 16) / 16, Nz);
@@ -420,6 +423,9 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaFree(d_k);
     d_k = temp; //Assign ksspace to updated values memory
     temp = nullptr; //Prevent accidental use of temp
+
+
+
 
     // ========= FINUFFT Type 1, NU -> U ========/
     cudaMalloc(&d_im_SEs, Nx * Ny * Nz * Ncoils * L * sizeof(cuFloatComplex));// Reallocate device multi-coil image data mem
@@ -430,6 +436,11 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaFree(d_x);
     cudaFree(d_y);
     cudaFree(d_Phi2);
+
+
+
+
+
 
     // ========== Inverse cuFFT in the 3rd (Z) dimension ========== /
 
@@ -462,26 +473,29 @@ void mexFunction(int nlhs, mxArray *plhs[],
     // ========= coil_combination ========/
     cudaMalloc(&d_im, Nx * Ny * Nz * L * sizeof(cuFloatComplex));// Reallocate device single-coil image data mem
     SEs_times_Im_adj<<<gridSize, blockSize>>>(d_im, d_SEs, d_im_SEs, Nx, Ny, Nz, Ncoils, L);
+    
 
     //clear out device memories
     cudaFree(d_SEs);
-    cudaFree(d_im_SEs);
+    //cudaFree(d_im_SEs);
 
     // Copy results to host
-    //mxComplexSingle *im_SEs = (mxComplexSingle *)mxMalloc(Ny * Nx * Nz * Ncoils * L * sizeof(mxComplexSingle));
-    cudaMemcpy(im, d_im, Ny * Nx * Nz * L * sizeof(mxComplexSingle), cudaMemcpyDeviceToHost);
+    mxComplexSingle *AhAx = (mxComplexSingle *)mxMalloc(Ny * Nx * Nz  * Ncoils *L * sizeof(mxComplexSingle));
+    cudaMemcpy(AhAx, d_im_SEs, Ny * Nx * Nz  *Ncoils * L * sizeof(mxComplexSingle), cudaMemcpyDeviceToHost);
 
     cudaFree(d_im);
+    cudaFree(d_im_SEs);
+
 
     // Create output
-    mwSize out_dimensions[1] = {(size_t)Nx * (size_t)Ny * (size_t)Nz* L};
+    mwSize out_dimensions[1] = {(size_t)Nx * (size_t)Ny * (size_t)Nz * (size_t)Ncoils * L};
     const mwSize *ndims = out_dimensions;
     plhs[0] = mxCreateNumericArray(1, ndims, mxSINGLE_CLASS, mxCOMPLEX);
 
     // mexPrintf("Create output  Complete\n");
 
     // Set Array Value
-    mxSetComplexSingles(plhs[0], im);
+    mxSetComplexSingles(plhs[0], AhAx);
 
     // Free host allocated memory
     free(x);
