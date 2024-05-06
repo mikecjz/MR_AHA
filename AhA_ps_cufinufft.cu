@@ -178,7 +178,7 @@ void cufinufftf2d2(cuFloatComplex *d_im_SEs, cuFloatComplex * d_k, float* d_x, f
     cufinufftf_plan plan; //declare cufinufft plan object
 
     //Assuing all values properly initialzed.
-    cufinufftf_makeplan(2, 2, modes, 1, Ntrans, 1e-6, &plan, NULL);// make plan
+    cufinufftf_makeplan(2, 2, modes, -1, Ntrans, 1e-6, &plan, NULL);// make plan
 
     //Set Points
     cufinufftf_setpts(plan, M, d_x, d_y, NULL, 0, NULL, NULL, NULL);
@@ -477,18 +477,18 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     //clear out device memories
     cudaFree(d_SEs);
-    //cudaFree(d_im_SEs);
+    cudaFree(d_im_SEs);
 
     // Copy results to host
-    mxComplexSingle *AhAx = (mxComplexSingle *)mxMalloc(Ny * Nx * Nz  * Ncoils *L * sizeof(mxComplexSingle));
-    cudaMemcpy(AhAx, d_im_SEs, Ny * Nx * Nz  *Ncoils * L * sizeof(mxComplexSingle), cudaMemcpyDeviceToHost);
+    mxComplexSingle *AhAx = (mxComplexSingle *)mxMalloc(Ny * Nx * Nz  * L * sizeof(mxComplexSingle));
+    cudaMemcpy(AhAx, d_im, Ny * Nx * Nz  * L * sizeof(mxComplexSingle), cudaMemcpyDeviceToHost);
 
     cudaFree(d_im);
-    cudaFree(d_im_SEs);
+   // cudaFree(d_im_SEs);
 
 
     // Create output
-    mwSize out_dimensions[1] = {(size_t)Nx * (size_t)Ny * (size_t)Nz * (size_t)Ncoils * L};
+    mwSize out_dimensions[1] = {(size_t)Nx * (size_t)Ny * (size_t)Nz  * L};
     const mwSize *ndims = out_dimensions;
     plhs[0] = mxCreateNumericArray(1, ndims, mxSINGLE_CLASS, mxCOMPLEX);
 
@@ -500,5 +500,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     // Free host allocated memory
     free(x);
     free(y);
+
+    mexPrintf(".");
     return;
 }
