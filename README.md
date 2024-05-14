@@ -2,7 +2,7 @@
 ## Description
 This repository contains c and cuda-based source codes to perform efficient GPU-based AhA operation for stack-of-stars trajectory in MR-Multasking reconconstruction. Under the hood, it makes api calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) and [cufinufft](https://finufft.readthedocs.io/en/latest/c_gpu.html) for both uniform and non-uniform FFTs. This repo also contains self-defined cuda kernels to perform operations such as coil-sensitivity maps multiplication (broadcast) and block-diagnal low-rank kspace update with $\Phi\Phi^H$. The main function is [AHA_ps_cufinufft.cu](./AhA_ps_cufinufft.cu). Aditionally, this repo contains example simple nufft API calls to [cufinufftf2d1(GPU)](./cufinufftf2d1.cu) and [finufftf2d1(CPU)](./finufftf2d1.c).
 
-At the moment, the AhA operation takes around 8 seconds for a image matrix size of $320 \times 320 \times 56$ with $L = 8$ and $Ncoils = 12$.
+At the moment, the AhA operation takes around 8 seconds for a image matrix size of $320 \times 320 \times 56$ with $L = 16$ and $Ncoils = 12$.
 
 >Hardware environments:
 > * NVIDIA GeForce RTX 3090 (24G)
