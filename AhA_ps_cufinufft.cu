@@ -490,7 +490,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     }
 
     Nx = (int64_t)mxGetDoubles(mxGetField(prhs[1], 0, "Nd"))[0];
- P    Ny = (int64_t)mxGetDoubles(mxGetField(prhs[1], 0, "Nd"))[1];
+    Ny = (int64_t)mxGetDoubles(mxGetField(prhs[1], 0, "Nd"))[1];
     Nz = (int64_t)mxGetScalar(mxGetField(prhs[1], 0, "Nz"));
     M = (size_t)mxGetScalar(mxGetField(prhs[1], 0, "M"));
     Ntrajs = (size_t)(M/Nx);
