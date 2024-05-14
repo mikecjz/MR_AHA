@@ -3,7 +3,7 @@
 	"tasks":[{
         "label": "set_cuda_visible_devices",
         "command": "source",
-        "args":["set_cuda_visible_devices.sh"],
+        "args":["./set_cuda_visible_devices.sh"],
         "type":"shell"
     }]
 }

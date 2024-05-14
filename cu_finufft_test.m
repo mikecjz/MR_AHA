@@ -1,7 +1,8 @@
 load AhAx_test.mat;
-
+tic;
 AhAx = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2);
 AhAx = reshape(AhAx, st.Nd(1), st.Nd(2), st.Nz, []);
+toc;
 
 %%
 U0 = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2);
