@@ -366,8 +366,8 @@ void cufinufftf2d1(cuFloatComplex *d_im_SEs, cuFloatComplex * d_k, float* d_x, f
  * d_k [Ntrajs, Nx, Nz, Ncoils, L]
  *                              ^innerL
  * 
- * d_Phi2 [L,   L,       Ntraj, Nz]
- *         ^l   ^innerL
+ * d_Phi2 [L,       L,       Ntraj, Nz]
+ *         ^innerL  ^l
  */
 __global__ void KspaceUpdate(cuFloatComplex *d_k, cuFloatComplex *d_Phi2, cuFloatComplex* temp, 
                             size_t Ntrajs, size_t Nx, size_t Nz, size_t Ncoils, size_t L)
@@ -391,7 +391,7 @@ __global__ void KspaceUpdate(cuFloatComplex *d_k, cuFloatComplex *d_Phi2, cuFloa
                 {
                     size_t k_index = (((innerL * Ncoils + coil) * Nz + z) * Nx + x) * Ntrajs + traj;
 
-                    size_t Phi2_index = ((z * Ntrajs + traj) * L + innerL) * L + l;
+                    size_t Phi2_index = ((z * Ntrajs + traj) * L + l) * L + innerL;
                     
                     tempValue  =  cuCaddf(tempValue, cuCmulf(d_k[k_index], d_Phi2[Phi2_index]));
                 }
