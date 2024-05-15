@@ -526,7 +526,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     // Intialze Blocks and Grids and Perform Broadcasting
     dim3 blockSize(16, 16, 1);
-    dim3 gridSize((Nx + 15) / 16, (Ny + 16) / 16, Nz);
+    dim3 gridSize((Nx + 15) / 16, (Ny + 15) / 16, Nz);
 
     SEs_times_Im<<<gridSize, blockSize>>>(d_im, d_SEs, d_im_SEs, Nx, Ny, Nz, Ncoils, L);
     //cudaDeviceSynchronize();
@@ -598,7 +598,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     //cudaMemset(temp, 0, Ntrajs * Nx * Nz * Ncoils * L * sizeof(cuFloatComplex));
 
     dim3 blockSizeBlkdiag(16, 16, 1);
-    dim3 gridSizeBlkdiag((Ntrajs + 15) / 16, (Nx + 16) / 16, Nz);
+    dim3 gridSizeBlkdiag((Ntrajs + 15) / 16, (Nx + 15) / 16, Nz);
     KspaceUpdate<<<gridSizeBlkdiag, blockSizeBlkdiag>>>(d_k, d_Phi2, temp, Ntrajs, Nx, Nz, Ncoils, L);
 
     cudaFree(d_k);
