@@ -446,6 +446,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     int64_t Nz;
     int64_t Ncoils;
     int64_t L;          // rank
+    int64_t Nkx;        // length of one k-space line // LeeHL
     size_t M;           // number of NU points
     size_t Ntrans;      // Number of stacked transforms
     size_t Ntrajs;      // Number of in-plane tranjectories. e.g. 280
@@ -493,7 +494,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     Ny = (int64_t)mxGetDoubles(mxGetField(prhs[1], 0, "Nd"))[1];
     Nz = (int64_t)mxGetScalar(mxGetField(prhs[1], 0, "Nz"));
     M = (size_t)mxGetScalar(mxGetField(prhs[1], 0, "M"));
-    Ntrajs = (size_t)(M/Nx);
+    //Ntrajs = (size_t)(M/Nx);  // LeeHL
     
 
     // Input 3: Sensitivity Maps
@@ -505,6 +506,10 @@ void mexFunction(int nlhs, mxArray *plhs[],
     const mwSize *phi2Dims = mxGetDimensions(prhs[3]);
     L = (int64_t)phi2Dims[0];
     Phi2 = mxGetComplexSingles(prhs[3]);
+
+    // Get k-space size from Phi2 and st    // LeeHL
+    Ntrajs = (size_t)phi2Dims[2];
+    Nkx = (int64_t) (M/Ntrajs);
 
     Ntrans = Nz * Ncoils * L;
 
@@ -594,12 +599,12 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
 
     // =========Block-Diagonal kspace update ========/
-    cudaMalloc(&temp, Ntrajs * Nx * Nz * Ncoils * L * sizeof(cuFloatComplex));
+    cudaMalloc(&temp, Ntrajs * Nkx * Nz * Ncoils * L * sizeof(cuFloatComplex));
     //cudaMemset(temp, 0, Ntrajs * Nx * Nz * Ncoils * L * sizeof(cuFloatComplex));
 
     dim3 blockSizeBlkdiag(16, 16, 1);
     dim3 gridSizeBlkdiag((Ntrajs + 15) / 16, (Nx + 15) / 16, Nz);
-    KspaceUpdate<<<gridSizeBlkdiag, blockSizeBlkdiag>>>(d_k, d_Phi2, temp, Ntrajs, Nx, Nz, Ncoils, L);
+    KspaceUpdate<<<gridSizeBlkdiag, blockSizeBlkdiag>>>(d_k, d_Phi2, temp, Ntrajs, Nkx, Nz, Ncoils, L);
 
     cudaFree(d_k);
     d_k = temp; //Assign ksspace to updated values memory
