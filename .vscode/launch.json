@@ -17,6 +17,10 @@
                 {
                     "name":"LD_LIBRARY_PATH",
                     "value":"/home/jc_350/Toolboxes/finufft/build:${env:LD_LIBRARY_PATH}",
+                },
+                {
+                    "name":"CUDA_VISIBLE_DEVICES",
+                    "value":"4"
                 }
             ],
             "externalConsole": false,
