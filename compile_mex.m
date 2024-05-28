@@ -1,12 +1,17 @@
 %% Set The following paths according to your server environments
-finufft_include = '/home/jc_350/Toolboxes/finufft/include';
-finufft_build   = '/home/jc_350/Toolboxes/finufft/build';
 cuda_lib_path   = '/usr/local/cuda-12.0/lib64';
+
+% mainpath should point to the MR-Multitasking Unified Recon folder
+% Assuming cufinufft is properly compiled there
+finufft_include = [mainpath '/supporting/nufft/finufft/include'];
+finufft_build   = [mainpath '/supporting/nufft/finufft/build'];
+
 %% Realease compilation
-compile_command_r = ['mexcuda -R2018a -I',finufft_include, ' -L',finufft_build, ' -lcufinufft -L',cuda_lib_path,...
-    ' -lcufft AhA_ps_cufinufft.cu']
-eval(compile_command_r);
+
+mexcuda('-v','AhA_ps_cufinufft.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft')
+mexcuda('-v','cufinufftf2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft')
+
 %% Debug compilation
-% compile_command_d = ['mexcuda -R2018a -g -G -I',finufft_include, ' -L',finufft_build, ' -lcufinufft -L',cuda_lib_path,...
-%     ' -lcufft AhA_ps_cufinufft.cu']
-% eval(compile_command_d);
+
+% mexcuda('-v','-G','-g','AhA_ps_cufinufft.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft')
+% mexcuda('-v','-G','-g','cufinufftf2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft')
