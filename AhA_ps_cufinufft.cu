@@ -692,6 +692,5 @@ void mexFunction(int nlhs, mxArray *plhs[],
     free(x);
     free(y);
 
-    mexPrintf(".");
     return;
 }
