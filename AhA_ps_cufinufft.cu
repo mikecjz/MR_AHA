@@ -282,7 +282,7 @@ void cufinufftf2d2(cuFloatComplex *d_im_SEs, cuFloatComplex * d_k, float* d_x, f
 
     //Assuing all values properly initialzed.
     //int cufinufftf_makeplan(int type, int dim, const int64_t *n_modes, int iflag, int ntr, float eps, cufinufftf_plan *d_plan_ptr, cufinufft_opts *opts)
-    cufinufftf_makeplan(2, 2, modes, -1, Ntrans, 1e-6, &plan, NULL);// make plan. Deafault options.
+    cufinufftf_makeplan(2, 2, modes, -1, Ntrans, 1e-7, &plan, NULL);// make plan. Deafault options.
 
     //Set Points
     cufinufftf_setpts(plan, M, d_x, d_y, NULL, 0, NULL, NULL, NULL);
@@ -330,7 +330,7 @@ void cufinufftf2d1(cuFloatComplex *d_im_SEs, cuFloatComplex * d_k, float* d_x, f
     //Assuing all values properly initialzed.
 
     //int cufinufftf_makeplan(int type, int dim, const int64_t *n_modes, int iflag, int ntr, float eps, cufinufftf_plan *d_plan_ptr, cufinufft_opts *opts)
-    cufinufftf_makeplan(1, 2, modes, 1, Ntrans, 1e-6, &plan, NULL);// make plan, deafault options
+    cufinufftf_makeplan(1, 2, modes, 1, Ntrans, 1e-7, &plan, NULL);// make plan, deafault options
 
     //Set Points
     cufinufftf_setpts(plan, M, d_x, d_y, NULL, 0, NULL, NULL, NULL);
