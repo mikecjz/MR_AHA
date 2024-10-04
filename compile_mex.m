@@ -7,9 +7,9 @@ cuda_lib_path = '/usr/local/cuda/lib64';
 % > nvidia-smi --query-gpu=compute_cap --format=csv,noheader
 % to find GPUs compute capability
 % or check at https://arnon.dk/matching-sm-architectures-arch-and-gencode-for-various-nvidia-cards/
-
 gpu_arch = '75';   
 
+% finufft paths
 finufft_include = [mainpath '/supporting/nufft/finufft/include'];
 finufft_build   = [mainpath '/supporting/nufft/finufft/build'];
 

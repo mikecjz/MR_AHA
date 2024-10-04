@@ -129,7 +129,6 @@ __global__ void SEs_times_Im_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SEs,
             }
 
             d_im[im_index] = tempValue;
-            
         }
     }
 }
@@ -370,26 +369,26 @@ void cufinufftf2d1(cuFloatComplex *d_im_SEs, cuFloatComplex * d_k, float* d_x, f
  *         ^innerL  ^l
  */
 __global__ void KspaceUpdate(cuFloatComplex *d_k, cuFloatComplex *d_Phi2, cuFloatComplex* temp, 
-                            size_t Ntrajs, size_t Nx, size_t Nz, size_t Ncoils, size_t L)
+                            size_t Ntrajs, size_t Nkx, size_t Nz, size_t Ncoils, size_t L)
 {
     // Calculate global thread coordinates
-    int traj = blockIdx.x * blockDim.x + threadIdx.x; //Ntrajs spoke dimension in d_k
-    int x = blockIdx.y * blockDim.y + threadIdx.y; //Nx readout dimension in d_k
-    int z = blockIdx.z * blockDim.z + threadIdx.z; //Nz partition dimension in d_k
+    int traj = blockIdx.x * blockDim.x + threadIdx.x;   //Ntrajs spoke dimension in d_k
+    int kx   = blockIdx.y * blockDim.y + threadIdx.y;     //Nkx readout dimension in d_k
+    int z    = blockIdx.z * blockDim.z + threadIdx.z;     //Nz partition dimension in d_k
 
-    if (traj < Ntrajs && x < Nx && z < Nz)
+    if (traj < Ntrajs && kx < Nkx && z < Nz)
     {
         for (int l = 0; l < L; l++)
         {
             for (int coil = 0; coil < Ncoils; coil++)
             {
-                size_t out_idx = (((l * Ncoils + coil) * Nz + z) * Nx + x) * Ntrajs + traj;
+                size_t out_idx = (((l * Ncoils + coil) * Nz + z) * Nkx + kx) * Ntrajs + traj;
 
                 cuFloatComplex tempValue = {0.0f,0.0f};
                 //Vector Matrix Multiplications
                 for (int innerL = 0; innerL < L; innerL++)
                 {
-                    size_t k_index = (((innerL * Ncoils + coil) * Nz + z) * Nx + x) * Ntrajs + traj;
+                    size_t k_index = (((innerL * Ncoils + coil) * Nz + z) * Nkx + kx) * Ntrajs + traj;
 
                     size_t Phi2_index = ((z * Ntrajs + traj) * L + l) * L + innerL;
                     
@@ -397,11 +396,9 @@ __global__ void KspaceUpdate(cuFloatComplex *d_k, cuFloatComplex *d_Phi2, cuFloa
                 }
 
                 temp[out_idx] = tempValue;
-
             }
         }
     }
-
 }
 
 
@@ -490,8 +487,8 @@ void mexFunction(int nlhs, mxArray *plhs[],
         y[i] = om[numRows + i];
     }
 
-    Nx = (int64_t)mxGetDoubles(mxGetField(prhs[1], 0, "Nd"))[0];
-    Ny = (int64_t)mxGetDoubles(mxGetField(prhs[1], 0, "Nd"))[1];
+    Ny = (int64_t)mxGetDoubles(mxGetField(prhs[1], 0, "Nd"))[0];
+    Nx = (int64_t)mxGetDoubles(mxGetField(prhs[1], 0, "Nd"))[1];
     Nz = (int64_t)mxGetScalar(mxGetField(prhs[1], 0, "Nz"));
     M = (size_t)mxGetScalar(mxGetField(prhs[1], 0, "M"));
     //Ntrajs = (size_t)(M/Nx);  // LeeHL
@@ -531,9 +528,9 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     // Intialze Blocks and Grids and Perform Broadcasting
     dim3 blockSize(16, 16, 1);
-    dim3 gridSize((Nx + 15) / 16, (Ny + 15) / 16, Nz);
+    dim3 gridSize((Ny + 15) / 16, (Nx + 15) / 16, Nz);
 
-    SEs_times_Im<<<gridSize, blockSize>>>(d_im, d_SEs, d_im_SEs, Nx, Ny, Nz, Ncoils, L);
+    SEs_times_Im<<<gridSize, blockSize>>>(d_im, d_SEs, d_im_SEs, Ny, Nx, Nz, Ncoils, L);
     //cudaDeviceSynchronize();
 
     cudaFree(d_im); // Free subsequently unsed variable d_im on device
@@ -544,10 +541,10 @@ void mexFunction(int nlhs, mxArray *plhs[],
     // Permute 3rd dimension to first dimension
     cuFloatComplex *temp;
     cudaMalloc(&temp, Nx * Ny * Nz * Ncoils * L * sizeof(cuFloatComplex));
-    PermuteKernelThirdToFirst<<<gridSize, blockSize>>>(d_im_SEs, temp, Nx, Ny, Nz, Ncoils, L);
+    PermuteKernelThirdToFirst<<<gridSize, blockSize>>>(d_im_SEs, temp, Ny, Nx, Nz, Ncoils, L);
 
     cudaFree(d_im_SEs);
-    d_im_SEs = temp; //Assign image to permuted memoiry
+    d_im_SEs = temp; //Assign image to permuted memory
     temp = nullptr; //Prevent accidental use of temp
 
     //Make 1D cuFFT Plan
@@ -559,10 +556,10 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     // Permute 1st dimension back to to 3rd dimension
     cudaMalloc(&temp, Nx * Ny * Nz * Ncoils * L * sizeof(cuFloatComplex));
-    PermuteKernelFirstToThird<<<gridSize, blockSize>>>(d_im_SEs, temp, Nx, Ny, Nz, Ncoils, L);
+    PermuteKernelFirstToThird<<<gridSize, blockSize>>>(d_im_SEs, temp, Ny, Nx, Nz, Ncoils, L);
 
     cudaFree(d_im_SEs);
-    d_im_SEs = temp; //Assign image to permuted memoiry
+    d_im_SEs = temp; //Assign image to permuted memory
     temp = nullptr; //Prevent accidental use of temp
 
     //Destroy cuFFT Plan
@@ -575,7 +572,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     float *d_x, *d_y;
     cuFloatComplex *d_k, *d_Phi2;
 
-    int64_t modes[2] = {Nx, Ny};
+    int64_t modes[2] = {Ny, Nx};
 
      // Allocate device memories
     cudaMalloc(&d_x, M * sizeof(float));
@@ -603,7 +600,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     //cudaMemset(temp, 0, Ntrajs * Nx * Nz * Ncoils * L * sizeof(cuFloatComplex));
 
     dim3 blockSizeBlkdiag(16, 16, 1);
-    dim3 gridSizeBlkdiag((Ntrajs + 15) / 16, (Nx + 15) / 16, Nz);
+    dim3 gridSizeBlkdiag((Ntrajs + 15) / 16, (Nkx + 15) / 16, Nz);
     KspaceUpdate<<<gridSizeBlkdiag, blockSizeBlkdiag>>>(d_k, d_Phi2, temp, Ntrajs, Nkx, Nz, Ncoils, L);
 
     cudaFree(d_k);
@@ -624,13 +621,11 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaFree(d_Phi2);
 
 
-
-
     // ========== Inverse cuFFT in the 3rd (Z) dimension ========== /
 
     // Permute 3rd dimension to first dimension
     cudaMalloc(&temp, Nx * Ny * Nz * Ncoils * L * sizeof(cuFloatComplex));
-    PermuteKernelThirdToFirst<<<gridSize, blockSize>>>(d_im_SEs, temp, Nx, Ny, Nz, Ncoils, L);
+    PermuteKernelThirdToFirst<<<gridSize, blockSize>>>(d_im_SEs, temp, Ny, Nx, Nz, Ncoils, L);
 
     cudaFree(d_im_SEs);
     d_im_SEs = temp; //Assign image to permuted memoiry
@@ -645,7 +640,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     // Permute 1st dimension back to to 3rd dimension
     cudaMalloc(&temp, Nx * Ny * Nz * Ncoils * L * sizeof(cuFloatComplex));
-    PermuteKernelFirstToThird<<<gridSize, blockSize>>>(d_im_SEs, temp, Nx, Ny, Nz, Ncoils, L);
+    PermuteKernelFirstToThird<<<gridSize, blockSize>>>(d_im_SEs, temp, Ny, Nx, Nz, Ncoils, L);
 
     cudaFree(d_im_SEs);
     d_im_SEs = temp; //Assign image to permuted memoiry
@@ -656,15 +651,12 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
 
 
-
-
     // ========= coil_combination ========/
     cudaMalloc(&d_im, Nx * Ny * Nz * L * sizeof(cuFloatComplex));// Reallocate device single-coil image data mem
-    SEs_times_Im_adj<<<gridSize, blockSize>>>(d_im, d_SEs, d_im_SEs, Nx, Ny, Nz, Ncoils, L);
+    SEs_times_Im_adj<<<gridSize, blockSize>>>(d_im, d_SEs, d_im_SEs, Ny, Nx, Nz, Ncoils, L);
 
 
 
-    
     // ========= Post-operation clean-up========/
     //clear out device memories
     cudaFree(d_SEs);
