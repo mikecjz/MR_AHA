@@ -669,6 +669,13 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaFree(d_im);
    // cudaFree(d_im_SEs);
 
+    // Normalize the result
+    float scalar = (float)Ny * (float)Nx * (float)Nz;  
+    for (mwIndex n = 0;n < Ny*Nx*Nz*L; n++)
+    {
+        AhAx[n].real = AhAx[n].real / scalar;
+        AhAx[n].imag = AhAx[n].imag / scalar;
+    }
 
     // Create matlab output
     mwSize out_dimensions[1] = {(size_t)Nx * (size_t)Ny * (size_t)Nz  * L};
