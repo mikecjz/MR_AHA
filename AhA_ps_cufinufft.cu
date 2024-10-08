@@ -605,7 +605,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     //cudaMemset(temp, 0, Ntrajs * Nx * Nz * Ncoils * L * sizeof(cuFloatComplex));
 
     dim3 blockSizeBlkdiag(16, 16, 1);
-    dim3 gridSizeBlkdiag((Ntrajs + 15) / 16, (Nx + 15) / 16, Nz);
+    dim3 gridSizeBlkdiag((Ntrajs + 15) / 16, (Nkx + 15) / 16, Nz);
     KspaceUpdate<<<gridSizeBlkdiag, blockSizeBlkdiag>>>(d_k, d_Phi2, temp, Ntrajs, Nkx, Nz, Ncoils, L);
     cudaDeviceSynchronize();
 
