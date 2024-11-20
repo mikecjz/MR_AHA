@@ -64,3 +64,8 @@ To launch debug session:
 2. Change `program` in [launch.json](/.vscode/launch.json) to the matlab executable file in your server. 
 3. Make sure `environment` for `LD_LIBRARY_PATH` in [launch.json](/.vscode/launch.json) is set to the specification described above.
 4. Set breakpoints in [AhA_ps_cufinufft.cu](/AhA_ps_cufinufft.cu) and launch directly in VS Code.
+
+## Useful troubleshooting commands
+```bash
+nm -D /home/jc_350/Toolboxes/finufft/build/libcufinufft.so | grep cufinufft2d1_exec
+```

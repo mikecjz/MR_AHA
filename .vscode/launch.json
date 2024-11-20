@@ -8,7 +8,7 @@
             "name": "(gdb) Launch",
             "type": "cppdbg",
             "request": "launch",
-            "preLaunchTask": "set_cuda_visible_devices", 
+            "preLaunchTask": "", 
             "program": "/mnt/gpussd1/jc_350/matlab/matlab2023b/bin/glnxa64/MATLAB",
             "args": ["-r", "cu_finufft_test"],
             "stopAtEntry": false,
@@ -20,7 +20,7 @@
                 },
                 {
                     "name":"CUDA_VISIBLE_DEVICES",
-                    "value":"4"
+                    "value":"0"
                 }
             ],
             "externalConsole": false,
