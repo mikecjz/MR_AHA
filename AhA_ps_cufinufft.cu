@@ -558,11 +558,13 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
 
     const int imageSize = Nx * Ny * Nz * L;
     int dimsThird2First[4] = {Nx, Ny, Nz, L};
-    int permThird2First[4] = {2, 0, 1, 3};
+    int permThird2First[4] = {2, 1, 0, 3};
 
     cuFloatComplex *temp;
     cudaMalloc(&temp, imageSize * sizeof(cuFloatComplex));
     permute4D(d_im_SE, temp, dimsThird2First, permThird2First);
+    //PermuteKernelThirdToFirst<<<gridSize, blockSize>>>(d_im_SE, temp, Nx, Ny, Nz, 1, L);
+
     cudaFree(d_im_SE);
     d_im_SE = temp; //Assign image to permuted memoiry
     temp = nullptr; //Prevent accidental use of temp
@@ -575,10 +577,11 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     cufftExecC2C(fft_plan, d_im_SE, d_im_SE, CUFFT_FORWARD);
 
     // Permute 1st dimension back to to 3rd dimension
-    cudaMalloc(&temp, Nx * Ny * Nz * 1 * L * sizeof(cuFloatComplex));
-    int dimsFirst2Third[4] = {Nz, Nx, Ny, L};
-    int permFirst2Third[4] = {2, 0, 1, 3};
+    cudaMalloc(&temp, imageSize * sizeof(cuFloatComplex));
+    int dimsFirst2Third[4] = {Nz, Ny, Nx, L};
+    int permFirst2Third[4] = {2, 1, 0, 3};
     permute4D(d_im_SE, temp, dimsFirst2Third, permFirst2Third);
+    //PermuteKernelFirstToThird<<<gridSize, blockSize>>>(d_im_SE, temp, Nx, Ny, Nz, 1, L);
     cudaDeviceSynchronize();
 
     cudaFree(d_im_SE);
@@ -617,6 +620,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     // Permute 3rd dimension to first dimension
     cudaMalloc(&temp, imageSize * sizeof(cuFloatComplex));
     permute4D(d_im_SE, temp, dimsThird2First, permThird2First);
+    //PermuteKernelThirdToFirst<<<gridSize, blockSize>>>(d_im_SE, temp, Nx, Ny, Nz, 1, L);
     cudaDeviceSynchronize();
 
     cudaFree(d_im_SE);
@@ -633,6 +637,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     // Permute 1st dimension back to to 3rd dimension
     cudaMalloc(&temp, imageSize * sizeof(cuFloatComplex));
     permute4D(d_im_SE, temp, dimsFirst2Third, permFirst2Third);
+    //PermuteKernelFirstToThird<<<gridSize, blockSize>>>(d_im_SE, temp, Nx, Ny, Nz, 1, L);
     cudaDeviceSynchronize();
 
     cudaFree(d_im_SE);
