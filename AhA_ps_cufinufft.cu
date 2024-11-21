@@ -20,6 +20,22 @@
 #include <time.h>
 #include <string.h>
 
+typedef struct {
+  int Nx; // Number of first image dimension
+  int Ny; // Number of second image dimension
+  int Nz; // Number of thrid image dimension
+  int L;  // rank
+  int Ncoils; // Number of coils
+  int Ntrajs; // Number of unique radial spokes
+  int Nkx; // Number of k-space samples per spoke
+  int M; // Total number of non-uniform samples in one plane
+  int Ntrans; // Number of stacked transformations
+} dataParamsStruct;
+
+__constant__ dataParamsStruct d_dataParams;
+
+
+
 /**
  * @brief Multiplies image data by sensitivity encoding maps element-wise.
  *
@@ -44,8 +60,15 @@
  *       of the image (Nx, Ny, Nz).
  */
 __global__ void SEs_times_Im( cuFloatComplex *d_im,  cuFloatComplex *d_SEs,
-                             cuFloatComplex *d_im_SEs, int Nx, int Ny, int Nz, int Ncoils, int L)
+                             cuFloatComplex *d_im_SEs, int Ncoils)
 {
+
+    // Assign data parameters from constant memory
+    int Nx = d_dataParams.Nx;
+    int Ny = d_dataParams.Ny;
+    int Nz = d_dataParams.Nz;
+    int L = d_dataParams.L;
+
     // Calculate global thread coordinates
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -99,8 +122,14 @@ __global__ void SEs_times_Im( cuFloatComplex *d_im,  cuFloatComplex *d_SEs,
  *       of the image (Nx, Ny, Nz).
  */
 __global__ void SEs_times_Im_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SEs,
-                             cuFloatComplex *d_im_SEs, int Nx, int Ny, int Nz, int Ncoils, int L)
+                             cuFloatComplex *d_im_SEs, int Ncoils)
 {
+    // Assign data parameters from constant memory
+    int Nx = d_dataParams.Nx;
+    int Ny = d_dataParams.Ny;
+    int Nz = d_dataParams.Nz;
+    int L = d_dataParams.L;
+
     // Calculate global thread coordinates
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -135,7 +164,7 @@ __global__ void SEs_times_Im_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SEs,
 }
 
 /**
- * @brief CUDA kernel to permute the third dimension to the first dimensnion of a 5D multidimensional 
+ * @brief (DEPRECATED, TO BE REMOVED) CUDA kernel to permute the third dimension to the first dimensnion of a 5D multidimensional 
  * complex data arrays in GPU memory.
  * 
  * This kernel rearranges the dimensions of the input data, specifically targeting
@@ -191,7 +220,7 @@ __global__ void PermuteKernelThirdToFirst(cuFloatComplex *input, cuFloatComplex 
 }
 
 /**
- * @brief CUDA kernel to permute the first dimension back to the thrid dimensnion of a 5D multidimensional 
+ * @brief (DEPRECATED, TO BE REMOVED) CUDA kernel to permute the first dimension back to the thrid dimensnion of a 5D multidimensional 
  * complex data arrays in GPU memory.
  * 
  * This kernel rearranges the dimensions of the input data, specifically targeting
@@ -248,7 +277,7 @@ __global__ void PermuteKernelFirstToThird(cuFloatComplex *input, cuFloatComplex 
 }
 
 /**
- * @brief Executes a 2D Type-2 NUFFT (Non-Uniform Fast Fourier Transform) operation using cuFINUFFT.
+ * @brief (DEPRECATED, TO BE REMOVED) Executes a 2D Type-2 NUFFT (Non-Uniform Fast Fourier Transform) operation using cuFINUFFT.
  * 
  * This function sets up and executes a 2D Type-2 NUFFT operation, transforming uniformly
  * sampled spatial data into non-uniformly sampled frequency (kspace) data. It involves creating a plan,
@@ -299,7 +328,7 @@ void cufinufftf2d2(cuFloatComplex *d_im_SEs, cuFloatComplex * d_k, float* d_x, f
 }
 
 /**
- * @brief Executes a 2D Type-1 NUFFT (Non-Uniform Fast Fourier Transform) operation using cuFINUFFT.
+ * @brief (DEPRECATED, TO BE REMOVED)Executes a 2D Type-1 NUFFT (Non-Uniform Fast Fourier Transform) operation using cuFINUFFT.
  * 
  * This function sets up and executes a 2D Type-1 NUFFT operation, transforming non-uniformly
  * sampled frequency (kspace) data into uniformly sampled image data. It involves creating a plan,
@@ -352,7 +381,7 @@ void cufinufftf2d1(cuFloatComplex *d_im_SEs, cuFloatComplex * d_k, float* d_x, f
 
 
 /**
- * @brief Updates each k-space [1 x L] line with its corresponding (Φ * ΦH) [L x L]. Overall, this amounts to a block-diagnal matrix 
+ * @brief (DEPRECATED, TO BE REMOVED) Updates each k-space [1 x L] line with its corresponding (Φ * ΦH) [L x L]. Overall, this amounts to a block-diagnal matrix 
  * multiplication.
  * 
  * 
@@ -450,9 +479,14 @@ __global__ void kspaceUpdate(cuFloatComplex *d_k, cuFloatComplex *d_Phi2,
  * d_Phi2 [Ntraj, Nz, L,       L]
  *                    ^innerL  ^l
  */
-__global__ void kspaceUpdateNew(cuFloatComplex *d_k, cuFloatComplex *d_Phi2,
-                            size_t Ntrajs, size_t Nkx, size_t Nz, size_t L)
+__global__ void kspaceUpdateNew(cuFloatComplex *d_k, cuFloatComplex *d_Phi2)
 {
+    //Assign data parameters from constant memory
+    int Ntrajs = d_dataParams.Ntrajs;
+    int Nkx = d_dataParams.Nkx;
+    int Nz = d_dataParams.Nz;
+    int L = d_dataParams.L;
+
     // Calculate global thread coordinates, blocks will be launched in 1D grid
     int global_thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -543,7 +577,7 @@ __global__ void permute4DCUDAKernel(cuFloatComplex* input, cuFloatComplex* outpu
 
 
 /**
- * @brief Host function to handle 4D permutation setup and execution
+ * @brief Host function to handle 4D permutation setup and execution of arbitrary permutation order.
  * 
  * This function handles the allocation of device memory, copying of permutation parameters,
  * kernel execution, and cleanup for 4D array permutation operations.
@@ -589,6 +623,24 @@ void permute4D(cuFloatComplex** d_input, const int* dims, const int* perm) {
     return;
 }
 
+
+/**
+ * @brief CUDA kernel that performs element-wise addition of two complex arrays.
+ *
+ * This kernel adds corresponding elements from array b into array a, storing the result in array a.
+ * AKA  a = a + b
+ * The operation is performed in-place on array a. The kernel uses CUDA's complex arithmetic functions
+ * to handle complex number addition.
+ *
+ * @param[in,out] a Pointer to the first complex array, which will also store the result
+ * @param[in] b Pointer to the second complex array to be added
+ * @param[in] arraySize The total number of elements in each array
+ *
+ * @note The kernel assumes both input arrays have the same size and are properly allocated in GPU memory.
+ *       The arrays should contain complex numbers in CUDA's cuFloatComplex format.
+ *
+ * @see cuCaddf
+ */
 __global__ void addArrays(cuFloatComplex *a, cuFloatComplex *b, int arraySize)
 {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -597,73 +649,123 @@ __global__ void addArrays(cuFloatComplex *a, cuFloatComplex *b, int arraySize)
     }
 }
 
+/**
+ * @brief Performs the AhA operation for MR-Multitasking subspace reconstruction with stack-of-stars trajectory
+ * 
+ * This function implements the core AhA operation for a single coil, which consists of:
+ * 1. Multiplying input image with sensitivity map (SEs * im)
+ * 2. Forward FFT in Z dimension 
+ * 3. Type 1 NUFFT to transform from uniform to non-uniform k-space
+ * 4. Block-diagonal k-space update with Phi2
+ * 5. Type 2 NUFFT to transform back to uniform space
+ * 6. Inverse FFT in Z dimension
+ * 7. Conjugate multiplication with sensitivity map
+ *
+ * @param[in] d_im Input image on GPU device memory [Nx, Ny, Nz, L]
+ * @param[in] d_SE Single coil sensitivity map on GPU [Nx, Ny, Nz]
+ * @param[in] d_Phi2 Block-diagonal update matrix on GPU [Ntrajs, Nz, L, L]
+ * @param[in] d_k Temporary k-space storage on GPU [M, Ntrans]
+ * @param[out] d_im_out Output image on GPU [Nx, Ny, Nz, L]
+ * @param[in] cufft_plan cuFFT plan for Z dimension transforms
+ * @param[in] cufinufft_type1_plan Plan for Type 1 NUFFT (uniform to non-uniform)
+ * @param[in] cufinufft_type2_plan Plan for Type 2 NUFFT (non-uniform to uniform)
+ * @param[in] dataParams Struct containing data dimensions and parameters
+ *
+ * @note All arrays are assumed to be in column-major order and complexsingle precision
+ * @note The function uses constant memory for data parameters via d_dataParams
+ */
+
 void AhA_by_coil(cuFloatComplex *d_im,//input image
                 cuFloatComplex *d_SE, //single coil map
                 cuFloatComplex *d_Phi2, //(Φ * ΦH)
                 cuFloatComplex *d_k, //kspace
                 cuFloatComplex *d_im_out, //output image
-                float *d_x,
-                float *d_y,
-                size_t Ntrajs, 
-                size_t Nkx,
-                size_t M,
-                size_t Nx, 
-                size_t Ny,
-                size_t Nz, 
-                size_t L)
+                cufftHandle cufft_plan,
+                cufinufftf_plan cufinufft_type1_plan,
+                cufinufftf_plan cufinufft_type2_plan,
+                dataParamsStruct dataParams)
 {
     // ==========Broadcast SE to image input on GPU. (SEs * im)========== //
 
-    clock_t start;
-    clock_t end;
+    clock_t start, AhA_start;
+    clock_t end, AhA_end;
     double time_spent;
+
+    bool verbose = false; //set to true to print execution times
+
+    AhA_start = clock();
+
+    // Assign data parameters from dataParams struct
+    int Nx = dataParams.Nx;
+    int Ny = dataParams.Ny;
+    int Nz = dataParams.Nz;
+    int L = dataParams.L;
+    int Ntrajs = dataParams.Ntrajs;
+    int Nkx = dataParams.Nkx;
+    int M = dataParams.M;
+    int Ntrans = dataParams.Ntrans;
+
+    const int imageSize = Nx * Ny * Nz * L;
 
     // Intialze Blocks and Grids and Perform Broadcasting
     dim3 blockSize(16, 16, 1);
     dim3 gridSize((Nx + 15) / 16, (Ny + 15) / 16, Nz);
 
     cuFloatComplex *d_im_SE;
-    cudaMalloc(&d_im_SE, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
+    cudaMalloc(&d_im_SE, imageSize * sizeof(cuFloatComplex));
 
-    SEs_times_Im<<<gridSize, blockSize>>>(d_im, d_SE, d_im_SE, Nx, Ny, Nz, 1, L);
+    start = clock();
+    SEs_times_Im<<<gridSize, blockSize>>>(d_im, d_SE, d_im_SE, 1);
     cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("SEs_times_Im execution time: %f seconds\n", time_spent);
 
     // ========== Forward cuFFT in the 3rd (Z) dimension ========== /
 
     // Permute 3rd dimension to first dimension
 
-    const int imageSize = Nx * Ny * Nz * L;
+    
     int dimsThird2First[4] = {Nx, Ny, Nz, L};
     int permThird2First[4] = {2, 1, 0, 3};
-
     
+    start = clock();
     permute4D(&d_im_SE, dimsThird2First, permThird2First);
+    cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("permute4D execution time: %f seconds\n", time_spent);
     //PermuteKernelThirdToFirst<<<gridSize, blockSize>>>(d_im_SE, temp, Nx, Ny, Nz, 1, L);
 
-    //Make 1D cuFFT Plan
-    cufftHandle fft_plan; //Decalre plan object
-    cufftPlan1d(&fft_plan, Nz, CUFFT_C2C, Nx * Ny * L);
-
-    //Execute
-    cufftExecC2C(fft_plan, d_im_SE, d_im_SE, CUFFT_FORWARD);
+    //Execute forward cuFFT
+    start = clock();
+    cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_FORWARD);
+    cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
 
     // Permute 1st dimension back to to 3rd dimension
     int dimsFirst2Third[4] = {Nz, Ny, Nx, L};
     int permFirst2Third[4] = {2, 1, 0, 3};
+    start = clock();
     permute4D(&d_im_SE, dimsFirst2Third, permFirst2Third);
+    cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("permute4D execution time: %f seconds\n", time_spent);
     //PermuteKernelFirstToThird<<<gridSize, blockSize>>>(d_im_SE, temp, Nx, Ny, Nz, 1, L);
 
 
-    //Destroy cuFFT Plan
-    cufftDestroy(fft_plan);
-
     // ========== FINUFFT Type 2, U -> NU========== /
-    int64_t modes[2] = {Nx, Ny};
-
-    int Ntrans = Nz * L; //Number of stacked transforms for each coil
 
     //Do Type 2 transform
-    cufinufftf2d2(d_im_SE, d_k, d_x, d_y, modes, M, Ntrans);
+    start = clock();
+    cufinufftf_execute(cufinufft_type2_plan, d_k, d_im_SE);
+    cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("type2 cufinufftf_execute execution time: %f seconds\n", time_spent);
 
     //values in d_im_SE no longer used, clear
     cudaFree(d_im_SE);
@@ -674,54 +776,83 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     //Permute d_k from [Ntrajs, Nkx, Nz, L] to [Ntraj, Nz, Nkx, L] (second to third dimension)
     int dimsSecond2Third[4] = {Ntrajs, Nkx, Nz, L};
     int permSecond2Third[4] = {0, 2, 1, 3};
+    start = clock();
     permute4D(&d_k, dimsSecond2Third, permSecond2Third);
+    cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("permute4D execution time: %f seconds\n", time_spent);
 
 
     const int blockSizeBlkdiag = 256;
     const int gridSizeBlkdiag = (Ntrajs + 255) / 256;
     start = clock();
-    kspaceUpdateNew<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_k, d_Phi2, Ntrajs, Nkx, Nz, L);
+    kspaceUpdateNew<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_k, d_Phi2);
     cudaDeviceSynchronize();
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    mexPrintf("kspaceUpdateNew execution time: %f seconds\n", time_spent);
+    if (verbose) mexPrintf("kspaceUpdateNew execution time: %f seconds\n", time_spent);
 
     //permute d_k back to [Ntrajs, Nkx, Nz, L] (third to second dimension)
     int dimsThird2Second[4] = {Ntrajs, Nz, Nkx, L};
     int permThird2Second[4] = {0, 2, 1, 3};
+    start = clock();
     permute4D(&d_k, dimsThird2Second, permThird2Second);
+    cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("permute4D execution time: %f seconds\n", time_spent);
 
     // ========= FINUFFT Type 1, NU -> U ========/
-    cudaMalloc(&d_im_SE, imageSize * sizeof(cuFloatComplex));// Reallocate device multi-coil image data mem
-    cufinufftf2d1(d_im_SE, d_k, d_x, d_y, modes, M, Ntrans);
+    cudaMalloc(&d_im_SE, imageSize * sizeof(cuFloatComplex));// Reallocate device image data mem
+    start = clock();
+    cufinufftf_execute(cufinufft_type1_plan, d_k, d_im_SE);
+    cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("type1 cufinufftf_execute execution time: %f seconds\n", time_spent);
 
     // ========== Inverse cuFFT in the 3rd (Z) dimension ========== /
 
     // Permute 3rd dimension to first dimension
+    start = clock();
     permute4D(&d_im_SE, dimsThird2First, permThird2First);
+    cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("permute4D execution time: %f seconds\n", time_spent);
     //PermuteKernelThirdToFirst<<<gridSize, blockSize>>>(d_im_SE, temp, Nx, Ny, Nz, 1, L);
 
 
-    //Make 1D cuFFT Plan
-    cufftHandle ifft_plan; //Decalre plan object
-    cufftPlan1d(&ifft_plan, Nz, CUFFT_C2C, Nx * Ny * L);
-
     //Execute
-    cufftExecC2C(ifft_plan, d_im_SE, d_im_SE, CUFFT_INVERSE);
+    start = clock();
+    cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_INVERSE);
+    cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
 
     // Permute 1st dimension back to to 3rd dimension
+    start = clock();
     permute4D(&d_im_SE, dimsFirst2Third, permFirst2Third);
+    cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("permute4D execution time: %f seconds\n", time_spent);
     //PermuteKernelFirstToThird<<<gridSize, blockSize>>>(d_im_SE, temp, Nx, Ny, Nz, 1, L);
 
-
-    //Destroy cuFFT Plan
-    cufftDestroy(ifft_plan);
-
     // ========= coil_combination ========/
-    SEs_times_Im_adj<<<gridSize, blockSize>>>(d_im_out, d_SE, d_im_SE, Nx, Ny, Nz, 1, L);
+    start = clock();
+    SEs_times_Im_adj<<<gridSize, blockSize>>>(d_im_out, d_SE, d_im_SE, 1);
     cudaDeviceSynchronize();    
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("SEs_times_Im_adj execution time: %f seconds\n", time_spent);
 
     cudaFree(d_im_SE);
+    AhA_end = clock();
+    time_spent = (double)(AhA_end - AhA_start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("AhA_by_coil execution time: %f seconds\n", time_spent);
 }
 
 
@@ -768,8 +899,9 @@ void mexFunction(int nlhs, mxArray *plhs[],
     int64_t L;          // rank
     int64_t Nkx;        // length of one k-space line // LeeHL
     size_t M;           // number of NU points
-    size_t Ntrans;      // Number of stacked transforms
+    size_t Ntrans;      // Number of stacked transforms !!!!for each coil!!!!
     size_t Ntrajs;      // Number of in-plane tranjectories. e.g. 280
+    dataParamsStruct dataParams;
     //int GPUDeviceIndex; // Which GPU to use
 
     char const *const errId = "parallel:gpu:mexGPUExample:InvalidInput";
@@ -830,61 +962,93 @@ void mexFunction(int nlhs, mxArray *plhs[],
     // Get k-space size from Phi2 and st    // LeeHL
     Ntrajs = (size_t)phi2Dims[2];
     Nkx = (int64_t) (M/Ntrajs);
+    Ntrans = Nz * L; //Number of stacked transforms for each coil
+
+    // Assign data parameters to struct
+    dataParams.Nx = Nx;
+    dataParams.Ny = Ny;
+    dataParams.Nz = Nz;
+    dataParams.L = L;
+    dataParams.Ncoils = Ncoils;
+    dataParams.Ntrajs = Ntrajs;
+    dataParams.Nkx = Nkx;
+    dataParams.M = M;
+    dataParams.Ntrans = Ntrans;
 
     // ==========Initialize the MathWorks GPU API. ========== //
     mxInitGPU();
+
+    // Assign data parameters to device constant memory
+    cudaMemcpyToSymbol(d_dataParams, &dataParams, sizeof(dataParamsStruct));
 
     
     cuFloatComplex *d_im, *d_SEs; // input image and SEs on device
     cuFloatComplex *d_im_out;    // output image from AhA_by_coil on devices
     cuFloatComplex *d_AhAx;     // output image from AhA from all coils on device
 
+    float *d_x, *d_y;               // NU points on device
+    cuFloatComplex *d_k, *d_Phi2;   // k-space and Phi2 on device
+
     // Allocate device memories
+
+    //images related
     cudaMalloc(&d_im, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
     cudaMalloc(&d_SEs, Nx * Ny * Nz * Ncoils * sizeof(cuFloatComplex));
     cudaMalloc(&d_im_out, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
     cudaMalloc(&d_AhAx, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
 
-    //Set d_AhAx to 0
-    cudaMemset(d_AhAx, 0, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
-
-    // Copy data to device
-    cudaMemcpy(d_im, im, Nx * Ny * Nz * L * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_SEs, SEs, Nx * Ny * Nz * Ncoils * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
-
-    //Declare device variables
-    float *d_x, *d_y;
-    cuFloatComplex *d_k, *d_Phi2;
-
-    Ntrans = Nz * L;
-
-     // Allocate device memories
+    //k-space related
     cudaMalloc(&d_x, M * sizeof(float));
     cudaMalloc(&d_y, M * sizeof(float));
     cudaMalloc(&d_k, M * Ntrans * sizeof(cuFloatComplex));
     cudaMalloc(&d_Phi2, Ntrajs * Nz * L * L * sizeof(cuFloatComplex));
 
-    // Copy values to device
+
+    //Set d_AhAx to 0
+    cudaMemset(d_AhAx, 0, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
+
+    // Copy data to device
+    //images related
+    cudaMemcpy(d_im, im, Nx * Ny * Nz * L * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_SEs, SEs, Nx * Ny * Nz * Ncoils * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
+
+    //kspace related
     cudaMemcpy(d_x, x, M * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_y, y, M * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_Phi2, Phi2, Ntrajs * Nz * L * L * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
 
-    //Permute d_Phi2 from [L, L, Ntrajs, Nz] to [Ntrajs, Nz, L, L] 
+    //Permute d_Phi2 from [L, L, Ntrajs, Nz] to [Ntrajs, Nz, L, L], the latter is used down the line
     int dimsPhi2Original[4] = {L, L, Ntrajs, Nz};
     int permPhi2[4] = {2, 3, 0, 1};
     permute4D(&d_Phi2, dimsPhi2Original, permPhi2);
 
-    cuFloatComplex *d_SE;
+    cuFloatComplex *d_SE; //Pointer to current coil map's starting address (SINGLE COIL)
+
+    //make cuFFT and cufinufft plans
+    cufftHandle cufft_plan;
+    cufftPlan1d(&cufft_plan, Nz, CUFFT_C2C, Nx * Ny * L);
+
+    cufinufft_opts opts;
+    cufinufft_default_opts(&opts);
+    int64_t modes[2] = {Nx, Ny};
+
+    cufinufftf_plan cufinufft_type1_plan;
+    cufinufftf_makeplan(1, 2, modes, 1, Ntrans, 1e-6, &cufinufft_type1_plan, &opts);// make type 1 plan, deafault options
+    cufinufftf_setpts(cufinufft_type1_plan, M, d_x, d_y, NULL, 0, NULL, NULL, NULL);
+
+    cufinufftf_plan cufinufft_type2_plan;
+    cufinufftf_makeplan(2, 2, modes, -1, Ntrans, 1e-6, &cufinufft_type2_plan, &opts);// make type 2 plan, deafault options
+    cufinufftf_setpts(cufinufft_type2_plan, M, d_x, d_y, NULL, 0, NULL, NULL, NULL);
+
 
     //loop through each coil
     for (int coil = 0; coil < Ncoils; coil++)
     {
+        //Calculate pointer to current coil map's starting address
         d_SE = d_SEs + coil * Nx * Ny * Nz;
-        start = clock();
-        AhA_by_coil(d_im, d_SE, d_Phi2, d_k, d_im_out, d_x, d_y, Ntrajs, Nkx, M, Nx, Ny, Nz, L);
-        end = clock();
-        time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-        mexPrintf("AhA_by_coil execution time: %f seconds\n", time_spent);
+
+        
+        AhA_by_coil(d_im, d_SE, d_Phi2, d_k, d_im_out, cufft_plan, cufinufft_type1_plan, cufinufft_type2_plan, dataParams);
 
         //Add the output from each coil to d_AhAx
         dim3 blockSize(256);
@@ -898,7 +1062,6 @@ void mexFunction(int nlhs, mxArray *plhs[],
     
     // ========= Post-operation clean-up========/
     
-
     // Copy results to host
     mxComplexSingle *AhAx = (mxComplexSingle *)mxMalloc(Ny * Nx * Nz  * L * sizeof(mxComplexSingle));
     cudaMemcpy(AhAx, d_AhAx, Ny * Nx * Nz  * L * sizeof(mxComplexSingle), cudaMemcpyDeviceToHost);
@@ -914,6 +1077,11 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaFree(d_y);
     cudaFree(d_k);
     cudaFree(d_Phi2);
+
+    //destroy cufft and cufinufft plans
+    cufftDestroy(cufft_plan);
+    cufinufftf_destroy(cufinufft_type1_plan);
+    cufinufftf_destroy(cufinufft_type2_plan);
 
 
     // Create matlab output
@@ -932,3 +1100,4 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     return;
 }
+
