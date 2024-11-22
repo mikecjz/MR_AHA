@@ -785,7 +785,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
 
 
     const int blockSizeBlkdiag = 256;
-    const int gridSizeBlkdiag = (Ntrajs + 255) / 256;
+    const int gridSizeBlkdiag = (Ntrajs * Nz * Nkx + 255) / 256;
     start = clock();
     kspaceUpdateNew<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_k, d_Phi2);
     cudaDeviceSynchronize();
