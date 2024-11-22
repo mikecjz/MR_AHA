@@ -32,7 +32,7 @@ Phi2Cartesian = cufinufftfspread2d1(single(st.om(:,1)), single(st.om(:,2)), Phi2
 
 %%
 tic;
-AhAx = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2);
+AhAx = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2Cartesian);
 AhAx = reshape(AhAx, st.Nd(1), st.Nd(2), st.Nz, []);
 toc;
 

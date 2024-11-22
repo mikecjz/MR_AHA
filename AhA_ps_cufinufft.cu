@@ -323,7 +323,7 @@ __global__ void kspaceUpdateNew(cuFloatComplex *d_k, cuFloatComplex *d_Phi2)
  * d_Phi2 [2*Nx, 2*Ny, Nz, L,       L] (after explansion from lower triangle)
  *                         ^innerL  ^l
  */
-__global__ void kspaceUpdateToeplitzHermitian(cuFloatComplex *d_k, cuFloatComplex *d_Phi2)
+__global__ void kspaceUpdateToeplitzHermitian(cuFloatComplex *d_k, const cuFloatComplex *d_Phi2Cartesian)
 {
     //Assign data parameters from constant memory
     int Nx_hat = d_dataParams.Nx * 2; //padded size
@@ -369,14 +369,14 @@ __global__ void kspaceUpdateToeplitzHermitian(cuFloatComplex *d_k, cuFloatComple
                 {
                     matrix_linear_index = (2 * L -l + 1)*l/2 + innerL - l;
                     Phi2_index = x_hat + Nx_hat * (y_hat + Ny_hat * (z + Nz * matrix_linear_index));
-                    tempValue = cuCaddf(tempValue, cuCmulf(sharedInput[innerL], d_Phi2[Phi2_index]));
+                    tempValue = cuCaddf(tempValue, cuCmulf(sharedInput[innerL], d_Phi2Cartesian[Phi2_index]));
                     
                 }
                 else //upper triangle
                 {
                     matrix_linear_index = (2 * L -innerL + 1)*innerL/2 + l - innerL;
                     Phi2_index = x_hat + Nx_hat * (y_hat + Ny_hat * (z + Nz * matrix_linear_index));
-                    tempValue = cuCaddf(tempValue, cuCmulf(sharedInput[innerL], cuConjf(d_Phi2[Phi2_index])));
+                    tempValue = cuCaddf(tempValue, cuCmulf(sharedInput[innerL], cuConjf(d_Phi2Cartesian[Phi2_index])));
                 }
                 
             }
@@ -535,7 +535,7 @@ __global__ void addArrays(cuFloatComplex *a, cuFloatComplex *b, int arraySize)
 
 void AhA_by_coil(cuFloatComplex *d_im,//input image
                 cuFloatComplex *d_SE, //single coil map
-                cuFloatComplex *d_Phi2, //(Φ * ΦH)
+                const cuFloatComplex *d_Phi2Cartesian, //(Φ * ΦH)
                 cuFloatComplex *d_im_out, //output image
                 cufftHandle cufft_plan,
                 cufinufftf_plan cufinufft_type1_plan,
@@ -599,7 +599,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     const int gridSizeBlkdiag = (4*imageSize + 255) / 256;
     start = clock();
     //d_im_SE is in kspace due to precious cuFFT.
-    kspaceUpdateToeplitzHermitian<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_im_SE, d_Phi2);
+    kspaceUpdateToeplitzHermitian<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_im_SE, d_Phi2Cartesian);
     cudaDeviceSynchronize();
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
@@ -686,7 +686,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     float *y;              // om(2)
     mxComplexSingle *im;   // Pointer to complex image-domain data (x), on host [Nx, Ny, Nz, L]
     mxComplexSingle *SEs;  // Pointer to complex Complex sensitivity maps (SEs), on host [Nx, Ny, Nz, Ncoils]
-    mxComplexSingle *Phi2; // Pointer to complex Phi2 data (Phi2, aka, Om), on host [L, L, Ntrajs, Nz]
+    const mxGPUArray *Phi2Cartesian;       // Pointer to complex Phi2 data (Phi2, aka, Om), on host [2*Nx, 2*Ny, Nz, num_lower_coordinates]
     int isSign = 1;        // Whether to use + sign in complex exponential. Default to true
     float eps = 1e-6;      // NUFFT precision, default 1e-6;
     int64_t Nx;
@@ -714,7 +714,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     }
 
     // Check input type
-    if (!mxIsSingle(prhs[0]) || !mxIsSingle(mxGetField(prhs[1], 0, "om")) || !mxIsSingle(prhs[2])|| !mxIsSingle(prhs[3]))
+    if (!mxIsSingle(prhs[0]) || !mxIsSingle(mxGetField(prhs[1], 0, "om")) || !mxIsSingle(prhs[2]))
     {
         snprintf(errorMessage, sizeof(errorMessage), "Inputs original image (x), NU trajectories (st.om), Sensitivity maps (SEs) and Phi2 must be single. \n%s", instruction);
         mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
@@ -754,7 +754,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     // Input 4: Phi2 (aka, Om)
     const mwSize *phi2Dims = mxGetDimensions(prhs[3]);
     L = (int64_t)phi2Dims[0];
-    Phi2 = mxGetComplexSingles(prhs[3]);
+    //Phi2 will be handled after MathWorks GPU API initialization
 
     // Get k-space size from Phi2 and st    // LeeHL
     Ntrajs = (size_t)phi2Dims[2];
@@ -775,6 +775,16 @@ void mexFunction(int nlhs, mxArray *plhs[],
     // ==========Initialize the MathWorks GPU API. ========== //
     mxInitGPU();
 
+    // Handle Phi2 after MathWorks GPU API initialization
+    Phi2Cartesian = mxGPUCreateFromMxArray(prhs[3]);
+
+    // Create output gpuArray
+    mwSize out_dimensions[3] = {(size_t)Nx * 2, (size_t)Ny * 2, Ntrans};
+    const mwSize * ndims = out_dimensions;
+    mxGPUArray *AhAx;
+    mwSize dims[3] = {(size_t)Nx * 2, (size_t)Ny * 2, Ntrans};
+    AhAx = mxGPUCreateGPUArray(3, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_DO_NOT_INITIALIZE);
+
     // Assign data parameters to device constant memory
     cudaMemcpyToSymbol(d_dataParams, &dataParams, sizeof(dataParamsStruct));
 
@@ -784,7 +794,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cuFloatComplex *d_AhAx;     // output image from AhA from all coils on device
 
     float *d_x, *d_y;               // NU points on device
-    cuFloatComplex *d_Phi2;   // k-space and Phi2 on device
+    const cuFloatComplex *d_Phi2Cartesian;   //Phi2 on device
 
     // Allocate device memories
 
@@ -797,26 +807,20 @@ void mexFunction(int nlhs, mxArray *plhs[],
     //k-space related
     cudaMalloc(&d_x, M * sizeof(float));
     cudaMalloc(&d_y, M * sizeof(float));
-    cudaMalloc(&d_Phi2, Ntrajs * Nz * L * L * sizeof(cuFloatComplex));
 
 
-    //Set d_AhAx to 0
-    cudaMemset(d_AhAx, 0, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
 
     // Copy data to device
     //images related
     cudaMemcpy(d_im, im, Nx * Ny * Nz * L * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
     cudaMemcpy(d_SEs, SEs, Nx * Ny * Nz * Ncoils * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
+    cudaMemset(d_AhAx, 0, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
 
     //kspace related
     cudaMemcpy(d_x, x, M * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_y, y, M * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_Phi2, Phi2, Ntrajs * Nz * L * L * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
+    d_Phi2Cartesian = (cuFloatComplex *)mxGPUGetDataReadOnly(Phi2Cartesian);
 
-    //Permute d_Phi2 from [L, L, Ntrajs, Nz] to [Ntrajs, Nz, L, L], the latter is used down the line
-    int dimsPhi2Original[4] = {L, L, Ntrajs, Nz};
-    int permPhi2[4] = {2, 3, 0, 1};
-    permute4D(&d_Phi2, dimsPhi2Original, permPhi2);
 
     cuFloatComplex *d_SE; //Pointer to current coil map's starting address (SINGLE COIL)
 
@@ -845,7 +849,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
         d_SE = d_SEs + coil * Nx * Ny * Nz;
 
         
-        AhA_by_coil(d_im, d_SE, d_Phi2, d_im_out, cufft_plan, cufinufft_type1_plan, cufinufft_type2_plan, dataParams);
+        AhA_by_coil(d_im, d_SE, d_Phi2Cartesian, d_im_out, cufft_plan, cufinufft_type1_plan, cufinufft_type2_plan, dataParams);
 
         //Add the output from each coil to d_AhAx
         dim3 blockSize(256);
@@ -856,11 +860,11 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     
     // ========= Post-operation clean-up========/
-    
-    // Copy results to host
-    mxComplexSingle *AhAx = (mxComplexSingle *)mxMalloc(Ny * Nx * Nz  * L * sizeof(mxComplexSingle));
-    cudaMemcpy(AhAx, d_AhAx, Ny * Nx * Nz  * L * sizeof(mxComplexSingle), cudaMemcpyDeviceToHost);
 
+    cuFloatComplex *d_AhAx_out = (cuFloatComplex *)mxGPUGetData(AhAx);
+    cudaMemcpy(d_AhAx_out, d_AhAx, Nx * Ny * Nz * L * sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
+    plhs[0] = mxGPUCreateMxArrayOnGPU(AhAx);
+    
 
     // Free device memories
     cudaFree(d_im);
@@ -870,14 +874,17 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     cudaFree(d_x);
     cudaFree(d_y);
-    cudaFree(d_Phi2);
 
     //destroy cufft and cufinufft plans
     cufftDestroy(cufft_plan);
     cufinufftf_destroy(cufinufft_type1_plan);
     cufinufftf_destroy(cufinufft_type2_plan);
 
+   
 
+
+    mxGPUDestroyGPUArray(AhAx);
+    mxGPUDestroyGPUArray(Phi2Cartesian);
 
     // Free host allocated memory
     free(x);
