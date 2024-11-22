@@ -6,7 +6,8 @@
                 "${workspaceFolder}/**",
                 "/mnt/gpussd1/jc_350/matlab/matlab2023b/extern/include",
                 "/mnt/gpussd1/jc_350/matlab/matlab2023b/toolbox/parallel/gpu/extern/include",
-                "/home/jc_350/Toolboxes/finufft/include"
+                "/home/jc_350/Toolboxes/finufft/include",
+                "/home/jc_350/Toolboxes/finufft/src"
             ],
             "defines": [],
             "cStandard": "c17",

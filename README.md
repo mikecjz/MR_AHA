@@ -65,6 +65,8 @@ To launch debug session:
 3. Make sure `environment` for `LD_LIBRARY_PATH` in [launch.json](/.vscode/launch.json) is set to the specification described above.
 4. Set breakpoints in [AhA_ps_cufinufft.cu](/AhA_ps_cufinufft.cu) and launch directly in VS Code.
 
+Use the [MATLAB GPU CUDA and MEX Programming Manual](https://www.mathworks.com/help/parallel-computing/gpu-cuda-and-mex-programming.html) as a reference for development.
+
 ## Useful troubleshooting commands
 ```bash
 nm -D <FINUFFT_DIR>/build/libcufinufft.so | grep cufinufft2d1_exec
