@@ -1,5 +1,6 @@
+%% Load test data
+
 load ./Data/AhAx_test_toeplitz.mat;
-Phi2 = single(Phi2);
 %% Spread Phi2
 L = size(Phi2,1);
 Ntrajs = size(Phi2,3);
@@ -31,10 +32,13 @@ Phi2Cartesian = cufinufftfspread2d1(single(st.om(:,1)), single(st.om(:,2)), Phi2
 
 
 %%
+for i = 1:2
 tic;
-AhAx = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2Cartesian);
-AhAx = reshape(AhAx, st.Nd(1), st.Nd(2), st.Nz, []);
+d_AhAx = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2Cartesian);
 toc;
+AhAx = gather(d_AhAx);
+
+end
 
 %%
 % U0 = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2);

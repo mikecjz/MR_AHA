@@ -36,65 +36,7 @@ __constant__ dataParamsStruct d_dataParams;
 
 
 
-/**
- * @brief Multiplies image data by sensitivity encoding maps element-wise.
- *
- * This CUDA kernel is designed to handle the multiplication of complex-valued 3D (plus rank) image data with
- * sensitivity encoding maps. The multiplication is broadcasted and performed element-wise and the 
- * results are stored in the output array d_im_SEs.
- *
- * @param d_im Pointer to the input device array containing the image data. The array is a flattened
- *             4D array with dimensions [Nx, Ny, Nz, L], where L is the number of image sets or time points.
- * @param d_SEs Pointer to the input device array containing the sensitivity encoding maps. The array
- *              is a flattened 4D array with dimensions [Nx, Ny, Nz, Ncoils, 1].
- * @param d_im_SEs Pointer to the output device array where the result of the multiplication is stored.
- *                 Dimensions [Nx, Ny, Nz, Ncoils, L].
- * @param Nx The size of the first dimension (width) of the image and sensitivity maps.
- * @param Ny The size of the second dimension (height) of the image and sensitivity maps.
- * @param Nz The size of the third dimension (depth) of the image and sensitivity maps.
- * @param Ncoils The number of coils, corresponding to the fourth dimension in `d_SEs` and `d_im_SEs`.
- * @param L The number of ranks.
- *
- * @note The kernel assumes that all input and output arrays are properly allocated and reside in GPU memory.
- *       It is designed to be executed on a CUDA-capable GPU with a grid size that covers the entire volume
- *       of the image (Nx, Ny, Nz).
- */
-__global__ void SEs_times_Im( cuFloatComplex *d_im,  cuFloatComplex *d_SEs,
-                             cuFloatComplex *d_im_SEs, int Ncoils)
-{
 
-    // Assign data parameters from constant memory
-    int Nx = d_dataParams.Nx;
-    int Ny = d_dataParams.Ny;
-    int Nz = d_dataParams.Nz;
-    int L = d_dataParams.L;
-
-    // Calculate global thread coordinates
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    int z = blockIdx.z * blockDim.z + threadIdx.z;
-
-    if (x < Nx && y < Ny && z < Nz)
-    {
-        for (int l = 0; l < L; l++)
-        {
-            for (int coil = 0; coil < Ncoils; coil++)
-            {
-                // Calculate the index for d_im (without coil dimension)
-                int im_index = ((l * Nz + z) * Ny + y) * Nx + x;
-
-                // Calculate the index for d_SEs(without rank dimension)
-                int ses_index = ((coil * Nz + z) * Ny + y) * Nx + x;
-
-                // Calculate the index for d_im_SEs
-                int im_ses_index = (((l * Ncoils + coil) * Nz + z) * Ny + y) * Nx + x;
-
-                // Perform the multiplication
-                d_im_SEs[im_ses_index] = cuCmulf(d_im[im_index], d_SEs[ses_index]);
-            }
-        }
-    }
-}
 
 /**
  * @brief Multiplies image data by sensitivity encoding maps element-wise.
@@ -157,33 +99,86 @@ __global__ void Im_SE_Pad_AddPhase( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
     }
 }
 
-
 /**
- * @brief Multiplies multi-coil image data by the complex conjugate of sensitivity encoding maps element-wise.
- * Then sum over the coil dimension.
+ * @brief Performs adjoint operation of sensitivity encoding by multiplying image data with conjugate of sensitivity maps.
  *
- * This CUDA kernel is designed to handle the multiplication of complex-valued 3D + coil + rank images data with
- * the conjugate of sensitivity encoding maps across multiple coils. The multiplication is broadcasted performed
- * element-wise. Then the coil dimension is summed and the results are stored in the output array d_im.
+ * This CUDA kernel performs the adjoint operation of sensitivity encoding by multiplying complex-valued 3D (plus rank) image data 
+ * with the complex conjugate of the sensitivity encoding map (single coil). The multiplication is performed element-wise and the
+ * results are stored in the output array. This is the adjoint/transpose operation of the forward sensitivity encoding.
  *
- * @param d_im Pointer to the output device array containing the image data. The array is a flattened
+ * @param[out] d_im Pointer to the output device array that will store the result. The array is a flattened
  *             4D array with dimensions [Nx, Ny, Nz, L], where L is the number of image sets or time points.
- * @param d_SEs Pointer to the input device array containing the sensitivity encoding maps. The array
- *              is a flattened 4D array with dimensions [Nx, Ny, Nz, Ncoils, 1].
- * @param d_im_SEs Pointer to the input device array where the result of the multiplication is stored.
- *                 Dimensions [Nx, Ny, Nz, Ncoils, L].
- * @param Nx The size of the first dimension (width) of the image and sensitivity maps.
- * @param Ny The size of the second dimension (height) of the image and sensitivity maps.
- * @param Nz The size of the third dimension (depth) of the image and sensitivity maps.
- * @param Ncoils The number of coils, corresponding to the fourth dimension in `d_SEs` and `d_im_SEs`.
- * @param L The number of ranks.
+ * @param[in] d_SE Pointer to the input device array containing the sensitivity encoding map (single coil). The array
+ *              is a flattened 3D array with dimensions [Nx, Ny, Nz].
+ * @param[in] d_im_SE Pointer to the input device array containing the sensitivity-encoded image data.
+ *                Dimensions [Nx, Ny, Nz, L].
  *
  * @note The kernel assumes that all input and output arrays are properly allocated and reside in GPU memory.
  *       It is designed to be executed on a CUDA-capable GPU with a grid size that covers the entire volume
  *       of the image (Nx, Ny, Nz).
  */
-__global__ void SEs_times_Im_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SEs,
-                             cuFloatComplex *d_im_SEs, int Ncoils)
+__global__ void Im_SE_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
+                             cuFloatComplex *d_im_SE)
+{
+
+    // Assign data parameters from constant memory
+    int Nx = d_dataParams.Nx;
+    int Ny = d_dataParams.Ny;
+    int Nz = d_dataParams.Nz;
+    int L = d_dataParams.L;
+
+    // Calculate global thread idx
+    int threadIdx_global = blockIdx.x * blockDim.x + threadIdx.x;
+
+    //Calculate local thread coordinates with column-major order
+    int x = threadIdx_global % Nx;
+    int y = (threadIdx_global / Nx) % Ny;
+    int z = threadIdx_global / (Nx * Ny);
+
+
+    if (x < Nx && y < Ny && z < Nz)
+    {
+        //Multiply sensitivity map with image.
+        //Phase is negated in the result if the coordinate is odd
+        for (int l = 0; l < L; l++)
+        {
+            int im_index = ((l * Nz + z) * Ny + y) * Nx + x;
+            int se_index = ((z * Ny + y) * Nx + x);
+
+            float phase = 1-2*((x+y)&1); //1 if even, -1 if odd
+
+            d_im[im_index] =  cuCmulf(cuConjf(d_SE[se_index]), d_im_SE[im_index]);
+
+        }
+
+    }
+}
+
+
+
+
+/**
+ * @brief Crops a padded 4D image array back to its original size.
+ *
+ * This CUDA kernel extracts the central region from a zero-padded 4D complex-valued image array.
+ * The input padded array has dimensions [2*Nx, 2*Ny, Nz, L] and is cropped to [Nx, Ny, Nz, L].
+ * The kernel assumes column-major memory layout.
+ *
+ * @param[in] d_im_padded Pointer to the input device array containing the padded image data.
+ *                        Array dimensions are [2*Nx, 2*Ny, Nz, L].
+ * @param[out] d_im Pointer to the output device array that will store the cropped image.
+ *                  Array dimensions are [Nx, Ny, Nz, L].
+ *
+ * @note The kernel uses constant memory parameter d_dataParams to access array dimensions:
+ *       - Nx: Width of the output image
+ *       - Ny: Height of the output image  
+ *       - Nz: Depth of both input and output
+ *       - L: Number of image sets/time points
+ *
+ * @note The kernel assumes that all input and output arrays are properly allocated on the GPU
+ *       and that the grid size covers the entire volume of the output image (Nx, Ny, Nz).
+ */
+__global__ void cropImage(cuFloatComplex *d_im_padded, cuFloatComplex *d_im)
 {
     // Assign data parameters from constant memory
     int Nx = d_dataParams.Nx;
@@ -191,38 +186,30 @@ __global__ void SEs_times_Im_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SEs,
     int Nz = d_dataParams.Nz;
     int L = d_dataParams.L;
 
-    // Calculate global thread coordinates
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    int z = blockIdx.z * blockDim.z + threadIdx.z;
+    // Calculate global thread idx
+    int threadIdx_global = blockIdx.x * blockDim.x + threadIdx.x;
+
+    //Calculate local thread coordinates with column-major order
+    int x = threadIdx_global % Nx;
+    int y = (threadIdx_global / Nx) % Ny;
+    int z = threadIdx_global / (Nx * Ny);
+
+    int x_hat = x + Nx/2; //x hat is the x-coordinate in the padded grid
+    int y_hat = y + Ny/2; //y hat is the y-coordinate in the padded grid
 
     if (x < Nx && y < Ny && z < Nz)
     {
         for (int l = 0; l < L; l++)
         {
-            // Calculate the index for d_im (without coil dimension)
-            int im_index = ((l * Nz + z) * Ny + y) * Nx + x;
-
-            cuFloatComplex tempValue = {0.0f, 0.0f};
-
-            for (int coil = 0; coil < Ncoils; coil++)
-            {
-                
-                // Calculate the index for d_SEs(without rank dimension)
-                int ses_index = ((coil * Nz + z) * Ny + y) * Nx + x;
-
-                // Calculate the index for d_im_SEs
-                int im_ses_index = (((l * Ncoils + coil) * Nz + z) * Ny + y) * Nx + x;
-
-                // Perform the multiplication and summation
-                tempValue = cuCaddf(tempValue, cuCmulf(d_im_SEs[im_ses_index], cuConjf(d_SEs[ses_index])));
-            }
-
-            d_im[im_index] = tempValue;
-            
+            int im_index =      ((l * Nz + z) * Ny + y) * Nx + x;
+            int im_hat_index =  ((l * Nz + z) * Ny*2 + y_hat) * Nx*2 + x_hat;
+            d_im[im_index] = d_im_padded[im_hat_index];
         }
     }
+
 }
+
+
 
 
 /**
@@ -566,7 +553,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
 
     // Intialze Blocks and Grids and Perform Broadcasting
     int blockSize = 256;
-    int gridSize = (Nx + 255) / 256;
+    int gridSize = (imageSize*4 + 255) / 256;
 
     cuFloatComplex *d_im_SE;
     cudaMalloc(&d_im_SE, imageSize * 4 * sizeof(cuFloatComplex));
@@ -595,15 +582,15 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     // =========Block-Diagonal kspace update ========/
 
 
-    const int blockSizeBlkdiag = 256;
-    const int gridSizeBlkdiag = (4*imageSize + 255) / 256;
-    start = clock();
-    //d_im_SE is in kspace due to precious cuFFT.
-    kspaceUpdateToeplitzHermitian<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_im_SE, d_Phi2Cartesian);
-    cudaDeviceSynchronize();
-    end = clock();
-    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (verbose) mexPrintf("kspaceUpdateToeplitzHermitian execution time: %f seconds\n", time_spent);
+    // const int blockSizeBlkdiag = 256;
+    // const int gridSizeBlkdiag = (4*imageSize + 255) / 256;
+    // start = clock();
+    // //d_im_SE is in kspace due to precious cuFFT.
+    // kspaceUpdateToeplitzHermitian<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_im_SE, d_Phi2Cartesian);
+    // cudaDeviceSynchronize();
+    // end = clock();
+    // time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    // if (verbose) mexPrintf("kspaceUpdateToeplitzHermitian execution time: %f seconds\n", time_spent);
 
     // ========== Inverse cuFFT in the 3rd (Z) dimension ========== /
 
@@ -625,24 +612,34 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
 
 
     start = clock();
-    cufinufftf_deconvolve(cufinufft_type1_plan, d_im_SE_deconv, d_im_SE);
+    // cufinufftf_deconvolve(cufinufft_type1_plan, d_im_SE_deconv, d_im_SE);
+    blockSize = 256;
+    gridSize = (imageSize + 255) / 256;
+    cropImage<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
     cudaDeviceSynchronize();
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     if (verbose) mexPrintf("type1 cufinufftf_deconvolve execution time: %f seconds\n", time_spent);
 
+    // cudaMemcpy(d_im_out, d_im_SE, imageSize* 4* sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
+
     cudaFree(d_im_SE); //no longer used
+    // d_im_SE = nullptr;
 
 
     // ========= coil_combination ========/
     start = clock();
 
     //d_im_SE_deconv is in image domain due to precious inverse cuFFT.
-    SEs_times_Im_adj<<<gridSize, blockSize>>>(d_im_out, d_SE, d_im_SE_deconv, 1);
+    blockSize = 256;
+    gridSize = (imageSize + 255) / 256;
+    Im_SE_adj<<<gridSize, blockSize>>>(d_im_out, d_SE, d_im_SE_deconv);
     cudaDeviceSynchronize();    
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     if (verbose) mexPrintf("SEs_times_Im_adj execution time: %f seconds\n", time_spent);
+
+    // cudaMemcpy(d_im_out, d_im_SE_deconv, imageSize * sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
 
     cudaFree(d_im_SE_deconv); //Clean up
 
@@ -779,10 +776,9 @@ void mexFunction(int nlhs, mxArray *plhs[],
     Phi2Cartesian = mxGPUCreateFromMxArray(prhs[3]);
 
     // Create output gpuArray
-    mwSize out_dimensions[3] = {(size_t)Nx * 2, (size_t)Ny * 2, Ntrans};
-    const mwSize * ndims = out_dimensions;
+
     mxGPUArray *AhAx;
-    mwSize dims[3] = {(size_t)Nx * 2, (size_t)Ny * 2, Ntrans};
+    mwSize dims[3] = {(size_t)Nx, (size_t)Ny, Ntrans};
     AhAx = mxGPUCreateGPUArray(3, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_DO_NOT_INITIALIZE);
 
     // Assign data parameters to device constant memory
@@ -848,12 +844,11 @@ void mexFunction(int nlhs, mxArray *plhs[],
         //Calculate pointer to current coil map's starting address
         d_SE = d_SEs + coil * Nx * Ny * Nz;
 
-        
         AhA_by_coil(d_im, d_SE, d_Phi2Cartesian, d_im_out, cufft_plan, cufinufft_type1_plan, cufinufft_type2_plan, dataParams);
 
         //Add the output from each coil to d_AhAx
-        dim3 blockSize(256);
-        dim3 gridSize((Nx * Ny * Nz * L + 255) / 256);
+        int blockSize = 256;
+        int gridSize = (Nx * Ny * Nz * L + 255) / 256;
         addArrays<<<gridSize, blockSize>>>(d_AhAx, d_im_out, Nx * Ny * Nz * L);
         cudaDeviceSynchronize();
     }
@@ -863,9 +858,10 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     cuFloatComplex *d_AhAx_out = (cuFloatComplex *)mxGPUGetData(AhAx);
     cudaMemcpy(d_AhAx_out, d_AhAx, Nx * Ny * Nz * L * sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
+
+
     plhs[0] = mxGPUCreateMxArrayOnGPU(AhAx);
     
-
     // Free device memories
     cudaFree(d_im);
     cudaFree(d_AhAx);
@@ -881,8 +877,6 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cufinufftf_destroy(cufinufft_type2_plan);
 
    
-
-
     mxGPUDestroyGPUArray(AhAx);
     mxGPUDestroyGPUArray(Phi2Cartesian);
 
