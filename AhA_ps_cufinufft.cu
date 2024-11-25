@@ -296,7 +296,8 @@ __global__ void kspaceUpdateNew(cuFloatComplex *d_k, cuFloatComplex *d_Phi2)
  * @param[in,out] d_k     Pointer to the k-space data being updated. Output will also be stored in this memory. In GPU memory. 
  *                        This is a complex-valued array representing the k-space data from zero-padded image. [2*Nx, 2*Ny, Nz, L], 
  *                        with Ntrajs being the number of unique radial spokes. This layout is for better memory coalescing.
- * @param[in]     d_Phi2  Pointer to the overall (Φ * ΦH) transformation matrix (Toeplitz form), with Hermitian symmetry stored in LOWER TRIANGLE including the diagonal. In GPU memory. 
+ * @param[in]     d_Phi2  Pointer to the overall (Φ * ΦH) transformation matrix (Toeplitz form), with Hermitian symmetry stored in 
+ *                        LOWER TRIANGLE including the diagonal. In GPU memory. 
  *                        This is a complex-valued array representing the transformation to be applied.
  *                        Dimension [2*Nx, 2*Ny, Nz, (L-1)*L/2 +L]. This layout is for better memory coalescing.
  *
@@ -515,7 +516,7 @@ __global__ void addArrays(cuFloatComplex *a, cuFloatComplex *b, int arraySize)
  * @param[in] cufinufft_type1_plan Plan for Type 1 NUFFT (uniform to non-uniform)
  * @param[in] cufinufft_type2_plan Plan for Type 2 NUFFT (non-uniform to uniform)
  * @param[in] dataParams Struct containing data dimensions and parameters
- *
+ * @param[in] verbose Whether to print execution times
  * @note All arrays are assumed to be in column-major order and complexsingle precision
  * @note The function uses constant memory for data parameters via d_dataParams
  */
@@ -527,7 +528,8 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
                 cufftHandle cufft_plan,
                 cufinufftf_plan cufinufft_type1_plan,
                 cufinufftf_plan cufinufft_type2_plan,
-                dataParamsStruct dataParams)
+                dataParamsStruct dataParams,
+                bool verbose)
 {
     // ==========Broadcast SE to image input on GPU. (SEs * im)========== //
 
@@ -535,7 +537,6 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     clock_t end, AhA_end;
     double time_spent;
 
-    bool verbose = false; //set to true to print execution times
 
     AhA_start = clock();
 
@@ -572,7 +573,6 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     //Execute forward cuFFT
     start = clock();
     cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_FORWARD);
-    cudaDeviceSynchronize();
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     if (verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
@@ -582,15 +582,15 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     // =========Block-Diagonal kspace update ========/
 
 
-    // const int blockSizeBlkdiag = 256;
-    // const int gridSizeBlkdiag = (4*imageSize + 255) / 256;
-    // start = clock();
-    // //d_im_SE is in kspace due to precious cuFFT.
-    // kspaceUpdateToeplitzHermitian<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_im_SE, d_Phi2Cartesian);
-    // cudaDeviceSynchronize();
-    // end = clock();
-    // time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    // if (verbose) mexPrintf("kspaceUpdateToeplitzHermitian execution time: %f seconds\n", time_spent);
+    const int blockSizeBlkdiag = 256;
+    const int gridSizeBlkdiag = (4*imageSize + 255) / 256;
+    start = clock();
+    //d_im_SE is in kspace due to precious cuFFT.
+    kspaceUpdateToeplitzHermitian<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_im_SE, d_Phi2Cartesian);
+    cudaDeviceSynchronize();
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    if (verbose) mexPrintf("kspaceUpdateToeplitzHermitian execution time: %f seconds\n", time_spent);
 
     // ========== Inverse cuFFT in the 3rd (Z) dimension ========== /
 
@@ -599,7 +599,6 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
 
     //d_im_SE is now in image space.
     cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_INVERSE);
-    cudaDeviceSynchronize();
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     if (verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
@@ -621,10 +620,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     if (verbose) mexPrintf("type1 cufinufftf_deconvolve execution time: %f seconds\n", time_spent);
 
-    // cudaMemcpy(d_im_out, d_im_SE, imageSize* 4* sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
-
     cudaFree(d_im_SE); //no longer used
-    // d_im_SE = nullptr;
 
 
     // ========= coil_combination ========/
@@ -638,8 +634,6 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     if (verbose) mexPrintf("SEs_times_Im_adj execution time: %f seconds\n", time_spent);
-
-    // cudaMemcpy(d_im_out, d_im_SE_deconv, imageSize * sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
 
     cudaFree(d_im_SE_deconv); //Clean up
 
@@ -697,6 +691,8 @@ void mexFunction(int nlhs, mxArray *plhs[],
     size_t Ntrajs;      // Number of in-plane tranjectories. e.g. 280
     dataParamsStruct dataParams;
     //int GPUDeviceIndex; // Which GPU to use
+    // ==========Initialize the MathWorks GPU API. ========== //
+    mxInitGPU();
 
     char const *const errId = "parallel:gpu:mexGPUExample:InvalidInput";
     char const *const errMsg = "Invalid input to MEX file.";
@@ -740,7 +736,14 @@ void mexFunction(int nlhs, mxArray *plhs[],
     Ny = (int64_t)mxGetDoubles(mxGetField(prhs[1], 0, "Nd"))[1];
     Nz = (int64_t)mxGetScalar(mxGetField(prhs[1], 0, "Nz"));
     M = (size_t)mxGetScalar(mxGetField(prhs[1], 0, "M"));
-    //Ntrajs = (size_t)(M/Nx);  // LeeHL
+    L = (int64_t)mxGetScalar(mxGetField(prhs[1], 0, "L"));
+    // Get k-space size from Phi2 and st.traj_bart  
+    mxArray *traj_bart = mxGetField(prhs[1], 0, "traj_bart");
+    const mwSize *traj_bart_dims = mxGetDimensions(traj_bart);
+    Ntrajs = (size_t)traj_bart_dims[1];
+    Nkx = (int64_t)traj_bart_dims[2];
+
+    Ntrans = Nz * L; //Number of stacked transforms for each coil
     
 
     // Input 3: Sensitivity Maps
@@ -749,14 +752,12 @@ void mexFunction(int nlhs, mxArray *plhs[],
     SEs = mxGetComplexSingles(prhs[2]);
 
     // Input 4: Phi2 (aka, Om)
-    const mwSize *phi2Dims = mxGetDimensions(prhs[3]);
-    L = (int64_t)phi2Dims[0];
+    // Handle Phi2 after MathWorks GPU API initialization
+    Phi2Cartesian = mxGPUCreateFromMxArray(prhs[3]);
     //Phi2 will be handled after MathWorks GPU API initialization
+    const mwSize *phi2Dims = mxGPUGetDimensions(Phi2Cartesian);
 
-    // Get k-space size from Phi2 and st    // LeeHL
-    Ntrajs = (size_t)phi2Dims[2];
-    Nkx = (int64_t) (M/Ntrajs);
-    Ntrans = Nz * L; //Number of stacked transforms for each coil
+    
 
     // Assign data parameters to struct
     dataParams.Nx = Nx;
@@ -769,17 +770,12 @@ void mexFunction(int nlhs, mxArray *plhs[],
     dataParams.M = M;
     dataParams.Ntrans = Ntrans;
 
-    // ==========Initialize the MathWorks GPU API. ========== //
-    mxInitGPU();
-
-    // Handle Phi2 after MathWorks GPU API initialization
-    Phi2Cartesian = mxGPUCreateFromMxArray(prhs[3]);
 
     // Create output gpuArray
 
     mxGPUArray *AhAx;
-    mwSize dims[3] = {(size_t)Nx, (size_t)Ny, Ntrans};
-    AhAx = mxGPUCreateGPUArray(3, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_DO_NOT_INITIALIZE);
+    mwSize dims[4] = {Nx, Ny, Nz, L};
+    AhAx = mxGPUCreateGPUArray(4, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_DO_NOT_INITIALIZE);
 
     // Assign data parameters to device constant memory
     cudaMemcpyToSymbol(d_dataParams, &dataParams, sizeof(dataParamsStruct));
@@ -837,21 +833,33 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cufinufftf_makeplan(2, 2, modes, -1, Ntrans, 1e-6, &cufinufft_type2_plan, &opts);// make type 2 plan, deafault options
     cufinufftf_setpts(cufinufft_type2_plan, M, d_x, d_y, NULL, 0, NULL, NULL, NULL);
 
-
+    start = clock();
     //loop through each coil
+
+    bool verbose = true; 
     for (int coil = 0; coil < Ncoils; coil++)
     {
         //Calculate pointer to current coil map's starting address
         d_SE = d_SEs + coil * Nx * Ny * Nz;
 
-        AhA_by_coil(d_im, d_SE, d_Phi2Cartesian, d_im_out, cufft_plan, cufinufft_type1_plan, cufinufft_type2_plan, dataParams);
+        AhA_by_coil(d_im, d_SE, d_Phi2Cartesian, d_im_out, cufft_plan, cufinufft_type1_plan, cufinufft_type2_plan, dataParams, verbose);
+          
 
         //Add the output from each coil to d_AhAx
         int blockSize = 256;
         int gridSize = (Nx * Ny * Nz * L + 255) / 256;
+        clock_t start_add = clock();
         addArrays<<<gridSize, blockSize>>>(d_AhAx, d_im_out, Nx * Ny * Nz * L);
         cudaDeviceSynchronize();
+        clock_t end_add = clock();
+        time_spent = (double)(end_add - start_add) / CLOCKS_PER_SEC;
+        if (verbose) mexPrintf("addArrays execution time: %f seconds\n", time_spent);
+
+        verbose = false;  
     }
+    end = clock();
+    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    mexPrintf("AhA actual execution time: %f seconds\n", time_spent);
 
     
     // ========= Post-operation clean-up========/
