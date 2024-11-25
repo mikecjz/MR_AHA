@@ -19,7 +19,7 @@
 #include <cufft.h>
 #include <time.h>
 #include <string.h>
-
+#include <cublas_v2.h>
 typedef struct {
   int Nx; // Number of first image dimension
   int Ny; // Number of second image dimension
@@ -80,17 +80,20 @@ __global__ void Im_SE_Pad_AddPhase( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
 
     if (x < Nx && y < Ny && z < Nz)
     {
+
+        int se_index = ((z * Ny + y) * Nx + x);
+        cuFloatComplex se_val = d_SE[se_index];
+
         //Multiply sensitivity map with image.
         //Phase is negated in the result if the coordinate is odd
         for (int l = 0; l < L; l++)
         {
             int im_index =      ((l * Nz + z) * Ny + y) * Nx + x;
             int im_hat_index =  ((l * Nz + z) * Ny*2 + y_hat) * Nx*2 + x_hat;
-            int se_index = ((z * Ny + y) * Nx + x);
 
             float phase = 1-2*((x+y)&1); //1 if even, -1 if odd
 
-            d_im_SE[im_hat_index] =  cuCmulf(d_SE[se_index], d_im[im_index]);
+            d_im_SE[im_hat_index] =  cuCmulf(se_val, d_im[im_index]);
 
             d_im_SE[im_hat_index].x *= phase;
             d_im_SE[im_hat_index].y *= phase;
@@ -138,16 +141,20 @@ __global__ void Im_SE_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
 
     if (x < Nx && y < Ny && z < Nz)
     {
+
+        int se_index = ((z * Ny + y) * Nx + x);
+        cuFloatComplex se_val = d_SE[se_index];
+        
         //Multiply sensitivity map with image.
         //Phase is negated in the result if the coordinate is odd
         for (int l = 0; l < L; l++)
         {
             int im_index = ((l * Nz + z) * Ny + y) * Nx + x;
-            int se_index = ((z * Ny + y) * Nx + x);
+            
 
             float phase = 1-2*((x+y)&1); //1 if even, -1 if odd
 
-            d_im[im_index] =  cuCmulf(cuConjf(d_SE[se_index]), d_im_SE[im_index]);
+            d_im[im_index] =  cuCmulf(cuConjf(se_val), d_im_SE[im_index]);
 
         }
 
@@ -529,7 +536,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
                 cufinufftf_plan cufinufft_type1_plan,
                 cufinufftf_plan cufinufft_type2_plan,
                 dataParamsStruct dataParams,
-                bool verbose)
+                bool is_verbose)
 {
     // ==========Broadcast SE to image input on GPU. (SEs * im)========== //
 
@@ -565,7 +572,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     cudaDeviceSynchronize();
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (verbose) mexPrintf("Im_SE_Pad_AddPhase execution time: %f seconds\n", time_spent);
+    if (is_verbose) mexPrintf("Im_SE_Pad_AddPhase execution time: %f seconds\n", time_spent);
 
     // ========== Batched Forward 3D cuFFT ========== /
 
@@ -575,7 +582,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_FORWARD);
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
+    if (is_verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
 
 
 
@@ -584,24 +591,24 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
 
     const int blockSizeBlkdiag = 256;
     const int gridSizeBlkdiag = (4*imageSize + 255) / 256;
+    const int sharedMemSizeBlkdiag = blockSizeBlkdiag * L * sizeof(cuFloatComplex);
     start = clock();
-    //d_im_SE is in kspace due to precious cuFFT.
-    kspaceUpdateToeplitzHermitian<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_im_SE, d_Phi2Cartesian);
+    //d_im_SE is in kspace due to previous cuFFT.
+    kspaceUpdateToeplitzHermitian<<<gridSizeBlkdiag, blockSizeBlkdiag, sharedMemSizeBlkdiag>>>(d_im_SE, d_Phi2Cartesian);
     cudaDeviceSynchronize();
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (verbose) mexPrintf("kspaceUpdateToeplitzHermitian execution time: %f seconds\n", time_spent);
+    if (is_verbose) mexPrintf("kspaceUpdateToeplitzHermitian execution time: %f seconds\n", time_spent);
 
     // ========== Inverse cuFFT in the 3rd (Z) dimension ========== /
 
     //Execute
     start = clock();
 
-    //d_im_SE is now in image space.
     cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_INVERSE);
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
+    if (is_verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
 
 
     // ========= FINUFFT Type 1 deconvolution ONLY========/
@@ -612,13 +619,14 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
 
     start = clock();
     // cufinufftf_deconvolve(cufinufft_type1_plan, d_im_SE_deconv, d_im_SE);
+    //d_im_SE is now in image space.
     blockSize = 256;
     gridSize = (imageSize + 255) / 256;
     cropImage<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
     cudaDeviceSynchronize();
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (verbose) mexPrintf("type1 cufinufftf_deconvolve execution time: %f seconds\n", time_spent);
+    if (is_verbose) mexPrintf("type1 cufinufftf_deconvolve execution time: %f seconds\n", time_spent);
 
     cudaFree(d_im_SE); //no longer used
 
@@ -633,14 +641,14 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     cudaDeviceSynchronize();    
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (verbose) mexPrintf("SEs_times_Im_adj execution time: %f seconds\n", time_spent);
+    if (is_verbose) mexPrintf("SEs_times_Im_adj execution time: %f seconds\n", time_spent);
 
     cudaFree(d_im_SE_deconv); //Clean up
 
 
     AhA_end = clock();
     time_spent = (double)(AhA_end - AhA_start) / CLOCKS_PER_SEC;
-    if (verbose) mexPrintf("AhA_by_coil execution time: %f seconds\n", time_spent);
+    if (is_verbose) mexPrintf("AhA_by_coil execution time: %f seconds\n", time_spent);
 }
 
 
@@ -819,7 +827,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     //make cuFFT and cufinufft plans
     cufftHandle cufft_plan;
     int n[3] = {Nz, Nx*2, Ny*2};
-    cufftPlanMany(&cufft_plan, 3, n, NULL, NULL, 4*Nx*Ny*Nz, NULL, NULL, 4*Nx*Ny*L, CUFFT_C2C, L);
+    cufftPlanMany(&cufft_plan, 3, n, NULL, NULL, 4*Nx*Ny*Nz, NULL, NULL, 4*Nx*Ny*Nz, CUFFT_C2C, L);
 
     cufinufft_opts opts;
     cufinufft_default_opts(&opts);
@@ -836,26 +844,28 @@ void mexFunction(int nlhs, mxArray *plhs[],
     start = clock();
     //loop through each coil
 
-    bool verbose = true; 
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    cuFloatComplex alpha = make_cuFloatComplex(1.0f, 0.0f);
+
+
+    bool is_verbose = true; 
     for (int coil = 0; coil < Ncoils; coil++)
     {
         //Calculate pointer to current coil map's starting address
         d_SE = d_SEs + coil * Nx * Ny * Nz;
 
-        AhA_by_coil(d_im, d_SE, d_Phi2Cartesian, d_im_out, cufft_plan, cufinufft_type1_plan, cufinufft_type2_plan, dataParams, verbose);
+        AhA_by_coil(d_im, d_SE, d_Phi2Cartesian, d_im_out, cufft_plan, cufinufft_type1_plan, cufinufft_type2_plan, dataParams, is_verbose);
           
 
         //Add the output from each coil to d_AhAx
-        int blockSize = 256;
-        int gridSize = (Nx * Ny * Nz * L + 255) / 256;
         clock_t start_add = clock();
-        addArrays<<<gridSize, blockSize>>>(d_AhAx, d_im_out, Nx * Ny * Nz * L);
-        cudaDeviceSynchronize();
+        cublasCaxpy(handle, Nx * Ny * Nz * L, &alpha, d_im_out, 1, d_AhAx, 1);
         clock_t end_add = clock();
         time_spent = (double)(end_add - start_add) / CLOCKS_PER_SEC;
-        if (verbose) mexPrintf("addArrays execution time: %f seconds\n", time_spent);
+        if (is_verbose) mexPrintf("addArrays execution time: %f seconds\n", time_spent);
 
-        verbose = false;  
+        is_verbose = false;  
     }
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
@@ -883,7 +893,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cufftDestroy(cufft_plan);
     cufinufftf_destroy(cufinufft_type1_plan);
     cufinufftf_destroy(cufinufft_type2_plan);
-
+    cublasDestroy(handle);
    
     mxGPUDestroyGPUArray(AhAx);
     mxGPUDestroyGPUArray(Phi2Cartesian);
