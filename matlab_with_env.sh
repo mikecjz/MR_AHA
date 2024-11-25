@@ -28,11 +28,12 @@ echo "CUDA_VISIBLE_DEVICES set to GPU ID: $CUDA_VISIBLE_DEVICES"
 # To make it available globally or in the current shell, you need to source this script or manually set the variable.
 
 # Modify these according to your server environments
-export FINUFFT_LIB=/home/jc_350/Toolboxes/finufft/build
-export CUDA_LIB=/usr/local/cuda-12.0/lib64
-
-
+MAINPATH="$(cd "$(dirname "$0")" && pwd)/supporting/nufft/finufft/build"
+export FINUFFT_LIB=$MAINPATH
+#export FINUFFT_LIB=/home/username/recon/multitaskingReconTool/supporting/nufft/finufft/build
+export CUDA_LIB=/usr/local/cuda/lib64
 
 export LD_LIBRARY_PATH=$FINUFFT_LIB:$CUDA_LIB:$LD_LIBRARY_PATH
 
 matlab -desktop
+

@@ -3,7 +3,7 @@
  * Vectorized nufft call possible. This Function assumes all major data variables to be in single (float) 
  * precision and on CPU at input.
  *
- * Author: Junzhou Chen (junzhou@chen.engineer)
+ * Author: Junzhou Chen (junzhou[AT]chen[DOT]engineer)
  *
  */
 
@@ -19,8 +19,9 @@
 #include <time.h>
 #include <string.h>
 
-/* 
+/**
  * Host code
+ *run in matlab im = cufinufft2d1(x,y,k,isign,eps,Nx,Ny, M, Ntrans)
  */
 void mexFunction(int nlhs, mxArray *plhs[],
                  int nrhs, mxArray const *prhs[])
@@ -29,21 +30,21 @@ void mexFunction(int nlhs, mxArray *plhs[],
     double cpu_time_used;
 
     /* Declare all variables.*/
-    float *x;          // om(1)
-    float *y;          // om(2)
-    float _Complex *k; // Pointer to complex kspace-strengths, on host
+    float *x;          // frequency domain dimension 1 coordinates
+    float *y;          // frequency domain dimension 2 coordinates
+    float _Complex *k; // Pointer to complex frequency domain strengths, on host
     mxComplexSingle * im ;// Pointer to complex image-domain data, on host
-    int isSign;
-    float eps;
-    int64_t Nx;
-    int64_t Ny;
+    int isSign;     //Whether to use + or - sign for complex exponential
+    float eps;      //NUFFT precision
+    int64_t Nx;     //Size of first dimension of image
+    int64_t Ny;     //Size of second dimension of image
     size_t M;      // number of NU points
     size_t Ntrans; // Number of stacked transforms
-    int GPUDeviceIndex; //Which GPU to use
+    //int GPUDeviceIndex; //Which GPU to use
 
     char const *const errId = "parallel:gpu:mexGPUExample:InvalidInput";
     char const *const errMsg = "Invalid input to MEX file.";
-    char const *const instruction = "Usage:\n im = cufinufft2d1(x,y,k,isign,eps,ms,mt, M, Ntrans).";
+    char const *const instruction = "Usage:\n im = cufinufft2d1(x,y,k,isign,eps,Nx,Ny, M, Ntrans).";
 
     
 
@@ -74,7 +75,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     M = (size_t)mxGetScalar(prhs[7]);
     Ntrans = (size_t)mxGetScalar(prhs[8]);
     //im = (float _Complex *) malloc((size_t)Nx * (size_t)Ny * Ntrans * sizeof(float _Complex));
-    im = (mxComplexSingle*)mxMalloc(Ny * Nx * Ntrans *  sizeof(float _Complex));
+    im = (mxComplexSingle*)mxMalloc(Ny * Nx * Ntrans *  sizeof(float _Complex));// output image
     //GPUDeviceIndex = (int)mxGetScalar(prhs[9]) - 1; // k is zero based
     //mexPrintf("Data Assignment Complete\n");
 
@@ -109,7 +110,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     end = clock();
 
     double timeHostToDevice = ((double)(end-start))/ CLOCKS_PER_SEC;
-    mexPrintf("Host to Device Copying Time (s): %.5f\n", timeHostToDevice);
+    //mexPrintf("Host to Device Copying Time (s): %.5f\n", timeHostToDevice);
 
     //mexPrintf("CUDA MEM COPY Complete\n");
 
@@ -136,7 +137,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cufinufftf_execute(plan, d_k, d_im);
     end = clock();
     double timeExecute = ((double)(end-start))/ CLOCKS_PER_SEC;
-    mexPrintf("cufinufftf execution Time (s): %.5f\n", timeExecute);
+    //mexPrintf("cufinufftf execution Time (s): %.5f\n", timeExecute);
     //mexPrintf("cufinufftf_execute Complete\n");
     /************ EXECUTE END ************/
 
@@ -146,7 +147,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaMemcpy(im, d_im, (size_t)Nx * (size_t)Ny * Ntrans * sizeof(float _Complex), cudaMemcpyDeviceToHost);
     end = clock();
     double timeDeviceToHost = ((double)(end-start))/ CLOCKS_PER_SEC;
-    mexPrintf("Device to Host Copying Time (s): %.5f\n", timeDeviceToHost);
+    //mexPrintf("Device to Host Copying Time (s): %.5f\n", timeDeviceToHost);
 
     cufinufftf_destroy(plan);
     cudaFree(d_x);
