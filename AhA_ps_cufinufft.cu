@@ -57,7 +57,7 @@ __constant__ dataParamsStruct d_dataParams;
  *       It is designed to be executed on a CUDA-capable GPU with a grid size that covers the entire volume
  *       of the image (Nx, Ny, Nz).
  */
-__global__ void Im_SE_Pad_AddPhase( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
+__global__ void Im_SE_Pad_shift_AddPhase( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
                              cuFloatComplex *d_im_SE)
 {
 
@@ -77,6 +77,9 @@ __global__ void Im_SE_Pad_AddPhase( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
 
     int x_hat = x + Nx/2; //x hat is the x-coordinate in the padded grid
     int y_hat = y + Ny/2; //y hat is the y-coordinate in the padded grid
+
+    x_hat = (x_hat + Nx) % Nx; //fftshift-ed coordinate
+    y_hat = (y_hat + Ny) % Ny; //fftshift-ed coordinate
 
     if (x < Nx && y < Ny && z < Nz)
     {
@@ -156,6 +159,9 @@ __global__ void Im_SE_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
 
             d_im[im_index] =  cuCmulf(cuConjf(se_val), d_im_SE[im_index]);
 
+            d_im[im_index].x *= phase;
+            d_im[im_index].y *= phase;
+
         }
 
     }
@@ -185,7 +191,7 @@ __global__ void Im_SE_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
  * @note The kernel assumes that all input and output arrays are properly allocated on the GPU
  *       and that the grid size covers the entire volume of the output image (Nx, Ny, Nz).
  */
-__global__ void cropImage(cuFloatComplex *d_im_padded, cuFloatComplex *d_im)
+__global__ void shiftAndCropImage(cuFloatComplex *d_im_padded, cuFloatComplex *d_im)
 {
     // Assign data parameters from constant memory
     int Nx = d_dataParams.Nx;
@@ -203,6 +209,9 @@ __global__ void cropImage(cuFloatComplex *d_im_padded, cuFloatComplex *d_im)
 
     int x_hat = x + Nx/2; //x hat is the x-coordinate in the padded grid
     int y_hat = y + Ny/2; //y hat is the y-coordinate in the padded grid
+
+    x_hat = (x_hat + Nx) % Nx; //fftshift-ed coordinate
+    y_hat = (y_hat + Ny) % Ny; //fftshift-ed coordinate
 
     if (x < Nx && y < Ny && z < Nz)
     {
@@ -561,18 +570,18 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
 
     // Intialze Blocks and Grids and Perform Broadcasting
     int blockSize = 256;
-    int gridSize = (imageSize*4 + 255) / 256;
+    int gridSize = (imageSize + 255) / 256;
 
     cuFloatComplex *d_im_SE;
     cudaMalloc(&d_im_SE, imageSize * 4 * sizeof(cuFloatComplex));
     cudaMemset(d_im_SE, 0, imageSize * 4 * sizeof(cuFloatComplex));
 
     start = clock();
-    Im_SE_Pad_AddPhase<<<gridSize, blockSize>>>(d_im, d_SE, d_im_SE);
+    Im_SE_Pad_shift_AddPhase<<<gridSize, blockSize>>>(d_im, d_SE, d_im_SE);
     cudaDeviceSynchronize();
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (is_verbose) mexPrintf("Im_SE_Pad_AddPhase execution time: %f seconds\n", time_spent);
+    if (is_verbose) mexPrintf("Im_SE_Pad_shift_AddPhase execution time: %f seconds\n", time_spent);
 
     // ========== Batched Forward 3D cuFFT ========== /
 
@@ -622,7 +631,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     //d_im_SE is now in image space.
     blockSize = 256;
     gridSize = (imageSize + 255) / 256;
-    cropImage<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
+    shiftAndCropImage<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
     cudaDeviceSynchronize();
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
