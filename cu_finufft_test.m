@@ -34,13 +34,13 @@ Phi2Cartesian = cufinufftfspread2d1(single(st.om(:,1)), single(st.om(:,2)), Phi2
 
 
 %%
-for i = 1:1
-    tic;
-    d_AhAx = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2Cartesian);
-    toc;
-end
 
-AhAx = gather(d_AhAx);
+tic;
+d_AhAx = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2Cartesian);
+toc;
+
+
+% AhAx = gather(d_AhAx);
 %%
 % U0 = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2);
 % c2 = mean(abs(Ahb(:)),'all')./mean(abs(U0),'all');%real(pinv(U0(:))*Ahb(:));

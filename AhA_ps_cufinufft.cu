@@ -159,9 +159,6 @@ __global__ void Im_SE_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
 
             d_im[im_index] =  cuCmulf(cuConjf(se_val), d_im_SE[im_index]);
 
-            // d_im[im_index].x *= phase;
-            // d_im[im_index].y *= phase;
-
         }
 
     }
@@ -174,12 +171,12 @@ __global__ void Im_SE_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
  * @brief Crops a padded 4D image array back to its original size.
  *
  * This CUDA kernel extracts the central region from a zero-padded 4D complex-valued image array.
- * The input padded array has dimensions [2*Nx, 2*Ny, Nz, L] and is cropped to [Nx, Ny, Nz, L].
+ * The input fftshifted and padded array has dimensions [2*Nx, 2*Ny, Nz, L] and is ifftshifted and cropped to [Nx, Ny, Nz, L].
  * The kernel assumes column-major memory layout.
  *
- * @param[in] d_im_padded Pointer to the input device array containing the padded image data.
+ * @param[in] d_im_padded Pointer to the input device array containing the fftshifted and padded image data.
  *                        Array dimensions are [2*Nx, 2*Ny, Nz, L].
- * @param[out] d_im Pointer to the output device array that will store the cropped image.
+ * @param[out] d_im Pointer to the output device array that will store the ifftshifted and cropped image.
  *                  Array dimensions are [Nx, Ny, Nz, L].
  *
  * @note The kernel uses constant memory parameter d_dataParams to access array dimensions:
@@ -637,10 +634,10 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     cuFloatComplex *d_im_SE_deconv;
     cudaMalloc(&d_im_SE_deconv, imageSize * sizeof(cuFloatComplex));
 
-
+    //d_im_SE is now in image space.
     cudaEventRecord(start);
     cufinufftf_deconvolve(cufinufft_type1_plan, d_im_SE_deconv, d_im_SE);
-    //d_im_SE is now in image space.
+    
     // blockSize = 256;
     // gridSize = (imageSize + 255) / 256;
     // shiftAndCropImage<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
@@ -853,8 +850,10 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaMemcpy(d_y, y, M * sizeof(float), cudaMemcpyHostToDevice);
     d_Phi2Cartesian = (cuFloatComplex *)mxGPUGetDataReadOnly(Phi2Cartesian);
 
+    
 
-    cuFloatComplex *d_SE; //Pointer to current coil map's starting address (SINGLE COIL)
+
+    
 
     //make cuFFT and cufinufft plans
     cufftHandle cufft_plan;
@@ -884,8 +883,9 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaEventCreate(&start_add);
     cudaEventCreate(&stop_add);
 
+    cuFloatComplex *d_SE; //Pointer to current coil map's starting address (SINGLE COIL)
 
-    bool is_verbose = true; 
+    bool is_verbose = false; 
     for (int coil = 0; coil < Ncoils; coil++)
     {
         //Calculate pointer to current coil map's starting address

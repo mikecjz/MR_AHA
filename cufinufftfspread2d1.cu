@@ -129,8 +129,6 @@ void mexFunction(int nlhs, mxArray *plhs[],
      * int cufinufftf_setpts(cufinufftf_plan plan, int M, float* x, float* y,loat* z, int N, float* s, float* t, float *u)
      */
     cufinufftf_setpts(plan, M, d_x, d_y, NULL, 0, NULL, NULL, NULL);
-    mexPrintf("Upsampling factor: %.2f\n", opts.upsampfac);
-    mexPrintf("GPU method: %d\n", opts.gpu_method);
     //mexPrintf("cufinufftf_setpts Complete\n");
 
 
@@ -142,7 +140,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cufinufftf_extract(plan, d_k, d_im, d_fw);
     end = clock();
     double timeExecute = ((double)(end-start))/ CLOCKS_PER_SEC;
-    mexPrintf("cufinufftf execution Time (s): %.5f\n", timeExecute);
+    mexPrintf("cufinufftf spreading execution Time (s): %.5f\n", timeExecute);
 
     //mexPrintf("cufinufftf_execute Complete\n");
     /************ EXECUTE END *****************************/
