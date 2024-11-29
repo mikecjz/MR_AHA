@@ -159,8 +159,8 @@ __global__ void Im_SE_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
 
             d_im[im_index] =  cuCmulf(cuConjf(se_val), d_im_SE[im_index]);
 
-            d_im[im_index].x *= phase;
-            d_im[im_index].y *= phase;
+            // d_im[im_index].x *= phase;
+            // d_im[im_index].y *= phase;
 
         }
 
@@ -627,12 +627,12 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
 
 
     start = clock();
-    // cufinufftf_deconvolve(cufinufft_type1_plan, d_im_SE_deconv, d_im_SE);
+    cufinufftf_deconvolve(cufinufft_type1_plan, d_im_SE_deconv, d_im_SE);
     //d_im_SE is now in image space.
-    blockSize = 256;
-    gridSize = (imageSize + 255) / 256;
-    shiftAndCropImage<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
-    cudaDeviceSynchronize();
+    // blockSize = 256;
+    // gridSize = (imageSize + 255) / 256;
+    // shiftAndCropImage<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
+    // cudaDeviceSynchronize();
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     if (is_verbose) mexPrintf("type1 cufinufftf_deconvolve execution time: %f seconds\n", time_spent);
