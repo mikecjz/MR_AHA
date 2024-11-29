@@ -384,8 +384,8 @@ __global__ void kspaceUpdateToeplitzHermitian(cuFloatComplex *d_k, const cuFloat
                 }
                 
             }
-            output_index = x_hat + Nx_hat * (y_hat + Nz * (z + Ny_hat * l));
-            d_k[output_index] = tempValue;
+            output_index = x_hat + Nx_hat * (y_hat + Ny_hat * (z + Nz * l));
+            d_k[output_index] = tempValue; //make_cuFloatComplex(z, 0);
         }
 
 
@@ -614,7 +614,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     //Execute
     start = clock();
 
-    // cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_INVERSE);
+    cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_INVERSE);
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     if (is_verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
