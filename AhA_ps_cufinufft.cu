@@ -78,8 +78,8 @@ __global__ void Im_SE_Pad_shift_AddPhase( cuFloatComplex *d_im,  cuFloatComplex 
     int x_hat = x + Nx/2; //x hat is the x-coordinate in the padded grid
     int y_hat = y + Ny/2; //y hat is the y-coordinate in the padded grid
 
-    x_hat = (x_hat + Nx) % Nx; //fftshift-ed coordinate
-    y_hat = (y_hat + Ny) % Ny; //fftshift-ed coordinate
+    x_hat = (x_hat + Nx) % (2 * Nx); //fftshift-ed coordinate
+    y_hat = (y_hat + Ny) % (2 * Ny); //fftshift-ed coordinate
 
     if (x < Nx && y < Ny && z < Nz)
     {
@@ -96,7 +96,7 @@ __global__ void Im_SE_Pad_shift_AddPhase( cuFloatComplex *d_im,  cuFloatComplex 
 
             float phase = 1-2*((x+y)&1); //1 if even, -1 if odd
 
-            d_im_SE[im_hat_index] =  cuCmulf(se_val, d_im[im_index]);
+            d_im_SE[im_hat_index] =  d_im[im_index]; //cuCmulf(se_val, d_im[im_index]);
 
             d_im_SE[im_hat_index].x *= phase;
             d_im_SE[im_hat_index].y *= phase;
@@ -614,7 +614,7 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     //Execute
     start = clock();
 
-    cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_INVERSE);
+    // cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_INVERSE);
     end = clock();
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     if (is_verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
@@ -622,37 +622,39 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
 
     // ========= FINUFFT Type 1 deconvolution ONLY========/
 
-    cuFloatComplex *d_im_SE_deconv;
-    cudaMalloc(&d_im_SE_deconv, imageSize * sizeof(cuFloatComplex));
+    // cuFloatComplex *d_im_SE_deconv;
+    // cudaMalloc(&d_im_SE_deconv, imageSize * sizeof(cuFloatComplex));
 
 
-    start = clock();
-    // cufinufftf_deconvolve(cufinufft_type1_plan, d_im_SE_deconv, d_im_SE);
-    //d_im_SE is now in image space.
-    blockSize = 256;
-    gridSize = (imageSize + 255) / 256;
-    shiftAndCropImage<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
-    cudaDeviceSynchronize();
-    end = clock();
-    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (is_verbose) mexPrintf("type1 cufinufftf_deconvolve execution time: %f seconds\n", time_spent);
+    // start = clock();
+    // // cufinufftf_deconvolve(cufinufft_type1_plan, d_im_SE_deconv, d_im_SE);
+    // //d_im_SE is now in image space.
+    // blockSize = 256;
+    // gridSize = (imageSize + 255) / 256;
+    // shiftAndCropImage<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
+    // cudaDeviceSynchronize();
+    // end = clock();
+    // time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    // if (is_verbose) mexPrintf("type1 cufinufftf_deconvolve execution time: %f seconds\n", time_spent);
 
+    cudaMemcpy(d_im_out, d_im_SE, 4 * imageSize * sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
     cudaFree(d_im_SE); //no longer used
+    
 
 
     // ========= coil_combination ========/
-    start = clock();
+    // start = clock();
 
-    //d_im_SE_deconv is in image domain due to precious inverse cuFFT.
-    blockSize = 256;
-    gridSize = (imageSize + 255) / 256;
-    Im_SE_adj<<<gridSize, blockSize>>>(d_im_out, d_SE, d_im_SE_deconv);
-    cudaDeviceSynchronize();    
-    end = clock();
-    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (is_verbose) mexPrintf("SEs_times_Im_adj execution time: %f seconds\n", time_spent);
+    // //d_im_SE_deconv is in image domain due to precious inverse cuFFT.
+    // blockSize = 256;
+    // gridSize = (imageSize + 255) / 256;
+    // Im_SE_adj<<<gridSize, blockSize>>>(d_im_out, d_SE, d_im_SE_deconv);
+    // cudaDeviceSynchronize();    
+    // end = clock();
+    // time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    // if (is_verbose) mexPrintf("SEs_times_Im_adj execution time: %f seconds\n", time_spent);
 
-    cudaFree(d_im_SE_deconv); //Clean up
+    // cudaFree(d_im_SE_deconv); //Clean up
 
 
     AhA_end = clock();
@@ -791,8 +793,8 @@ void mexFunction(int nlhs, mxArray *plhs[],
     // Create output gpuArray
 
     mxGPUArray *AhAx;
-    mwSize dims[4] = {Nx, Ny, Nz, L};
-    AhAx = mxGPUCreateGPUArray(4, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_DO_NOT_INITIALIZE);
+    mwSize dims[4] = {2 * Nx, 2 * Ny, Nz, L};
+    AhAx = mxGPUCreateGPUArray(4, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_INITIALIZE_VALUES);
 
     // Assign data parameters to device constant memory
     cudaMemcpyToSymbol(d_dataParams, &dataParams, sizeof(dataParamsStruct));
@@ -810,8 +812,9 @@ void mexFunction(int nlhs, mxArray *plhs[],
     //images related
     cudaMalloc(&d_im, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
     cudaMalloc(&d_SEs, Nx * Ny * Nz * Ncoils * sizeof(cuFloatComplex));
-    cudaMalloc(&d_im_out, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
-    cudaMalloc(&d_AhAx, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
+    cudaMalloc(&d_im_out, 2 * Nx * 2 * Ny * Nz * L * sizeof(cuFloatComplex));
+    // cudaMalloc(&d_AhAx, 2 * Nx * 2 * Ny * Nz * L * sizeof(cuFloatComplex));
+    d_AhAx = (cuFloatComplex *)mxGPUGetData(AhAx);
 
     //k-space related
     cudaMalloc(&d_x, M * sizeof(float));
@@ -823,7 +826,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     //images related
     cudaMemcpy(d_im, im, Nx * Ny * Nz * L * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
     cudaMemcpy(d_SEs, SEs, Nx * Ny * Nz * Ncoils * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
-    cudaMemset(d_AhAx, 0, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
+    // cudaMemset(d_AhAx, 0, 2 * Nx * 2 * Ny * Nz * L * sizeof(cuFloatComplex));
 
     //kspace related
     cudaMemcpy(d_x, x, M * sizeof(float), cudaMemcpyHostToDevice);
@@ -859,7 +862,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
 
     bool is_verbose = true; 
-    for (int coil = 0; coil < Ncoils; coil++)
+    for (int coil = 0; coil < 1; coil++)
     {
         //Calculate pointer to current coil map's starting address
         d_SE = d_SEs + coil * Nx * Ny * Nz;
@@ -869,7 +872,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
         //Add the output from each coil to d_AhAx
         clock_t start_add = clock();
-        cublasCaxpy(handle, Nx * Ny * Nz * L, &alpha, d_im_out, 1, d_AhAx, 1);
+        cublasCaxpy(handle, 2 * Nx * 2 * Ny * Nz * L, &alpha, d_im_out, 1, d_AhAx, 1);
         clock_t end_add = clock();
         time_spent = (double)(end_add - start_add) / CLOCKS_PER_SEC;
         if (is_verbose) mexPrintf("addArrays execution time: %f seconds\n", time_spent);
@@ -883,15 +886,14 @@ void mexFunction(int nlhs, mxArray *plhs[],
     
     // ========= Post-operation clean-up========/
 
-    cuFloatComplex *d_AhAx_out = (cuFloatComplex *)mxGPUGetData(AhAx);
-    cudaMemcpy(d_AhAx_out, d_AhAx, Nx * Ny * Nz * L * sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
+    // cudaMemcpy(d_AhAx_out, d_AhAx, 2 * Nx * 2 * Ny * Nz * L * sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
 
 
     plhs[0] = mxGPUCreateMxArrayOnGPU(AhAx);
     
     // Free device memories
     cudaFree(d_im);
-    cudaFree(d_AhAx);
+    // cudaFree(d_AhAx);
     cudaFree(d_SEs);
     cudaFree(d_im_out);
 

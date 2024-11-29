@@ -34,9 +34,13 @@ Phi2Cartesian = cufinufftfspread2d1(single(st.om(:,1)), single(st.om(:,2)), Phi2
 
 
 %%
+
+temp_input = zeros(size(filtAhb),'like',single(1i));
+temp_input(161,161,1,:) = single(complex(0,1));
 for i = 1:1
     tic;
-    d_AhAx = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2Cartesian);
+    % d_AhAx = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2Cartesian);
+    d_AhAx = AhA_ps_cufinufft(temp_input, st, SEs, Phi2Cartesian);
     toc;
 end
 
