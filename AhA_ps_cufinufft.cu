@@ -78,8 +78,8 @@ __global__ void Im_SE_Pad_shift_AddPhase( cuFloatComplex *d_im,  cuFloatComplex 
     int x_hat = x + Nx/2; //x hat is the x-coordinate in the padded grid
     int y_hat = y + Ny/2; //y hat is the y-coordinate in the padded grid
 
-    x_hat = (x_hat + Nx) % Nx; //fftshift-ed coordinate
-    y_hat = (y_hat + Ny) % Ny; //fftshift-ed coordinate
+    x_hat = (x_hat + Nx) % (2 * Nx); //fftshift-ed coordinate
+    y_hat = (y_hat + Ny) % (2 * Ny); //fftshift-ed coordinate
 
     if (x < Nx && y < Ny && z < Nz)
     {
@@ -210,8 +210,8 @@ __global__ void shiftAndCropImage(cuFloatComplex *d_im_padded, cuFloatComplex *d
     int x_hat = x + Nx/2; //x hat is the x-coordinate in the padded grid
     int y_hat = y + Ny/2; //y hat is the y-coordinate in the padded grid
 
-    x_hat = (x_hat + Nx) % Nx; //fftshift-ed coordinate
-    y_hat = (y_hat + Ny) % Ny; //fftshift-ed coordinate
+    x_hat = (x_hat + Nx) % (2 * Nx); //fftshift-ed coordinate
+    y_hat = (y_hat + Ny) % (2 * Ny); //fftshift-ed coordinate
 
     if (x < Nx && y < Ny && z < Nz)
     {
@@ -384,7 +384,7 @@ __global__ void kspaceUpdateToeplitzHermitian(cuFloatComplex *d_k, const cuFloat
                 }
                 
             }
-            output_index = x_hat + Nx_hat * (y_hat + Nz * (z + Ny_hat * l));
+            output_index = x_hat + Nx_hat * (y_hat + Ny_hat * (z + Nz * l));
             d_k[output_index] = tempValue;
         }
 
