@@ -547,14 +547,19 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
                 dataParamsStruct dataParams,
                 bool is_verbose)
 {
+    // Create CUDA events
+    cudaEvent_t function_start, function_stop, start, stop;
+    cudaEventCreate(&function_start);
+    cudaEventCreate(&function_stop);
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    float milliseconds = 0;
+    float seconds = 0;
+
+    // Overall timing
+    cudaEventRecord(function_start);
+
     // ==========Broadcast SE to image input on GPU. (SEs * im)========== //
-
-    clock_t start, AhA_start;
-    clock_t end, AhA_end;
-    double time_spent;
-
-
-    AhA_start = clock();
 
     // Assign data parameters from dataParams struct
     int Nx = dataParams.Nx;
@@ -576,22 +581,26 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     cudaMalloc(&d_im_SE, imageSize * 4 * sizeof(cuFloatComplex));
     cudaMemset(d_im_SE, 0, imageSize * 4 * sizeof(cuFloatComplex));
 
-    start = clock();
+    // Example of timing a specific kernel:
+    cudaEventRecord(start);
     Im_SE_Pad_shift_AddPhase<<<gridSize, blockSize>>>(d_im, d_SE, d_im_SE);
-    cudaDeviceSynchronize();
-    end = clock();
-    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (is_verbose) mexPrintf("Im_SE_Pad_shift_AddPhase execution time: %f seconds\n", time_spent);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    seconds = milliseconds / 1000.0f;
+    if (is_verbose) mexPrintf("Im_SE_Pad_shift_AddPhase execution time: %.6f seconds\n", seconds);
 
     // ========== Batched Forward 3D cuFFT ========== /
 
 
     //Execute forward cuFFT
-    start = clock();
+    cudaEventRecord(start);
     cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_FORWARD);
-    end = clock();
-    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (is_verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    seconds = milliseconds / 1000.0f;
+    if (is_verbose) mexPrintf("cufftExecC2C execution time: %.6f seconds\n", seconds);
 
 
 
@@ -601,23 +610,26 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     const int blockSizeBlkdiag = 256;
     const int gridSizeBlkdiag = (4*imageSize + 255) / 256;
     const int sharedMemSizeBlkdiag = blockSizeBlkdiag * L * sizeof(cuFloatComplex);
-    start = clock();
+    cudaEventRecord(start);
     //d_im_SE is in kspace due to previous cuFFT.
     kspaceUpdateToeplitzHermitian<<<gridSizeBlkdiag, blockSizeBlkdiag, sharedMemSizeBlkdiag>>>(d_im_SE, d_Phi2Cartesian);
-    cudaDeviceSynchronize();
-    end = clock();
-    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (is_verbose) mexPrintf("kspaceUpdateToeplitzHermitian execution time: %f seconds\n", time_spent);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    seconds = milliseconds / 1000.0f;
+    if (is_verbose) mexPrintf("kspaceUpdateToeplitzHermitian execution time: %.6f seconds\n", seconds);
 
     // ========== Inverse cuFFT in the 3rd (Z) dimension ========== /
 
     //Execute
-    start = clock();
+    cudaEventRecord(start);
 
     cufftExecC2C(cufft_plan, d_im_SE, d_im_SE, CUFFT_INVERSE);
-    end = clock();
-    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (is_verbose) mexPrintf("cufftExecC2C execution time: %f seconds\n", time_spent);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    seconds = milliseconds / 1000.0f;
+    if (is_verbose) mexPrintf("cufftExecC2C execution time: %.6f seconds\n", seconds);
 
 
     // ========= FINUFFT Type 1 deconvolution ONLY========/
@@ -626,38 +638,50 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     cudaMalloc(&d_im_SE_deconv, imageSize * sizeof(cuFloatComplex));
 
 
-    start = clock();
+    cudaEventRecord(start);
     cufinufftf_deconvolve(cufinufft_type1_plan, d_im_SE_deconv, d_im_SE);
     //d_im_SE is now in image space.
     // blockSize = 256;
     // gridSize = (imageSize + 255) / 256;
     // shiftAndCropImage<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
     // cudaDeviceSynchronize();
-    end = clock();
-    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (is_verbose) mexPrintf("type1 cufinufftf_deconvolve execution time: %f seconds\n", time_spent);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    seconds = milliseconds / 1000.0f;
+    if (is_verbose) mexPrintf("type1 cufinufftf_deconvolve execution time: %.6f seconds\n", seconds);
 
     cudaFree(d_im_SE); //no longer used
 
 
     // ========= coil_combination ========/
-    start = clock();
+    cudaEventRecord(start);
 
     //d_im_SE_deconv is in image domain due to precious inverse cuFFT.
     blockSize = 256;
     gridSize = (imageSize + 255) / 256;
     Im_SE_adj<<<gridSize, blockSize>>>(d_im_out, d_SE, d_im_SE_deconv);
-    cudaDeviceSynchronize();    
-    end = clock();
-    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    if (is_verbose) mexPrintf("SEs_times_Im_adj execution time: %f seconds\n", time_spent);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    seconds = milliseconds / 1000.0f;
+    if (is_verbose) mexPrintf("SEs_times_Im_adj execution time: %.6f seconds\n", seconds);
 
     cudaFree(d_im_SE_deconv); //Clean up
 
 
-    AhA_end = clock();
-    time_spent = (double)(AhA_end - AhA_start) / CLOCKS_PER_SEC;
-    if (is_verbose) mexPrintf("AhA_by_coil execution time: %f seconds\n", time_spent);
+    // Overall timing end
+    cudaEventRecord(function_stop);
+    cudaEventSynchronize(function_stop);
+    cudaEventElapsedTime(&milliseconds, function_start, function_stop);
+    seconds = milliseconds / 1000.0f;
+    if (is_verbose) mexPrintf("AhA_by_coil total execution time: %.6f seconds\n", seconds);
+
+    cudaEventDestroy(function_start);
+    cudaEventDestroy(function_stop);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
 }
 
 
@@ -792,7 +816,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     mxGPUArray *AhAx;
     mwSize dims[4] = {Nx, Ny, Nz, L};
-    AhAx = mxGPUCreateGPUArray(4, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_DO_NOT_INITIALIZE);
+    AhAx = mxGPUCreateGPUArray(4, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_INITIALIZE_VALUES);
 
     // Assign data parameters to device constant memory
     cudaMemcpyToSymbol(d_dataParams, &dataParams, sizeof(dataParamsStruct));
@@ -811,7 +835,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaMalloc(&d_im, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
     cudaMalloc(&d_SEs, Nx * Ny * Nz * Ncoils * sizeof(cuFloatComplex));
     cudaMalloc(&d_im_out, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
-    cudaMalloc(&d_AhAx, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
+    d_AhAx = (cuFloatComplex *)mxGPUGetData(AhAx);
 
     //k-space related
     cudaMalloc(&d_x, M * sizeof(float));
@@ -823,7 +847,6 @@ void mexFunction(int nlhs, mxArray *plhs[],
     //images related
     cudaMemcpy(d_im, im, Nx * Ny * Nz * L * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
     cudaMemcpy(d_SEs, SEs, Nx * Ny * Nz * Ncoils * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
-    cudaMemset(d_AhAx, 0, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
 
     //kspace related
     cudaMemcpy(d_x, x, M * sizeof(float), cudaMemcpyHostToDevice);
@@ -857,6 +880,10 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cublasCreate(&handle);
     cuFloatComplex alpha = make_cuFloatComplex(1.0f, 0.0f);
 
+    cudaEvent_t start_add, stop_add;
+    cudaEventCreate(&start_add);
+    cudaEventCreate(&stop_add);
+
 
     bool is_verbose = true; 
     for (int coil = 0; coil < Ncoils; coil++)
@@ -868,11 +895,19 @@ void mexFunction(int nlhs, mxArray *plhs[],
           
 
         //Add the output from each coil to d_AhAx
-        clock_t start_add = clock();
+
+        float milliseconds = 0;
+        
+        cudaEventRecord(start_add);
         cublasCaxpy(handle, Nx * Ny * Nz * L, &alpha, d_im_out, 1, d_AhAx, 1);
-        clock_t end_add = clock();
-        time_spent = (double)(end_add - start_add) / CLOCKS_PER_SEC;
-        if (is_verbose) mexPrintf("addArrays execution time: %f seconds\n", time_spent);
+        cudaEventRecord(stop_add);
+        cudaEventSynchronize(stop_add);
+        
+        cudaEventElapsedTime(&milliseconds, start_add, stop_add);
+        float seconds = milliseconds / 1000.0f;
+        if (is_verbose) mexPrintf("cublasCaxpy execution time: %.6f seconds\n", seconds);
+        
+
 
         is_verbose = false;  
     }
@@ -880,18 +915,17 @@ void mexFunction(int nlhs, mxArray *plhs[],
     time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     mexPrintf("AhA actual execution time: %f seconds\n", time_spent);
 
+    cudaEventDestroy(start_add);
+    cudaEventDestroy(stop_add);
+
     
     // ========= Post-operation clean-up========/
-
-    cuFloatComplex *d_AhAx_out = (cuFloatComplex *)mxGPUGetData(AhAx);
-    cudaMemcpy(d_AhAx_out, d_AhAx, Nx * Ny * Nz * L * sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
 
 
     plhs[0] = mxGPUCreateMxArrayOnGPU(AhAx);
     
     // Free device memories
     cudaFree(d_im);
-    cudaFree(d_AhAx);
     cudaFree(d_SEs);
     cudaFree(d_im_out);
 
