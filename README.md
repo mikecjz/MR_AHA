@@ -1,5 +1,5 @@
 # MT_CUDA (Toeplitz Branch)
-## Description
+## The Fastest MR-Multitasking Recon West of Mississippi ([Why Does It Work?](#why-does-it-work))
 This repository contains c and cuda-based source codes to perform efficient GPU-and-Toeplitz-based AhA operation for stack-of-stars trajectory in MR-Multitasking reconconstruction. Under the hood, it makes API calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) for uniform FFTs. We use a [modified cufinufft](https://github.com/mikecjz/finufft/tree/toeplitz) to [spread](./cufinufftfspread2d1.cu) the non-Cartesian $\Phi\Phi^H$ operator to Cartesian grid. This repo also contains self-defined CUDA kernels to perform operations such as coil-sensitivity maps multiplication and block-diagnal low-rank kspace update with the gridded $\Phi\Phi^H$. The main function is [AhA_cufinufft_toep.cu](AhA_cufinufft_toep.cu).
 
 >ⓘ Use [cu_finufft_test.m](/cu_finufft_test.m) to test the operator. Test data is provided and can be downloaded [here](https://junzhou.chen.engineer/MT_TEST/AhAx_test_toeplitz.mat).
