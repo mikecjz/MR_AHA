@@ -42,17 +42,17 @@ Phi2Cartesian = cufinufftfspread2d1(single(st.om(:,1)), single(st.om(:,2)), Phi2
 
 tic;
 
-d_AhAx = AhA_ps_cufinufft(d_filtAhb, st, d_SEs, Phi2Cartesian);
+d_AhAx = AhA_cufinufft_toep(d_filtAhb, st, d_SEs, Phi2Cartesian);
 
 toc;
 
 AhAx = gather(d_AhAx);
 %%
-% U0 = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2);
+% U0 = AhA_cufinufft_toep(filtAhb, st, SEs, Phi2);
 % c2 = mean(abs(Ahb(:)),'all')./mean(abs(U0),'all');%real(pinv(U0(:))*Ahb(:));
 % U0 = filtAhb*c2;
 %
 % tic;
-% U = pcg(@(x) AhA_ps_cufinufft(x, st, SEs, Phi2), Ahb(:), [], 10, [], [], U0(:));
+% U = pcg(@(x) AhA_cufinufft_toep(x, st, SEs, Phi2), Ahb(:), [], 10, [], [], U0(:));
 % U = reshape(U, st.Nd(1), st.Nd(2), st.Nz, []);
 % toc;
