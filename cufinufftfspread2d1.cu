@@ -22,7 +22,7 @@
 
 /**
  * Host code
- *run in matlab im = cufinufft2d1(x,y,k,isign,eps,Nx,Ny, M, Ntrans)
+ *run in matlab: im = cufinufftfspread2d1(x,y,k,isign,eps,Nx,Ny, M, Ntrans)
  */
 void mexFunction(int nlhs, mxArray *plhs[],
                  int nrhs, mxArray const *prhs[])

@@ -1,6 +1,8 @@
 %% Load test data
 
 load ./Data/AhAx_test_toeplitz.mat;
+d_filtAhb = gpuArray(filtAhb);
+d_SEs = gpuArray(SEs);
 %% Spread Phi2
 L = size(Phi2,1);
 Ntrajs = size(Phi2,3);
@@ -36,7 +38,7 @@ Phi2Cartesian = cufinufftfspread2d1(single(st.om(:,1)), single(st.om(:,2)), Phi2
 %%
 
 tic;
-d_AhAx = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2Cartesian);
+d_AhAx = AhA_ps_cufinufft(d_filtAhb, st, d_SEs, Phi2Cartesian);
 toc;
 
 

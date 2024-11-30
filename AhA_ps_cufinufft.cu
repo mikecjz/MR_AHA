@@ -46,18 +46,18 @@ __constant__ dataParamsStruct d_dataParams;
  * results are stored in the output array which should be padded to the size of 2*Nx, 2*Ny and initialized to zero before function call.
  * The phase is negated in the result if the coordinate is odd. This ensured that the following FFTs produce centered k-space.
  *
- * @param d_im Pointer to the input device array containing the image data. The array is a flattened
+ * @param[in] d_im Readonly pointer to the input device array containing the image data. The array is a flattened
  *             4D array with dimensions [Nx, Ny, Nz, L], where L is the number of image sets or time points.
- * @param d_SE Pointer to the input device array containing the sensitivity encoding map (single coil). The array
+ * @param[in] d_SE Readonly pointer to the input device array containing the sensitivity encoding map (single coil). The array
  *              is a flattened 3D array with dimensions [Nx, Ny, Nz].
- * @param d_im_SE Pointer to the output device array where the result of the multiplication is stored.
+ * @param[out] d_im_SE Pointer to the output device array where the result of the multiplication is stored.
  *                Dimensions [2*Nx, 2*Ny, Nz, L].
  *
  * @note The kernel assumes that all input and output arrays are properly allocated and reside in GPU memory.
  *       It is designed to be executed on a CUDA-capable GPU with a grid size that covers the entire volume
  *       of the image (Nx, Ny, Nz).
  */
-__global__ void Im_SE_Pad_shift_AddPhase( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
+__global__ void Im_SE_Pad_shift_AddPhase( const cuFloatComplex *d_im,  const cuFloatComplex *d_SE,
                              cuFloatComplex *d_im_SE)
 {
 
@@ -114,7 +114,7 @@ __global__ void Im_SE_Pad_shift_AddPhase( cuFloatComplex *d_im,  cuFloatComplex 
  *
  * @param[out] d_im Pointer to the output device array that will store the result. The array is a flattened
  *             4D array with dimensions [Nx, Ny, Nz, L], where L is the number of image sets or time points.
- * @param[in] d_SE Pointer to the input device array containing the sensitivity encoding map (single coil). The array
+ * @param[in] d_SE Readonly pointer to the input device array containing the sensitivity encoding map (single coil). The array
  *              is a flattened 3D array with dimensions [Nx, Ny, Nz].
  * @param[in] d_im_SE Pointer to the input device array containing the sensitivity-encoded image data.
  *                Dimensions [Nx, Ny, Nz, L].
@@ -123,7 +123,7 @@ __global__ void Im_SE_Pad_shift_AddPhase( cuFloatComplex *d_im,  cuFloatComplex 
  *       It is designed to be executed on a CUDA-capable GPU with a grid size that covers the entire volume
  *       of the image (Nx, Ny, Nz).
  */
-__global__ void Im_SE_adj( cuFloatComplex *d_im,  cuFloatComplex *d_SE,
+__global__ void Im_SE_adj( cuFloatComplex *d_im,  const cuFloatComplex *d_SE,
                              cuFloatComplex *d_im_SE)
 {
 
@@ -235,10 +235,6 @@ __global__ void shiftAndCropImage(cuFloatComplex *d_im_padded, cuFloatComplex *d
  * @param[in]     d_Phi2  Pointer to the overall (Φ * ΦH) transformation matrix. In GPU memory. 
  *                        This is a complex-valued array representing the transformation to be applied.
  *                        Dimension [Ntraj, Nz, L, L]. This layout is for better memory coalescing.
- * @param[in]     Ntrajs  The number of trajectories or unique radial spokes in the k-space data.
- * @param[in]     Nkx     The size of the k-space data in the x-dimension.
- * @param[in]     Nz      The size of the k-space data in the z-dimension.
- * @param[in]     L       The number of ranks.
  *
  * 
  * 
@@ -397,11 +393,11 @@ __global__ void kspaceUpdateToeplitzHermitian(cuFloatComplex *d_k, const cuFloat
  * For example, if the input dimensions are [d1, d2, d3, d4] and permutation is [3,1,0,2],
  * the output dimensions will be [d4, d2, d1, d3].
  * 
- * @param input Pointer to the input array (column-major)
- * @param output Pointer to the output array (column-major)
- * @param dims Original dimensions [d1, d2, d3, d4]
- * @param perm Permutation order [p1, p2, p3, p4] where each p is 0-3
- * @param size Total size of the array (product of dimensions)
+ * @param[in] input Pointer to the input array (column-major)
+ * @param[out] output Pointer to the output array (column-major)
+ * @param[in] dims Original dimensions [d1, d2, d3, d4]
+ * @param[in] perm Permutation order [p1, p2, p3, p4] where each p is 0-3
+ * @param[in] size Total size of the array (product of dimensions)
  */
 __global__ void permute4DCUDAKernel(cuFloatComplex* input, cuFloatComplex* output,
                          const int* dims, const int* perm, const int size) 
@@ -441,9 +437,9 @@ __global__ void permute4DCUDAKernel(cuFloatComplex* input, cuFloatComplex* outpu
  * This function handles the allocation of device memory, copying of permutation parameters,
  * kernel execution, and cleanup for 4D array permutation operations.
  * 
- * @param d_input Input array on device to be permuted, output will also be stored in this memory
- * @param dims Array of 4 dimensions [d1, d2, d3, d4]
- * @param perm Array of 4 permutation indices [p1, p2, p3, p4]
+ * @param[in,out] d_input Input array on device to be permuted, output will also be stored in this memory
+ * @param[in]     dims Array of 4 dimensions [d1, d2, d3, d4]
+ * @param[in]     perm Array of 4 permutation indices [p1, p2, p3, p4]
  */
 void permute4D(cuFloatComplex** d_input, const int* dims, const int* perm) {
     const int imageSize = dims[0] * dims[1] * dims[2] * dims[3];
@@ -526,16 +522,16 @@ __global__ void addArrays(cuFloatComplex *a, cuFloatComplex *b, int arraySize)
  * @param[in] d_k Temporary k-space storage on GPU [M, Ntrans]
  * @param[out] d_im_out Output image on GPU [Nx, Ny, Nz, L]
  * @param[in] cufft_plan cuFFT plan for Z dimension transforms
- * @param[in] cufinufft_type1_plan Plan for Type 1 NUFFT (uniform to non-uniform)
- * @param[in] cufinufft_type2_plan Plan for Type 2 NUFFT (non-uniform to uniform)
+ * @param[in] cufinufft_type1_plan Plan for Type 1 NUFFT (non-uniform to uniform)
+ * @param[in] cufinufft_type2_plan Plan for Type 2 NUFFT (uniform to non-uniform)
  * @param[in] dataParams Struct containing data dimensions and parameters
  * @param[in] verbose Whether to print execution times
  * @note All arrays are assumed to be in column-major order and complexsingle precision
  * @note The function uses constant memory for data parameters via d_dataParams
  */
 
-void AhA_by_coil(cuFloatComplex *d_im,//input image
-                cuFloatComplex *d_SE, //single coil map
+void AhA_by_coil(const cuFloatComplex *d_im,//input image
+                const cuFloatComplex *d_SE, //single coil map
                 const cuFloatComplex *d_Phi2Cartesian, //(Φ * ΦH)
                 cuFloatComplex *d_im_out, //output image
                 cufftHandle cufft_plan,
@@ -711,13 +707,14 @@ void mexFunction(int nlhs, mxArray *plhs[],
     double time_spent;
 
     /* Declare all variables.*/
-    float *x;              // om(1)
-    float *y;              // om(2)
-    mxComplexSingle *im;   // Pointer to complex image-domain data (x), on host [Nx, Ny, Nz, L]
-    mxComplexSingle *SEs;  // Pointer to complex Complex sensitivity maps (SEs), on host [Nx, Ny, Nz, Ncoils]
-    const mxGPUArray *Phi2Cartesian;       // Pointer to complex Phi2 data (Phi2, aka, Om), on host [2*Nx, 2*Ny, Nz, num_lower_coordinates]
-    int isSign = 1;        // Whether to use + sign in complex exponential. Default to true
-    float eps = 1e-6;      // NUFFT precision, default 1e-6;
+    float *x;             // om(1)
+    float *y;             // om(2)
+    const mxGPUArray *im;                // Pointer to mxGPUArray object that holds complex image-domain data (x), on device (GPU) [Nx, Ny, Nz, L]
+    const mxGPUArray *SEs;               // Pointer to mxGPUArray object that holds complex Complex sensitivity maps (SEs), on device (GPU) [Nx, Ny, Nz, Ncoils]
+    const mxGPUArray *Phi2Cartesian;    // Pointer to mxGPUArray object that holds complex Phi2 data (Phi2, aka, Om), on device (GPU) [2*Nx, 2*Ny, Nz, num_lower_coordinates]
+
+    int isSign = 1;      // Whether to use + sign in complex exponential. Default to true
+    float eps = 1e-6;    // NUFFT precision, default 1e-6;
     int64_t Nx;
     int64_t Ny;
     int64_t Nz;
@@ -729,6 +726,8 @@ void mexFunction(int nlhs, mxArray *plhs[],
     size_t Ntrajs;      // Number of in-plane tranjectories. e.g. 280
     dataParamsStruct dataParams;
     //int GPUDeviceIndex; // Which GPU to use
+
+
     // ==========Initialize the MathWorks GPU API. ========== //
     mxInitGPU();
 
@@ -744,17 +743,35 @@ void mexFunction(int nlhs, mxArray *plhs[],
         mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
     }
 
-    // Check input type
-    if (!mxIsSingle(prhs[0]) || !mxIsSingle(mxGetField(prhs[1], 0, "om")) || !mxIsSingle(prhs[2]))
+    //check if certain inputs are gpuArray
+    if (!mxIsGPUArray(prhs[0]) || !mxIsGPUArray(prhs[2]) || !mxIsGPUArray(prhs[3]))
     {
-        snprintf(errorMessage, sizeof(errorMessage), "Inputs original image (x), NU trajectories (st.om), Sensitivity maps (SEs) and Phi2 must be single. \n%s", instruction);
+        snprintf(errorMessage, sizeof(errorMessage), "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be gpuArray and are complex singles. \n%s", instruction);
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
+    }
+
+    //check if certain inputs are valid gpuArrays
+    if (!mxGPUIsValidGPUData(prhs[0]) || !mxGPUIsValidGPUData(prhs[2]) || !mxGPUIsValidGPUData(prhs[3]))
+    {
+        snprintf(errorMessage, sizeof(errorMessage), 
+                "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be valid gpuArrays. \n"
+                "If you see this message, gpuArray might be cleared by gpuDevice(). \n"
+                "%s", 
+                instruction);
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
+    }
+
+    // Check NU trajectories type
+    if (!mxIsSingle(mxGetField(prhs[1], 0, "om")))
+    {
+        snprintf(errorMessage, sizeof(errorMessage), "NU trajectories (st.om) must be single. \n%s", instruction);
         mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
     }
 
     // ==========Assign Pointers and values ========== //
 
     // Input 1: image domain data
-    im = mxGetComplexSingles(prhs[0]); // Get input image domain data
+    im = mxGPUCreateFromMxArray(prhs[0]); // Get input image domain data
 
 
 
@@ -785,15 +802,29 @@ void mexFunction(int nlhs, mxArray *plhs[],
     
 
     // Input 3: Sensitivity Maps
-    const mwSize *coilDims = mxGetDimensions(prhs[2]);
+    SEs = mxGPUCreateFromMxArray(prhs[2]);
+    const mwSize *coilDims = mxGPUGetDimensions(SEs);
     Ncoils = (int64_t)coilDims[3];
-    SEs = mxGetComplexSingles(prhs[2]);
 
     // Input 4: Phi2 (aka, Om)
     // Handle Phi2 after MathWorks GPU API initialization
     Phi2Cartesian = mxGPUCreateFromMxArray(prhs[3]);
     //Phi2 will be handled after MathWorks GPU API initialization
     const mwSize *phi2Dims = mxGPUGetDimensions(Phi2Cartesian);
+
+    // Check if gpuArrays are singles
+    if (mxGPUGetClassID(Phi2Cartesian) != mxSINGLE_CLASS || mxGPUGetClassID(im) != mxSINGLE_CLASS || mxGPUGetClassID(SEs) != mxSINGLE_CLASS)
+    {
+        snprintf(errorMessage, sizeof(errorMessage), "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be singles (and complex too). \n%s", instruction);
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
+    }
+
+    // Check if gpuArrays are complex
+    if (mxGPUGetComplexity(Phi2Cartesian) != mxCOMPLEX || mxGPUGetComplexity(im) != mxCOMPLEX || mxGPUGetComplexity(SEs) != mxCOMPLEX)
+    {
+        snprintf(errorMessage, sizeof(errorMessage), "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be complex (and singles too). \n%s", instruction);
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
+    }
 
     
 
@@ -812,38 +843,35 @@ void mexFunction(int nlhs, mxArray *plhs[],
     // Create output gpuArray
 
     mxGPUArray *AhAx;
+    cuFloatComplex *d_AhAx;     // output image from AhA from all coils on device
     mwSize dims[4] = {Nx, Ny, Nz, L};
     AhAx = mxGPUCreateGPUArray(4, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_INITIALIZE_VALUES);
+    d_AhAx = (cuFloatComplex *)mxGPUGetData(AhAx);
 
     // Assign data parameters to device constant memory
     cudaMemcpyToSymbol(d_dataParams, &dataParams, sizeof(dataParamsStruct));
 
     
-    cuFloatComplex *d_im, *d_SEs; // input image and SEs on device
+    // declare device pointers
+    const cuFloatComplex *d_im, *d_SEs; // input image and SEs on device
     cuFloatComplex *d_im_out;    // output image from AhA_by_coil on devices
-    cuFloatComplex *d_AhAx;     // output image from AhA from all coils on device
-
     float *d_x, *d_y;               // NU points on device
     const cuFloatComplex *d_Phi2Cartesian;   //Phi2 on device
 
+
     // Allocate device memories
-
-    //images related
-    cudaMalloc(&d_im, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
-    cudaMalloc(&d_SEs, Nx * Ny * Nz * Ncoils * sizeof(cuFloatComplex));
+    // images related
     cudaMalloc(&d_im_out, Nx * Ny * Nz * L * sizeof(cuFloatComplex));
-    d_AhAx = (cuFloatComplex *)mxGPUGetData(AhAx);
-
-    //k-space related
+    // k-space related
     cudaMalloc(&d_x, M * sizeof(float));
     cudaMalloc(&d_y, M * sizeof(float));
 
 
 
-    // Copy data to device
-    //images related
-    cudaMemcpy(d_im, im, Nx * Ny * Nz * L * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_SEs, SEs, Nx * Ny * Nz * Ncoils * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
+    // process input data
+    // images related
+    d_im = (cuFloatComplex *)mxGPUGetDataReadOnly(im);
+    d_SEs = (cuFloatComplex *)mxGPUGetDataReadOnly(SEs);
 
     //kspace related
     cudaMemcpy(d_x, x, M * sizeof(float), cudaMemcpyHostToDevice);
@@ -852,10 +880,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     
 
-
-    
-
-    //make cuFFT and cufinufft plans
+    // make cuFFT and cufinufft plans
     cufftHandle cufft_plan;
     int n[3] = {Nz, Nx*2, Ny*2};
     cufftPlanMany(&cufft_plan, 3, n, NULL, NULL, 4*Nx*Ny*Nz, NULL, NULL, 4*Nx*Ny*Nz, CUFFT_C2C, L);
@@ -872,7 +897,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cufinufftf_makeplan(2, 2, modes, -1, Ntrans, 1e-6, &cufinufft_type2_plan, &opts);// make type 2 plan, deafault options
     cufinufftf_setpts(cufinufft_type2_plan, M, d_x, d_y, NULL, 0, NULL, NULL, NULL);
 
-    start = clock();
+    //start = clock();
     //loop through each coil
 
     cublasHandle_t handle;
@@ -883,7 +908,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaEventCreate(&start_add);
     cudaEventCreate(&stop_add);
 
-    cuFloatComplex *d_SE; //Pointer to current coil map's starting address (SINGLE COIL)
+    const cuFloatComplex *d_SE; //Pointer to current coil map's starting address (SINGLE COIL)
 
     bool is_verbose = false; 
     for (int coil = 0; coil < Ncoils; coil++)
@@ -911,9 +936,9 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
         is_verbose = false;  
     }
-    end = clock();
-    time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    mexPrintf("AhA actual execution time: %f seconds\n", time_spent);
+    // end = clock();
+    // time_spent = (double)(end - start) / CLOCKS_PER_SEC;
+    // mexPrintf("AhA actual execution time: %f seconds\n", time_spent);
 
     cudaEventDestroy(start_add);
     cudaEventDestroy(stop_add);
@@ -925,19 +950,20 @@ void mexFunction(int nlhs, mxArray *plhs[],
     plhs[0] = mxGPUCreateMxArrayOnGPU(AhAx);
     
     // Free device memories
-    cudaFree(d_im);
-    cudaFree(d_SEs);
     cudaFree(d_im_out);
 
     cudaFree(d_x);
     cudaFree(d_y);
 
-    //destroy cufft and cufinufft plans
+    // Destroy cufft and cufinufft plans
     cufftDestroy(cufft_plan);
     cufinufftf_destroy(cufinufft_type1_plan);
     cufinufftf_destroy(cufinufft_type2_plan);
     cublasDestroy(handle);
-   
+
+    // Destroy MathWorks GPU API objects
+    mxGPUDestroyGPUArray(im);
+    mxGPUDestroyGPUArray(SEs);
     mxGPUDestroyGPUArray(AhAx);
     mxGPUDestroyGPUArray(Phi2Cartesian);
 
