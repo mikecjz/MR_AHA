@@ -172,7 +172,7 @@ __global__ void Im_SE_adj( cuFloatComplex *d_im,  const cuFloatComplex *d_SE,
  *
  * This CUDA kernel extracts the central region from a zero-padded 4D complex-valued image array.
  * The input fftshifted and padded array has dimensions [2*Nx, 2*Ny, Nz, L] and is ifftshifted and cropped to [Nx, Ny, Nz, L].
- * The kernel assumes column-major memory layout.
+ * The kernel assumes column-major memory layout. Phase is negated in the result if the coordinate is odd.
  *
  * @param[in] d_im_padded Pointer to the input device array containing the fftshifted and padded image data.
  *                        Array dimensions are [2*Nx, 2*Ny, Nz, L].
@@ -216,7 +216,12 @@ __global__ void shiftAndCropImage(cuFloatComplex *d_im_padded, cuFloatComplex *d
         {
             int im_index =      ((l * Nz + z) * Ny + y) * Nx + x;
             int im_hat_index =  ((l * Nz + z) * Ny*2 + y_hat) * Nx*2 + x_hat;
+
+            float phase = 1-2*((x+y)&1); //1 if even, -1 if odd
             d_im[im_index] = d_im_padded[im_hat_index];
+
+            d_im[im_index].x *= phase;
+            d_im[im_index].y *= phase;
         }
     }
 
@@ -505,6 +510,107 @@ __global__ void addArrays(cuFloatComplex *a, cuFloatComplex *b, int arraySize)
 }
 
 /**
+ * @brief Validates input arguments for the AhA_ps_cufinufft MEX function
+ *
+ * This function performs validation checks on the input arguments passed to the MEX function:
+ * 1. Verifies that exactly 4 input arguments are provided
+ * 2. Checks that inputs x (image), SEs (sensitivity maps), and Phi2 are GPU arrays
+ * 3. Validates that these GPU arrays contain valid GPU data
+ * 4. Ensures that the non-uniform trajectories (st.om) are in single precision
+ *
+ * @param[in] nrhs Number of right-hand side (input) arguments
+ * @param[in] prhs Array of pointers to the input arguments:
+ *                 - prhs[0]: x - Image data (must be gpuArray)
+ *                 - prhs[1]: st - Structure containing trajectories (st.om must be single)
+ *                 - prhs[2]: SEs - Sensitivity maps (must be gpuArray)
+ *                 - prhs[3]: Phi2 - Transformation matrix (must be gpuArray)
+ *
+ * @throws AhA_ps_cufinufft:InputError if any validation check fails, with a descriptive error message
+ *
+ * @note Uses mexErrMsgIdAndTxt() to throw errors, which will terminate MEX function execution
+ * @note Error messages include usage instructions for proper function calling
+ * @note Data types and complexities for the input gpuArrays are checked in checkGPUArrays()
+ */
+void checkMexInputs(int nrhs, mxArray const *prhs[])
+{
+    char const *const instruction = "Usage:\n AhAx = AhA_ps_cufinufft(x, st, SEs, Phi2).";
+
+    char errorMessage[1024]; // remember to ensure this buffer is large enough for your message
+    // Check input number
+    if (nrhs != 4)
+    {
+        snprintf(errorMessage, sizeof(errorMessage), "Exactly 4 inputs are required. \n%s", instruction);
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
+    }
+
+    //check if certain inputs are gpuArray
+    if (!mxIsGPUArray(prhs[0]) || !mxIsGPUArray(prhs[2]) || !mxIsGPUArray(prhs[3]))
+    {
+        snprintf(errorMessage, sizeof(errorMessage), "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be gpuArray and are complex singles. \n%s", instruction);
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
+    }
+
+    //check if certain inputs are valid gpuArrays
+    if (!mxGPUIsValidGPUData(prhs[0]) || !mxGPUIsValidGPUData(prhs[2]) || !mxGPUIsValidGPUData(prhs[3]))
+    {
+        snprintf(errorMessage, sizeof(errorMessage), 
+                "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be valid gpuArrays. \n"
+                "If you see this message, gpuArray might be cleared by gpuDevice(). \n"
+                "%s", 
+                instruction);
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
+    }
+
+    // Check NU trajectories type
+    if (!mxIsSingle(mxGetField(prhs[1], 0, "om")))
+    {
+        snprintf(errorMessage, sizeof(errorMessage), "NU trajectories (st.om) must be single. \n%s", instruction);
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
+    }
+}
+
+
+/**
+ * @brief Validates data types and complexity of GPU arrays used in AhA_ps_cufinufft
+ *
+ * This function performs validation checks on three GPU arrays to ensure they meet the
+ * requirements for the AhA operation:
+ * 1. Verifies that all arrays are in single precision (float)
+ * 2. Verifies that all arrays contain complex values
+ *
+ * @param[in] Phi2Cartesian GPU array containing the transformation matrix
+ * @param[in] im GPU array containing the input image data
+ * @param[in] SEs GPU array containing the sensitivity maps
+ *
+ * @throws AhA_ps_cufinufft:InputError if any array has incorrect precision or is not complex,
+ *         with a descriptive error message including usage instructions
+ *
+ * @note Uses mexErrMsgIdAndTxt() to throw errors, which will terminate MEX function execution
+ * @note Error messages include proper usage instructions for the main function
+ * @note The error message buffer is sized to 1024 characters to accommodate detailed messages
+ */
+void checkGPUArrays(const mxGPUArray *Phi2Cartesian, const mxGPUArray *im, const mxGPUArray *SEs)
+{
+
+    char const *const instruction = "Usage:\n AhAx = AhA_ps_cufinufft(x, st, SEs, Phi2).";
+
+    char errorMessage[1024]; // remember to ensure this buffer is large enough for your message
+    // Check if gpuArrays are singles
+    if (mxGPUGetClassID(Phi2Cartesian) != mxSINGLE_CLASS || mxGPUGetClassID(im) != mxSINGLE_CLASS || mxGPUGetClassID(SEs) != mxSINGLE_CLASS)
+    {
+        snprintf(errorMessage, sizeof(errorMessage), "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be singles (and complex too). \n%s", instruction);
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
+    }
+
+    // Check if gpuArrays are complex
+    if (mxGPUGetComplexity(Phi2Cartesian) != mxCOMPLEX || mxGPUGetComplexity(im) != mxCOMPLEX || mxGPUGetComplexity(SEs) != mxCOMPLEX)
+    {
+        snprintf(errorMessage, sizeof(errorMessage), "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be complex (and singles too). \n%s", instruction);
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
+    }
+}
+
+/**
  * @brief Performs the AhA operation for MR-Multitasking subspace reconstruction with stack-of-stars trajectory
  * 
  * This function implements the core AhA operation for a single coil, which consists of:
@@ -709,9 +815,9 @@ void mexFunction(int nlhs, mxArray *plhs[],
     /* Declare all variables.*/
     float *x;             // om(1)
     float *y;             // om(2)
-    const mxGPUArray *im;                // Pointer to mxGPUArray object that holds complex image-domain data (x), on device (GPU) [Nx, Ny, Nz, L]
-    const mxGPUArray *SEs;               // Pointer to mxGPUArray object that holds complex Complex sensitivity maps (SEs), on device (GPU) [Nx, Ny, Nz, Ncoils]
-    const mxGPUArray *Phi2Cartesian;    // Pointer to mxGPUArray object that holds complex Phi2 data (Phi2, aka, Om), on device (GPU) [2*Nx, 2*Ny, Nz, num_lower_coordinates]
+    const mxGPUArray *mxGPUArray_im;               // Pointer to mxGPUArray object that holds complex image-domain data (x), on device (GPU) [Nx, Ny, Nz, L]
+    const mxGPUArray *mxGPUArray_SEs;              // Pointer to mxGPUArray object that holds complex Complex sensitivity maps (SEs), on device (GPU) [Nx, Ny, Nz, Ncoils]
+    const mxGPUArray *mxGPUArray_Phi2Cartesian;    // Pointer to mxGPUArray object that holds complex Phi2 data (Phi2, aka, Om), on device (GPU) [2*Nx, 2*Ny, Nz, num_lower_coordinates]
 
     int isSign = 1;      // Whether to use + sign in complex exponential. Default to true
     float eps = 1e-6;    // NUFFT precision, default 1e-6;
@@ -727,51 +833,16 @@ void mexFunction(int nlhs, mxArray *plhs[],
     dataParamsStruct dataParams;
     //int GPUDeviceIndex; // Which GPU to use
 
-
     // ==========Initialize the MathWorks GPU API. ========== //
     mxInitGPU();
 
-    char const *const errId = "parallel:gpu:mexGPUExample:InvalidInput";
-    char const *const errMsg = "Invalid input to MEX file.";
-    char const *const instruction = "Usage:\n AhAx = AhA_ps_cufinufft(x, st, SEs, Phi2).";
-
-    char errorMessage[1024]; // remember to ensure this buffer is large enough for your message
-    // Check input number
-    if (nrhs != 4)
-    {
-        snprintf(errorMessage, sizeof(errorMessage), "Exactly 4 inputs are required. \n%s", instruction);
-        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
-    }
-
-    //check if certain inputs are gpuArray
-    if (!mxIsGPUArray(prhs[0]) || !mxIsGPUArray(prhs[2]) || !mxIsGPUArray(prhs[3]))
-    {
-        snprintf(errorMessage, sizeof(errorMessage), "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be gpuArray and are complex singles. \n%s", instruction);
-        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
-    }
-
-    //check if certain inputs are valid gpuArrays
-    if (!mxGPUIsValidGPUData(prhs[0]) || !mxGPUIsValidGPUData(prhs[2]) || !mxGPUIsValidGPUData(prhs[3]))
-    {
-        snprintf(errorMessage, sizeof(errorMessage), 
-                "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be valid gpuArrays. \n"
-                "If you see this message, gpuArray might be cleared by gpuDevice(). \n"
-                "%s", 
-                instruction);
-        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
-    }
-
-    // Check NU trajectories type
-    if (!mxIsSingle(mxGetField(prhs[1], 0, "om")))
-    {
-        snprintf(errorMessage, sizeof(errorMessage), "NU trajectories (st.om) must be single. \n%s", instruction);
-        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
-    }
+    // Check inputs
+    checkMexInputs(nrhs, prhs);
 
     // ==========Assign Pointers and values ========== //
 
     // Input 1: image domain data
-    im = mxGPUCreateFromMxArray(prhs[0]); // Get input image domain data
+    mxGPUArray_im = mxGPUCreateFromMxArray(prhs[0]); // Get input image domain data
 
 
 
@@ -802,32 +873,21 @@ void mexFunction(int nlhs, mxArray *plhs[],
     
 
     // Input 3: Sensitivity Maps
-    SEs = mxGPUCreateFromMxArray(prhs[2]);
-    const mwSize *coilDims = mxGPUGetDimensions(SEs);
+    mxGPUArray_SEs = mxGPUCreateFromMxArray(prhs[2]);
+    const mwSize *coilDims = mxGPUGetDimensions(mxGPUArray_SEs);
     Ncoils = (int64_t)coilDims[3];
 
     // Input 4: Phi2 (aka, Om)
     // Handle Phi2 after MathWorks GPU API initialization
-    Phi2Cartesian = mxGPUCreateFromMxArray(prhs[3]);
+    mxGPUArray_Phi2Cartesian = mxGPUCreateFromMxArray(prhs[3]);
     //Phi2 will be handled after MathWorks GPU API initialization
-    const mwSize *phi2Dims = mxGPUGetDimensions(Phi2Cartesian);
+    const mwSize *phi2Dims = mxGPUGetDimensions(mxGPUArray_Phi2Cartesian);
 
-    // Check if gpuArrays are singles
-    if (mxGPUGetClassID(Phi2Cartesian) != mxSINGLE_CLASS || mxGPUGetClassID(im) != mxSINGLE_CLASS || mxGPUGetClassID(SEs) != mxSINGLE_CLASS)
-    {
-        snprintf(errorMessage, sizeof(errorMessage), "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be singles (and complex too). \n%s", instruction);
-        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
-    }
 
-    // Check if gpuArrays are complex
-    if (mxGPUGetComplexity(Phi2Cartesian) != mxCOMPLEX || mxGPUGetComplexity(im) != mxCOMPLEX || mxGPUGetComplexity(SEs) != mxCOMPLEX)
-    {
-        snprintf(errorMessage, sizeof(errorMessage), "Inputs original image (x), Sensitivity maps (SEs) and Phi2 must be complex (and singles too). \n%s", instruction);
-        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", errorMessage);
-    }
+    // Check gpuArrays
+    checkGPUArrays(mxGPUArray_Phi2Cartesian, mxGPUArray_im, mxGPUArray_SEs);
 
     
-
     // Assign data parameters to struct
     dataParams.Nx = Nx;
     dataParams.Ny = Ny;
@@ -842,11 +902,11 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     // Create output gpuArray
 
-    mxGPUArray *AhAx;
+    mxGPUArray *mxGPUArray_AhAx;
     cuFloatComplex *d_AhAx;     // output image from AhA from all coils on device
     mwSize dims[4] = {Nx, Ny, Nz, L};
-    AhAx = mxGPUCreateGPUArray(4, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_INITIALIZE_VALUES);
-    d_AhAx = (cuFloatComplex *)mxGPUGetData(AhAx);
+    mxGPUArray_AhAx = mxGPUCreateGPUArray(4, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_INITIALIZE_VALUES);
+    d_AhAx = (cuFloatComplex *)mxGPUGetData(mxGPUArray_AhAx);
 
     // Assign data parameters to device constant memory
     cudaMemcpyToSymbol(d_dataParams, &dataParams, sizeof(dataParamsStruct));
@@ -870,13 +930,13 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     // process input data
     // images related
-    d_im = (cuFloatComplex *)mxGPUGetDataReadOnly(im);
-    d_SEs = (cuFloatComplex *)mxGPUGetDataReadOnly(SEs);
+    d_im = (cuFloatComplex *)mxGPUGetDataReadOnly(mxGPUArray_im);
+    d_SEs = (cuFloatComplex *)mxGPUGetDataReadOnly(mxGPUArray_SEs);
 
     //kspace related
     cudaMemcpy(d_x, x, M * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_y, y, M * sizeof(float), cudaMemcpyHostToDevice);
-    d_Phi2Cartesian = (cuFloatComplex *)mxGPUGetDataReadOnly(Phi2Cartesian);
+    d_Phi2Cartesian = (cuFloatComplex *)mxGPUGetDataReadOnly(mxGPUArray_Phi2Cartesian);
 
     
 
@@ -902,7 +962,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     cublasHandle_t handle;
     cublasCreate(&handle);
-    cuFloatComplex alpha = make_cuFloatComplex(1.0f, 0.0f);
+    cuFloatComplex scale_factor_fft = make_cuFloatComplex(1.0f/(Nx*Ny*Nz), 0.0f); //FFT scaling factor
 
     cudaEvent_t start_add, stop_add;
     cudaEventCreate(&start_add);
@@ -919,12 +979,12 @@ void mexFunction(int nlhs, mxArray *plhs[],
         AhA_by_coil(d_im, d_SE, d_Phi2Cartesian, d_im_out, cufft_plan, cufinufft_type1_plan, cufinufft_type2_plan, dataParams, is_verbose);
           
 
-        //Add the output from each coil to d_AhAx
+        //Add the output from each coil to d_AhAx and scale by FFT scaling factor
 
         float milliseconds = 0;
         
         cudaEventRecord(start_add);
-        cublasCaxpy(handle, Nx * Ny * Nz * L, &alpha, d_im_out, 1, d_AhAx, 1);
+        cublasCaxpy(handle, Nx * Ny * Nz * L, &scale_factor_fft, d_im_out, 1, d_AhAx, 1);
         cudaEventRecord(stop_add);
         cudaEventSynchronize(stop_add);
         
@@ -947,7 +1007,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     // ========= Post-operation clean-up========/
 
 
-    plhs[0] = mxGPUCreateMxArrayOnGPU(AhAx);
+    plhs[0] = mxGPUCreateMxArrayOnGPU(mxGPUArray_AhAx);
     
     // Free device memories
     cudaFree(d_im_out);
@@ -962,10 +1022,10 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cublasDestroy(handle);
 
     // Destroy MathWorks GPU API objects
-    mxGPUDestroyGPUArray(im);
-    mxGPUDestroyGPUArray(SEs);
-    mxGPUDestroyGPUArray(AhAx);
-    mxGPUDestroyGPUArray(Phi2Cartesian);
+    mxGPUDestroyGPUArray(mxGPUArray_im);
+    mxGPUDestroyGPUArray(mxGPUArray_SEs);
+    mxGPUDestroyGPUArray(mxGPUArray_AhAx);
+    mxGPUDestroyGPUArray(mxGPUArray_Phi2Cartesian);
 
     // Free host allocated memory
     free(x);
