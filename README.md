@@ -1,5 +1,5 @@
 # MT_CUDA (Toeplitz Branch)
-## The Fastest MR-Multitasking Recon West of Mississippi ([Why Does It Work?](#why-does-it-work))
+## The Fastest Stack-of-Stars MR-Multitasking Recon West of Mississippi ([Why Does It Work?](#why-does-it-work))
 This repository contains c and cuda-based source codes to perform efficient GPU-and-Toeplitz-based AhA operation for stack-of-stars trajectory in MR-Multitasking reconconstruction. Under the hood, it makes API calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) for uniform FFTs. We use a [modified cufinufft](https://github.com/mikecjz/finufft/tree/toeplitz) to [spread](./cufinufftfspread2d1.cu) the non-Cartesian $\Phi\Phi^H$ operator to Cartesian grid. This repo also contains self-defined CUDA kernels to perform operations such as coil-sensitivity maps multiplication and block-diagnal low-rank kspace update with the gridded $\Phi\Phi^H$. The main function is [AhA_cufinufft_toep.cu](AhA_cufinufft_toep.cu).
 
 >ⓘ Use [cu_finufft_test.m](/cu_finufft_test.m) to test the operator. Test data is provided and can be downloaded [here](https://junzhou.chen.engineer/MT_TEST/AhAx_test_toeplitz.mat).
@@ -80,7 +80,7 @@ The digonal elements of $\Lambda$ can be derived based on the non-Cartesian coor
 
 Under MR-Multitasking, the AhA operator is block-Toeplitz, which can be diagonalized similarly, with the "diagonal" aspect being block-diagonal, a.k.a. the gridded $\Phi\Phi^H$ operator.
 
-The challenge for 3D AhA is that there is usually not enough GPU memory to hold the gridded $\Phi\Phi^H$ operator, which has a size of $2Nx \times 2Ny \times 2Nz \times L \times L$. For the image parameters mentioned above, the gridded $\Phi\Phi^H$ operator is about 26GB under single precision and a 24G GPU cannot hold it.
+The challenge for 3D stack-of-stars AhA is that there is usually not enough GPU memory to hold the gridded $\Phi\Phi^H$ operator, which has a size of $2Nx \times 2Ny \times Nz \times L \times L$. For the image parameters mentioned above, the gridded $\Phi\Phi^H$ operator is about 26GB under single precision and a 24G GPU cannot hold it.
 
 Luckily for us, each individual matrix ($L \times L$) of the grided $\Phi\Phi^H$ operator is [Hermitian](https://en.wikipedia.org/wiki/Hermitian_matrix). This means that the lower triangular portion of the matrix is an exact copy of the complex conjugate of the upper portion and vice versa. If we only store the lower triangular portion of the gridded $\Phi\Phi^H$ operator, which will only require about 13GB memory, the 3D AhA operation becomes feasible on the GPU, albeit still memory demanding. See [AhA_cufinufft_toep.cu](/AhA_cufinufft_toep.cu#L328) for details on how to handle if the operator is only stored in the lower triangular portion.
 
