@@ -904,8 +904,8 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     mxGPUArray *mxGPUArray_AhAx;
     cuFloatComplex *d_AhAx;     // output image from AhA from all coils on device
-    mwSize dims[4] = {Nx, Ny, Nz, L};
-    mxGPUArray_AhAx = mxGPUCreateGPUArray(4, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_INITIALIZE_VALUES);
+    mwSize dims[1] = {Nx * Ny * Nz * L};
+    mxGPUArray_AhAx = mxGPUCreateGPUArray(1, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_INITIALIZE_VALUES);
     d_AhAx = (cuFloatComplex *)mxGPUGetData(mxGPUArray_AhAx);
 
     // Assign data parameters to device constant memory

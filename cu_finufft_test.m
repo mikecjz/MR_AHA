@@ -5,7 +5,7 @@ load ./Data/AhAx_test_toeplitz.mat;
 %% Transfer input data to GPU
 d_filtAhb = gpuArray(filtAhb);
 d_SEs = gpuArray(SEs);
-
+d_Ahb = gpuArray(Ahb);
 %% Spread Phi2
 L = size(Phi2,1);
 Ntrajs = size(Phi2,3);
@@ -35,24 +35,27 @@ Phi2_lower = repmat(Phi2_lower, [1, Nkx, 1, 1]);
 % Phi2_lower = 1i*ones(size(Phi2_lower),'like',single(1i));
 
 %spread the Phi2_lower to cartedian grid, note the outpt will be on GPU
-Phi2Cartesian = cufinufftfspread2d1(single(st.om(:,1)), single(st.om(:,2)), Phi2_lower, +1,1e-6,Ny, Nx, M, Nz * num_lower_coordinates);
+d_Phi2Cartesian = cufinufftfspread2d1(single(st.om(:,1)), single(st.om(:,2)), Phi2_lower, +1,1e-6,Ny, Nx, M, Nz * num_lower_coordinates);
+d_Phi2Cartesian = reshape(d_Phi2Cartesian,2 * Nx, 2 * Ny, Nz, []);
 
 
 %% Test AhA
 
 tic;
 
-d_AhAx = AhA_cufinufft_toep(d_filtAhb, st, d_SEs, Phi2Cartesian);
+d_AhAx = AhA_cufinufft_toep(d_filtAhb, st, d_SEs, d_Phi2Cartesian);
 
 toc;
 
-AhAx = gather(d_AhAx);
+AhAx = reshape(gather(d_AhAx),[Nx, Ny, Nz, L]);
 %%
-% U0 = AhA_cufinufft_toep(filtAhb, st, SEs, Phi2);
-% c2 = mean(abs(Ahb(:)),'all')./mean(abs(U0),'all');%real(pinv(U0(:))*Ahb(:));
-% U0 = filtAhb*c2;
-%
-% tic;
-% U = pcg(@(x) AhA_cufinufft_toep(x, st, SEs, Phi2), Ahb(:), [], 10, [], [], U0(:));
-% U = reshape(U, st.Nd(1), st.Nd(2), st.Nz, []);
-% toc;
+U0 = AhA_ps3D_toep(d_filtAhb, st, d_SEs, d_Phi2Cartesian);
+c2 = mean(abs(Ahb(:)),'all')./mean(abs(U0),'all');%real(pinv(U0(:))*Ahb(:));
+U0 = filtAhb*c2;
+
+tic;
+U = pcg(@(x) AhA_ps3D_toep(x, st, d_SEs, d_Phi2Cartesian), d_Ahb(:), [], 10, [], [], U0(:));
+U = reshape(U, st.Nd(1), st.Nd(2), st.Nz, []);
+toc;
+
+U_cpu = gather(U);
