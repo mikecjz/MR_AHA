@@ -369,14 +369,14 @@ __global__ void kspaceUpdateToeplitzHermitian(cuFloatComplex *d_k, const cuFloat
             {
                 if (innerL >= l) //lower triangle
                 {
-                    matrix_linear_index = (2 * L -l + 1)*l/2 + innerL - l;
+                    matrix_linear_index = (2 * L -l + 1)*l/2 + innerL - l; //Sum of arithmetic series
                     Phi2_index = x_hat + Nx_hat * (y_hat + Ny_hat * (z + Nz * matrix_linear_index));
                     tempValue = cuCaddf(tempValue, cuCmulf(sharedInput[innerL], d_Phi2Cartesian[Phi2_index]));
                     
                 }
                 else //upper triangle
                 {
-                    matrix_linear_index = (2 * L -innerL + 1)*innerL/2 + l - innerL;
+                    matrix_linear_index = (2 * L -innerL + 1)*innerL/2 + l - innerL; //Sum of arithmetic series, indices swapped
                     Phi2_index = x_hat + Nx_hat * (y_hat + Ny_hat * (z + Nz * matrix_linear_index));
                     tempValue = cuCaddf(tempValue, cuCmulf(sharedInput[innerL], cuConjf(d_Phi2Cartesian[Phi2_index])));
                 }
