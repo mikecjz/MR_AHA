@@ -1,6 +1,6 @@
 # MT_CUDA (Toeplitz Branch)
 ## The Fastest Stack-of-Stars MR-Multitasking Recon West of Mississippi ([Why Does It Work?](#why-does-it-work))
-This repository contains c and cuda-based source codes to perform efficient GPU-and-Toeplitz-based AhA operation for stack-of-stars trajectory in MR-Multitasking reconconstruction. Under the hood, it makes API calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) for uniform FFTs. We use a [modified cufinufft](https://github.com/mikecjz/finufft/tree/toeplitz) to [spread](./cufinufftfspread2d1.cu) the non-Cartesian $\Phi\Phi^H$ operator to Cartesian grid. This repo also contains self-defined CUDA kernels to perform operations such as coil-sensitivity maps multiplication and block-diagnal low-rank kspace update with the gridded $\Phi\Phi^H$. The main function is [AhA_cufinufft_toep.cu](AhA_cufinufft_toep.cu).
+This repository contains c and cuda-based source codes to perform efficient GPU-and-Toeplitz-based AhA operation for stack-of-stars trajectory in MR-Multitasking reconconstruction. Under the hood, it makes API calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) for uniform FFTs. We use a [modified cufinufft](https://github.com/mikecjz/finufft/tree/toeplitz) to [spread](./cufinufftfspread2d1.cu) the non-Cartesian $\Phi\Phi^H$ operator to Cartesian grid. This repo also contains self-defined CUDA kernels to perform operations such as coil-sensitivity maps multiplication and block-diagonal low-rank kspace update with the gridded $\Phi\Phi^H$. The main function is [AhA_cufinufft_toep.cu](AhA_cufinufft_toep.cu).
 
 >ⓘ Use [cu_finufft_test.m](/cu_finufft_test.m) to test the operator. Test data is provided and can be downloaded [here](https://junzhou.chen.engineer/MT_TEST/AhAx_test_toeplitz.mat).
 
@@ -17,7 +17,7 @@ At the moment, the AhA operation takes around 1.2 seconds for a image matrix siz
 > ⚠️ The above image dimensions are about the maximum this hardware can support due to memory limitations.
 
 ## Compilation and Usage
->CAUTION: This project is in its alpha phase. Please exercise patientce when setting up necessary environments for compilation and runtime. The author has undertaken efforts to reduce the chance of unexpected errors but they still might occur and lead to matlab crashing.
+>CAUTION: This project is in its alpha phase. Please exercise patience when setting up necessary environments for compilation and runtime. The author has undertaken efforts to reduce the chance of unexpected errors but they still might occur and lead to matlab crashing.
 
 #### Dependencies
 1. You will need to have [CUDA toolkit](https://developer.nvidia.com/cuda-toolkit) installed. 
@@ -76,13 +76,13 @@ $$Tx \implies F^H\Lambda F\hat{x}, $$
 >* $\Lambda \in \mathbb{C}^{2N \times 2N}$ is a diagonal matrix
 >* $\hat{x} \in \mathbb{C}^{2N}$ is the zero-padded vector of $x$
 
-The digonal elements of $\Lambda$ can be derived based on the non-Cartesian coordiantes but we usually use NUFFT packages to estimate them (see [Baron et al., MRM 2018](https://onlinelibrary.wiley.com/doi/10.1002/mrm.26928)).
+The diagonal elements of $\Lambda$ can be derived based on the non-Cartesian coordinates but we usually use NUFFT packages to estimate them (see [Baron et al., MRM 2018](https://onlinelibrary.wiley.com/doi/10.1002/mrm.26928)).
 
 Under MR-Multitasking, the AhA operator is block-Toeplitz, which can be diagonalized similarly, with the "diagonal" aspect being block-diagonal, a.k.a. the gridded $\Phi\Phi^H$ operator.
 
 The challenge for 3D stack-of-stars AhA is that there is usually not enough GPU memory to hold the gridded $\Phi\Phi^H$ operator, which has a size of $2Nx \times 2Ny \times Nz \times L \times L$. For the image parameters mentioned above, the gridded $\Phi\Phi^H$ operator is about 26GB under single precision and a 24G GPU cannot hold it.
 
-Luckily for us, each individual matrix ($L \times L$) of the grided $\Phi\Phi^H$ operator is [Hermitian](https://en.wikipedia.org/wiki/Hermitian_matrix). This means that the lower triangular portion of the matrix is an exact copy of the complex conjugate of the upper portion and vice versa. If we only store the lower triangular portion of the gridded $\Phi\Phi^H$ operator, which will only require about 13GB memory, the 3D AhA operation becomes feasible on the GPU, albeit still memory demanding. See [AhA_cufinufft_toep.cu](/AhA_cufinufft_toep.cu#L328) for details on how to handle if the operator is only stored in the lower triangular portion.
+Luckily for us, each individual matrix ($L \times L$) of the gridded $\Phi\Phi^H$ operator is [Hermitian](https://en.wikipedia.org/wiki/Hermitian_matrix). This means that the lower triangular portion of the matrix is an exact copy of the complex conjugate of the upper portion and vice versa. If we only store the lower triangular portion of the gridded $\Phi\Phi^H$ operator, which will only require about 13GB memory, the 3D AhA operation becomes feasible on the GPU, albeit still memory demanding. See [AhA_cufinufft_toep.cu](/AhA_cufinufft_toep.cu#L328) for details on how to handle if the operator is only stored in the lower triangular portion.
 
 >#### "But I saw non-Hermitian $\Phi\Phi^H$ after gridding when I was doing 2D Toeplitz and we had this whole thing to enforce symmetric positive semi-definitness via eigen decomposition?", Zihao might ask.
 
@@ -95,4 +95,4 @@ A standard type 1 NUFFT (non-uniform to uniform) involves the following steps:
 3. Crop and deconvolve by dividing the output with the transfer function of the kernel.
 4. (Only for recovering $\Lambda$ for Toeplitz operations) Peform inverse FFT.
 
-If we spread the Hermitian $\Phi\Phi^H$ to Cartesian grid via a real and non-negative kernel, there is `NO REASON` to beleive the elements in the grided operator is `NOT` also Hermitian. My hypothesis is that the Hermitian symmetry is disrupted by the "devolvultion" in step 3. This is why we have [modified finufft](https://github.com/mikecjz/finufft/tree/toeplitz) such that we hijack the nufft process and expose the [spreading](https://github.com/mikecjz/finufft/blob/5d438feb35925e114ad0cc4535258f92041b0e14/src/cuda/2d/cufinufft2d.cu#L81C5-L81C25) and the [deconvolution](https://github.com/mikecjz/finufft/blob/5d438feb35925e114ad0cc4535258f92041b0e14/src/cuda/2d/cufinufft2d.cu#L147C5-L147C28) API. We use the freshed grided $\Phi\Phi^H$ after step 1 for block-digonal multiplication and deconvolve only after the block-diagonal operation. This way we theoretically retain the same results that we would get from finufft while maintaining Hermitian symmetry of the gridded operator.
+If we spread the Hermitian $\Phi\Phi^H$ to Cartesian grid via a real and non-negative kernel, there is `NO REASON` to beleive the elements in the gridded operator is `NOT` also Hermitian. My hypothesis is that the Hermitian symmetry is disrupted by the "devolvultion" in step 3. This is why we have [modified finufft](https://github.com/mikecjz/finufft/tree/toeplitz) such that we hijack the nufft process and expose the [spreading](https://github.com/mikecjz/finufft/blob/5d438feb35925e114ad0cc4535258f92041b0e14/src/cuda/2d/cufinufft2d.cu#L81C5-L81C25) and the [deconvolution](https://github.com/mikecjz/finufft/blob/5d438feb35925e114ad0cc4535258f92041b0e14/src/cuda/2d/cufinufft2d.cu#L147C5-L147C28) API. We use the freshly gridded $\Phi\Phi^H$ after step 1 for block-diagonal multiplication and deconvolve only after the block-diagonal operation. This way we theoretically retain the same results that we would get from finufft while maintaining Hermitian symmetry of the gridded operator.
