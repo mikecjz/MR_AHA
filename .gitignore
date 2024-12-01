@@ -3,3 +3,4 @@
 *.asv
 *.code-workspace
 Data/
+build/

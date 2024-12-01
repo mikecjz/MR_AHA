@@ -1,30 +1,35 @@
 # MT_CUDA (Toeplitz Branch)
-## The Fastest Stack-of-Stars MR-Multitasking Recon West of Mississippi ([Why Does It Work?](#why-does-it-work))
-This repository contains c and cuda-based source codes to perform efficient GPU-and-Toeplitz-based AhA operation for stack-of-stars trajectory in MR-Multitasking reconconstruction. Under the hood, it makes API calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) for uniform FFTs. We use a [modified cufinufft](https://github.com/mikecjz/finufft/tree/toeplitz) to [spread](./cufinufftfspread2d1.cu) the non-Cartesian $\Phi\Phi^H$ operator to Cartesian grid. This repo also contains self-defined CUDA kernels to perform operations such as coil-sensitivity maps multiplication and block-diagonal low-rank kspace update with the gridded $\Phi\Phi^H$. The main function is [AhA_cufinufft_toep.cu](AhA_cufinufft_toep.cu).
+
+## The Fastest Stack-of-Stars MR-Multitasking Reconstruction West of Mississippi ([Why Does It Work?](#why-does-it-work))
+
+This repository contains c and cuda-based source codes to perform efficient GPU-and-Toeplitz-based AhA operation for stack-of-stars trajectory in MR-Multitasking reconstruction. Under the hood, it makes API calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) for uniform FFTs. We use a [modified cufinufft](https://github.com/mikecjz/finufft/tree/toeplitz) to [spread](./cufinufftfspread2d1.cu) the non-Cartesian $\Phi\Phi^H$ operator to Cartesian grid.
 
 >ⓘ Use [cu_finufft_test.m](/cu_finufft_test.m) to test the operator. Test data is provided and can be downloaded [here](https://junzhou.chen.engineer/MT_TEST/AhAx_test_toeplitz.mat).
-
 >ⓘ Additionally, this repo contains example simple nufft API calls to [cufinufftf2d1(GPU)](cufinufftf2d1.cu) and [finufftf2d1(CPU)](finufftf2d1.c).
 
 At the moment, the AhA operation takes around 1.2 seconds for a image matrix size of $320 \times 320 \times 56$ with $L = 12$ and $Ncoils = 12$.
 
 >Hardware environments:
+>
 > * NVIDIA GeForce RTX 3090 (24G)
 > * NVIDIA-SMI 535.171.04
 > * Driver Version: 535.171.04
 > * CUDA Version: 12.2
-> 
+>
 > ⚠️ The above image dimensions are about the maximum this hardware can support due to memory limitations.
 
 ## Compilation and Usage
+>
 >CAUTION: This project is in its alpha phase. Please exercise patience when setting up necessary environments for compilation and runtime. The author has undertaken efforts to reduce the chance of unexpected errors but they still might occur and lead to matlab crashing.
 
 #### Dependencies
-1. You will need to have [CUDA toolkit](https://developer.nvidia.com/cuda-toolkit) installed. 
+
+1. You will need to have [CUDA toolkit](https://developer.nvidia.com/cuda-toolkit) installed.
 2. You will need to download and compile [modified finufft](https://github.com/mikecjz/finufft/tree/toeplitz) with [CUDA enabled](https://finufft.readthedocs.io/en/latest/install_gpu.html).
 3. You will need matlab version R2018a or later.
 
 #### Compilation
+
 1. Set the paths in [compile_mex.m](/compile_mex.m).
 2. run [compile_mex.m](/compile_mex.m) in matlab.
 
@@ -37,29 +42,57 @@ A shell script [matlab_with_env.sh](/matlab_with_env.sh) is provided to launch m
 
 1. Set the `FINUFFT_LIB` and `CUDA_LIB` variables inside the script.
 2. Make sure the script is executable. If not, run in shell:
+
     ```bash
     chmod +x ./matlab_with_env.sh
     ```
+
 3. Launch matlab using the script
+
     ```bash
     ./matlab_with_env.sh
     ```
+
     >Note: Copy the script in one of your `PATH` folders (e.g. `$HOME/.local/bin`) to launch without the relative path indicator `./`
 
+### Linking cuFINUFFT statically (CMake)
 
+---
+A script ([build_mex_static.sh](./build_mex_static.sh)) is provided to compile the mex files using CMake. The only requirement is you set the env variable `MATLAB_ROOT` before launching.
+
+To figure out your matlabroot, run in matlab
+
+```matlab
+matlabroot
+```
+
+Set environment and run compile script
+
+```bash
+export MATLAB_ROOT=</path/to/matlab>
+
+./build_mex_static.sh
+```
+
+This will pull the [modified finufft](https://github.com/mikecjz/finufft/tree/toeplitz) automatically, compile it, and link its static `libcufinufft.a` library to the mex files.
+
+The `FINUFFT_LIB` environment is then unnecessary. `CUDA_LIB` is still required.
 
 ## Development and Debugging in Visual Studio Code
+
 This code was developed in Visual Studio Code remotely with ssh. Set the `includePath` in [c_cpp_properties.json](/.vscode/c_cpp_properties.json) for IntelliSense and auto code completion.
 
 To launch debug session:
+
 1. Compile mex with debug flags enabled.
-2. Change `program` in [launch.json](/.vscode/launch.json) to the matlab executable file in your server. 
+2. Change `program` in [launch.json](/.vscode/launch.json) to the matlab executable file in your server.
 3. Make sure `environment` for `LD_LIBRARY_PATH` in [launch.json](/.vscode/launch.json) is set to the specification described above.
 4. Set breakpoints in [AhA_ps_cufinufft.cu](/AhA_ps_cufinufft.cu) and launch directly in VS Code.
 
 Use the [MATLAB GPU CUDA and MEX Programming Manual](https://www.mathworks.com/help/parallel-computing/gpu-cuda-and-mex-programming.html) as a reference for development.
 
 ## Useful troubleshooting commands
+
 ```bash
 nm -D <FINUFFT_DIR>/build/libcufinufft.so | grep cufinufft2d1_exec
 ```
@@ -84,9 +117,9 @@ The challenge for 3D stack-of-stars AhA is that there is usually not enough GPU 
 
 Luckily for us, each individual matrix ($L \times L$) of the gridded $\Phi\Phi^H$ operator is [Hermitian](https://en.wikipedia.org/wiki/Hermitian_matrix). This means that the lower triangular portion of the matrix is an exact copy of the complex conjugate of the upper portion and vice versa. If we only store the lower triangular portion of the gridded $\Phi\Phi^H$ operator, which will only require about 13GB memory, the 3D AhA operation becomes feasible on the GPU, albeit still memory demanding. See [AhA_cufinufft_toep.cu](/AhA_cufinufft_toep.cu#L328) for details on how to handle if the operator is only stored in the lower triangular portion.
 
->#### "But I saw non-Hermitian $\Phi\Phi^H$ after gridding when I was doing 2D Toeplitz and we had this whole thing to enforce symmetric positive semi-definitness via eigen decomposition?", Zihao might ask.
+>#### "But I saw non-Hermitian $\Phi\Phi^H$ after gridding when I was doing 2D Toeplitz and we had this whole thing to enforce symmetric positive semi-definitness via eigen decomposition?", Zihao might ask
 
-Good question! non-Hermitian matrices after gridding is also what I saw if I follow the exact formula detailed in [Baron et al., MRM 2018](https://onlinelibrary.wiley.com/doi/10.1002/mrm.26928). For non-low-rank applications, this formula no doubt works well. However, for the low-rank case like MR-Multitasking, let's take a closer look why the Hermitian symmetry might be disrupted. 
+Good question! non-Hermitian matrices after gridding is also what I saw if I follow the exact formula detailed in [Baron et al., MRM 2018](https://onlinelibrary.wiley.com/doi/10.1002/mrm.26928). For non-low-rank applications, this formula no doubt works well. However, for the low-rank case like MR-Multitasking, let's take a closer look why the Hermitian symmetry might be disrupted.
 
 A standard type 1 NUFFT (non-uniform to uniform) involves the following steps:
 
@@ -95,4 +128,4 @@ A standard type 1 NUFFT (non-uniform to uniform) involves the following steps:
 3. Crop and deconvolve by dividing the output with the transfer function of the kernel.
 4. (Only for recovering $\Lambda$ for Toeplitz operations) Peform inverse FFT.
 
-If we spread the Hermitian $\Phi\Phi^H$ to Cartesian grid via a real and non-negative kernel, there is `NO REASON` to beleive the elements in the gridded operator is `NOT` also Hermitian. My hypothesis is that the Hermitian symmetry is disrupted by the "devolvultion" in step 3. This is why we have [modified finufft](https://github.com/mikecjz/finufft/tree/toeplitz) such that we hijack the nufft process and expose the [spreading](https://github.com/mikecjz/finufft/blob/5d438feb35925e114ad0cc4535258f92041b0e14/src/cuda/2d/cufinufft2d.cu#L81C5-L81C25) and the [deconvolution](https://github.com/mikecjz/finufft/blob/5d438feb35925e114ad0cc4535258f92041b0e14/src/cuda/2d/cufinufft2d.cu#L147C5-L147C28) API. We use the freshly gridded $\Phi\Phi^H$ after step 1 for block-diagonal multiplication and deconvolve only after the block-diagonal operation. This way we theoretically retain the same results that we would get from finufft while maintaining Hermitian symmetry of the gridded operator.
+If we spread the Hermitian $\Phi\Phi^H$ to Cartesian grid via a real and non-negative kernel, there is `NO REASON` to believe the elements in the gridded operator is `NOT` also Hermitian. My hypothesis is that the Hermitian symmetry is disrupted by the "decolvultion" in step 3. This is why we have [modified finufft](https://github.com/mikecjz/finufft/tree/toeplitz) such that we hijack the nufft process and expose the [spreading](https://github.com/mikecjz/finufft/blob/5d438feb35925e114ad0cc4535258f92041b0e14/src/cuda/2d/cufinufft2d.cu#L81C5-L81C25) and the [deconvolution](https://github.com/mikecjz/finufft/blob/5d438feb35925e114ad0cc4535258f92041b0e14/src/cuda/2d/cufinufft2d.cu#L147C5-L147C28) API.
