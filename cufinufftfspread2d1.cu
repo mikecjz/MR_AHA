@@ -118,6 +118,8 @@ void mexFunction(int nlhs, mxArray *plhs[],
      */
     cufinufft_default_opts(&opts); //make default options
 
+    opts.upsampfac = 2.0;
+
     cufinufftf_makeplan(1, 2, modes, isSign, Ntrans, eps, &plan, &opts);
 
 

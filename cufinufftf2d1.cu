@@ -115,10 +115,13 @@ void mexFunction(int nlhs, mxArray *plhs[],
     //mexPrintf("CUDA MEM COPY Complete\n");
 
     // make cufinufft plan
+    cufinufft_opts opts;
+    cufinufft_default_opts(&opts);
+    opts.upsampfac = 2.0;
     /*
      * int cufinufftf_makeplan(int type, int dim, int64_t* nmodes, int iflag, int ntr, float tol, cufinufftf_plan *plan, cufinufft_opts *opts)
      */
-    cufinufftf_makeplan(1, 2, modes, isSign, Ntrans, eps, &plan, NULL);
+    cufinufftf_makeplan(1, 2, modes, isSign, Ntrans, eps, &plan, &opts);
 
     //mexPrintf("cufinufftf_makeplan Complete\n");
 

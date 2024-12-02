@@ -947,6 +947,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     cufinufft_opts opts;
     cufinufft_default_opts(&opts);
+    opts.upsampfac = 2.0;
     int64_t modes[2] = {Nx, Ny};
 
     cufinufftf_plan cufinufft_type1_plan;
