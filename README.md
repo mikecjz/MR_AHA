@@ -4,10 +4,13 @@
 
 This repository contains c and cuda-based source codes to perform efficient GPU-and-Toeplitz-based AhA operation for stack-of-stars trajectory in MR-Multitasking reconstruction. Under the hood, it makes API calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) for uniform FFTs. We use a [modified cufinufft](https://github.com/mikecjz/finufft/tree/toeplitz) to [spread](./src/cufinufftfspread2d1.cu) the non-Cartesian $\Phi\Phi^H$ operator to Cartesian grid.
 
->ⓘ Use [toeplitz_test.m](./toeplitz_test.m) to test the operator. Test data is provided and can be downloaded [here](https://junzhou.chen.engineer/MT_TEST/AhAx_test_toeplitz.mat).
->ⓘ Additionally, this repo contains example simple nufft API calls to [cufinufftf2d1(GPU)](./src/cufinufftf2d1.cu) and [finufftf2d1(CPU)](./src/finufftf2d1.c).
+>ⓘ Use [toeplitz_test.m](./toeplitz_test.m) to test the Toeplitz-based operator. Test data is provided and can be downloaded here --> ([Toeplitz Test Data](https://junzhou.chen.engineer/MT_TEST/AhAx_test_toeplitz.mat)).
 
-At the moment, the AhA operation takes around 1.2 seconds for a image matrix size of $320 \times 320 \times 56$ with $L = 12$ and $Ncoils = 12$.
+>ⓘThis repo contains:
+>- An [AhA_ps_cufinufft](./src/AhA_ps_cufinufft.cu) operator that is cuFINUFFT-based, which can be tested using [cu_finufft_test.m](./cu_finufft_test.m) and with [cuFINUFFT Test Data](https://junzhou.chen.engineer/MT_TEST/AhAx_test.mat)
+>- Example simple nufft API calls to [cufinufftf2d1(GPU)](./src/cufinufftf2d1.cu) and [finufftf2d1(CPU)](./src/finufftf2d1.c).
+
+At the moment, the Toeplitz AhA operation takes around 1.2 seconds for a image matrix size of $320 \times 320 \times 56$ with $L = 12$ and $Ncoils = 12$.
 
 >Hardware environments:
 >
@@ -127,7 +130,7 @@ The challenge for 3D stack-of-stars AhA is that there is usually not enough GPU 
 
 Luckily for us, each individual matrix ($L \times L$) of the gridded $\Phi\Phi^H$ operator is [Hermitian](https://en.wikipedia.org/wiki/Hermitian_matrix). This means that the lower triangular portion of the matrix is an exact copy of the complex conjugate of the upper portion and vice versa. If we only store the lower triangular portion of the gridded $\Phi\Phi^H$ operator, which will only require about 13GB memory, the 3D AhA operation becomes feasible on the GPU, albeit still memory demanding. See [AhA_cufinufft_toep.cu](./src/AhA_cufinufft_toep.cu#L328) for details on how to handle if the operator is only stored in the lower triangular portion.
 
->#### "But I saw non-Hermitian $\Phi\Phi^H$ after gridding when I was doing 2D Toeplitz and we had this whole thing to enforce symmetric positive semi-definitness via eigen decomposition?", Zihao might ask
+>#### "But I saw non-Hermitian $\Phi\Phi^H$ after gridding when I was doing 2D Toeplitz and we had this whole thing to enforce symmetric positive semi-definitness via eigen decomposition?", [Zihao](https://mrrl.ucla.edu/pages/Zihao_Chen) might ask.
 
 Good question! non-Hermitian matrices after gridding is also what I saw if I follow the exact formula detailed in [Baron et al., MRM 2018](https://onlinelibrary.wiley.com/doi/10.1002/mrm.26928). For non-low-rank applications, this formula no doubt works well. However, for the low-rank case like MR-Multitasking, let's take a closer look why the Hermitian symmetry might be disrupted.
 
