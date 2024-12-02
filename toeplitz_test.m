@@ -49,13 +49,16 @@ toc;
 
 AhAx = reshape(gather(d_AhAx),[Nx, Ny, Nz, L]);
 %%
-U0 = AhA_ps3D_toep(d_filtAhb, st, d_SEs, d_Phi2Cartesian);
-c2 = mean(abs(Ahb(:)),'all')./mean(abs(U0),'all');%real(pinv(U0(:))*Ahb(:));
-U0 = filtAhb*c2;
+d_U0 = AhA_ps3D_toep(d_filtAhb, st, d_SEs, d_Phi2Cartesian);
+c2 = mean(abs(Ahb(:)),'all')./mean(abs(d_U0),'all');%real(pinv(U0(:))*Ahb(:));
+d_U0 = filtAhb*c2;
 
 tic;
-U = pcg(@(x) AhA_ps3D_toep(x, st, d_SEs, d_Phi2Cartesian), d_Ahb(:), [], 10, [], [], U0(:));
-U = reshape(U, st.Nd(1), st.Nd(2), st.Nz, []);
+d_U = pcg(@(x) AhA_ps3D_toep(x, st, d_SEs, d_Phi2Cartesian), d_Ahb(:), [], 10, [], [], d_U0(:));
+d_U = reshape(d_U, st.Nd(1), st.Nd(2), st.Nz, []);
 toc;
 
-U_cpu = gather(U);
+U = gather(d_U);
+
+figure;
+imshow(abs(U(:,:,1,1)),[])
