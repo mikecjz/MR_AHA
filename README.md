@@ -4,7 +4,7 @@
 
 This repository contains c and cuda-based source codes to perform efficient GPU-and-Toeplitz-based AhA operation for stack-of-stars trajectory in MR-Multitasking reconstruction. Under the hood, it makes API calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) for uniform FFTs. We use a [modified cufinufft](https://github.com/mikecjz/finufft/tree/toeplitz) to [spread](./src/cufinufftfspread2d1.cu) the non-Cartesian $\Phi\Phi^H$ operator to Cartesian grid.
 
->ⓘ Use [cu_finufft_test.m](./cu_finufft_test.m) to test the operator. Test data is provided and can be downloaded [here](https://junzhou.chen.engineer/MT_TEST/AhAx_test_toeplitz.mat).
+>ⓘ Use [toeplitz_test.m](./toeplitz_test.m) to test the operator. Test data is provided and can be downloaded [here](https://junzhou.chen.engineer/MT_TEST/AhAx_test_toeplitz.mat).
 >ⓘ Additionally, this repo contains example simple nufft API calls to [cufinufftf2d1(GPU)](./src/cufinufftf2d1.cu) and [finufftf2d1(CPU)](./src/finufftf2d1.c).
 
 At the moment, the AhA operation takes around 1.2 seconds for a image matrix size of $320 \times 320 \times 56$ with $L = 12$ and $Ncoils = 12$.

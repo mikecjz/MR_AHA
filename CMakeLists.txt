@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.18)  # Increased minimum version
 # Add this line near the top of your CMakeLists.txt, after cmake_minimum_required
 include(cmake/CPM.cmake)
 
-project(MT_CUDA CUDA CXX)
+project(MT_CUDA CUDA C)
 
 # Set CUDA architecture
 #set(CMAKE_CUDA_ARCHITECTURES 86 80)  # Adjust these values as needed
@@ -54,6 +54,7 @@ endif()
 
 # Create MEX targets
 set(MEX_SOURCES
+    src/AhA_ps_cufinufft.cu
     src/AhA_cufinufft_toep.cu
     src/cufinufftf2d1.cu
     src/cufinufftfspread2d1.cu
