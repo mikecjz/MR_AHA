@@ -77,6 +77,16 @@ export MATLAB_ROOT=</path/to/matlab>
 This will pull the [modified finufft](https://github.com/mikecjz/finufft/tree/toeplitz) automatically, compile it, and link its static `libcufinufft.a` library to the mex files.
 
 The `FINUFFT_LIB` environment is then unnecessary. `CUDA_LIB` is still required.
+>#### ⚠️ Known Issue 
+>If you use CMake to compile. [Manually initializing GPU](https://www.mathworks.com/help/parallel-computing/mxinitgpu.html) in matlab before running the mex functions.
+> * Option 1: Run gpuDevice(gpuIndex).
+> * Option 2: Create any gpuArray.
+>
+>Otherwise you will get an error. Something like:
+>
+>```
+>Invalid MEX-file 'MT_CUDA/AhA_ps_cufinufft.mexa64': MT_CUDA/>AhA_ps_cufinufft.mexa64: undefined symbol: mxInitGPU
+>```
 
 ## Development and Debugging in Visual Studio Code
 
