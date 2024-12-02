@@ -54,9 +54,9 @@ endif()
 
 # Create MEX targets
 set(MEX_SOURCES
-    AhA_cufinufft_toep.cu
-    cufinufftf2d1.cu
-    cufinufftfspread2d1.cu
+    src/AhA_cufinufft_toep.cu
+    src/cufinufftf2d1.cu
+    src/cufinufftfspread2d1.cu
 )
 
 foreach(SOURCE ${MEX_SOURCES})

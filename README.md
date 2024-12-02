@@ -2,10 +2,10 @@
 
 ## The Fastest Stack-of-Stars MR-Multitasking Reconstruction West of Mississippi ([Why Does It Work?](#why-does-it-work))
 
-This repository contains c and cuda-based source codes to perform efficient GPU-and-Toeplitz-based AhA operation for stack-of-stars trajectory in MR-Multitasking reconstruction. Under the hood, it makes API calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) for uniform FFTs. We use a [modified cufinufft](https://github.com/mikecjz/finufft/tree/toeplitz) to [spread](./cufinufftfspread2d1.cu) the non-Cartesian $\Phi\Phi^H$ operator to Cartesian grid.
+This repository contains c and cuda-based source codes to perform efficient GPU-and-Toeplitz-based AhA operation for stack-of-stars trajectory in MR-Multitasking reconstruction. Under the hood, it makes API calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) for uniform FFTs. We use a [modified cufinufft](https://github.com/mikecjz/finufft/tree/toeplitz) to [spread](./src/cufinufftfspread2d1.cu) the non-Cartesian $\Phi\Phi^H$ operator to Cartesian grid.
 
->ⓘ Use [cu_finufft_test.m](/cu_finufft_test.m) to test the operator. Test data is provided and can be downloaded [here](https://junzhou.chen.engineer/MT_TEST/AhAx_test_toeplitz.mat).
->ⓘ Additionally, this repo contains example simple nufft API calls to [cufinufftf2d1(GPU)](cufinufftf2d1.cu) and [finufftf2d1(CPU)](finufftf2d1.c).
+>ⓘ Use [cu_finufft_test.m](./cu_finufft_test.m) to test the operator. Test data is provided and can be downloaded [here](https://junzhou.chen.engineer/MT_TEST/AhAx_test_toeplitz.mat).
+>ⓘ Additionally, this repo contains example simple nufft API calls to [cufinufftf2d1(GPU)](./src/cufinufftf2d1.cu) and [finufftf2d1(CPU)](./src/finufftf2d1.c).
 
 At the moment, the AhA operation takes around 1.2 seconds for a image matrix size of $320 \times 320 \times 56$ with $L = 12$ and $Ncoils = 12$.
 
@@ -30,15 +30,15 @@ At the moment, the AhA operation takes around 1.2 seconds for a image matrix siz
 
 #### Compilation
 
-1. Set the paths in [compile_mex.m](/compile_mex.m).
-2. run [compile_mex.m](/compile_mex.m) in matlab.
+1. Set the paths in [compile_mex.m](./compile_mex.m).
+2. run [compile_mex.m](./compile_mex.m) in matlab.
 
 >To compile with debug flags, uncomment the debug section.
 
 #### Runtime Environments
 Because the mex is compiled with references to compiled dynamic libraries from finufft and cuFFT, it is necessary to let matlab know where to find these libraries. This is achieved by setting the environment variable `LD_LIBRARY_PATH` before launching matlab. Additionally, in a multi-GPU server, we want to handle the GPU selection by setting the encironment variable `CUDA_VISIBLE_DEVICES` before launching matlab since we are making low-level API calls to CUDA codes. 
 
-A shell script [matlab_with_env.sh](/matlab_with_env.sh) is provided to launch matlab after selecting the GPU with the largest available memory and setting the `LD_LIBRARY_PATH` variable.
+A shell script [matlab_with_env.sh](./scripts/matlab_with_env.sh) is provided to launch matlab after selecting the GPU with the largest available memory and setting the `LD_LIBRARY_PATH` variable.
 
 1. Set the `FINUFFT_LIB` and `CUDA_LIB` variables inside the script.
 2. Make sure the script is executable. If not, run in shell:
@@ -87,7 +87,7 @@ To launch debug session:
 1. Compile mex with debug flags enabled.
 2. Change `program` in [launch.json](/.vscode/launch.json) to the matlab executable file in your server.
 3. Make sure `environment` for `LD_LIBRARY_PATH` in [launch.json](/.vscode/launch.json) is set to the specification described above.
-4. Set breakpoints in [AhA_ps_cufinufft.cu](/AhA_ps_cufinufft.cu) and launch directly in VS Code.
+4. Set breakpoints in [AhA_cufinufft_toep.cu](./src/AhA_cufinufft_toep.cu) and launch directly in VS Code.
 
 Use the [MATLAB GPU CUDA and MEX Programming Manual](https://www.mathworks.com/help/parallel-computing/gpu-cuda-and-mex-programming.html) as a reference for development.
 
@@ -115,7 +115,7 @@ Under MR-Multitasking, the AhA operator is block-Toeplitz, which can be diagonal
 
 The challenge for 3D stack-of-stars AhA is that there is usually not enough GPU memory to hold the gridded $\Phi\Phi^H$ operator, which has a size of $2Nx \times 2Ny \times Nz \times L \times L$. For the image parameters mentioned above, the gridded $\Phi\Phi^H$ operator is about 26GB under single precision and a 24G GPU cannot hold it.
 
-Luckily for us, each individual matrix ($L \times L$) of the gridded $\Phi\Phi^H$ operator is [Hermitian](https://en.wikipedia.org/wiki/Hermitian_matrix). This means that the lower triangular portion of the matrix is an exact copy of the complex conjugate of the upper portion and vice versa. If we only store the lower triangular portion of the gridded $\Phi\Phi^H$ operator, which will only require about 13GB memory, the 3D AhA operation becomes feasible on the GPU, albeit still memory demanding. See [AhA_cufinufft_toep.cu](/AhA_cufinufft_toep.cu#L328) for details on how to handle if the operator is only stored in the lower triangular portion.
+Luckily for us, each individual matrix ($L \times L$) of the gridded $\Phi\Phi^H$ operator is [Hermitian](https://en.wikipedia.org/wiki/Hermitian_matrix). This means that the lower triangular portion of the matrix is an exact copy of the complex conjugate of the upper portion and vice versa. If we only store the lower triangular portion of the gridded $\Phi\Phi^H$ operator, which will only require about 13GB memory, the 3D AhA operation becomes feasible on the GPU, albeit still memory demanding. See [AhA_cufinufft_toep.cu](./src/AhA_cufinufft_toep.cu#L328) for details on how to handle if the operator is only stored in the lower triangular portion.
 
 >#### "But I saw non-Hermitian $\Phi\Phi^H$ after gridding when I was doing 2D Toeplitz and we had this whole thing to enforce symmetric positive semi-definitness via eigen decomposition?", Zihao might ask
 
