@@ -582,7 +582,7 @@ __global__ void permute4DCUDAKernel(cuFloatComplex* input, cuFloatComplex* outpu
  * This function handles the allocation of device memory, copying of permutation parameters,
  * kernel execution, and cleanup for 4D array permutation operations.
  * 
- * @param d_input Input array on device to be permuted, output will also be stored in this memory
+ * @param d_input Pointer to the pointer to the input array on device to be permuted, output will also be stored in this memory
  * @param dims Array of 4 dimensions [d1, d2, d3, d4]
  * @param perm Array of 4 permutation indices [p1, p2, p3, p4]
  */
@@ -612,9 +612,9 @@ void permute4D(cuFloatComplex** d_input, const int* dims, const int* perm) {
     // double time_spent = (double)(end - start)/CLOCKS_PER_SEC;
     // mexPrintf("permute4D execution time: %f seconds\n", time_spent);
 
-    cudaFree(*d_input);
-    *d_input = temp; // Now this properly updates the pointer in the calling function
-    temp = nullptr;
+
+    cudaMemcpy(*d_input, temp, imageSize * sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
+    cudaFree(temp);
 
     // Cleanup
     cudaFree(d_dims);
