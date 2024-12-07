@@ -21,3 +21,4 @@ mexcuda('-v','./src/cufinufftfspread2d1.cu','-R2018a',['-I' finufft_include],['-
 % mexcuda('-v','-G','-g','./src/AhA_cufinufft_toep.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
 % mexcuda('-v','-G','-g','./src/cufinufftf2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
 % mexcuda('-v','-G','-g','./src/cufinufftfspread2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+%
