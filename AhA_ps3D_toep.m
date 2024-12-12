@@ -5,12 +5,12 @@ try
 
     AhAx = AhA_cufinufft_toep(x, st, SEs, Phi2) ;
 
+    AhAx = AhAx(:);
+    fprintf('.')
+
 catch errormsg
 
     fprintf(2,'AhA_ps3D_toep failed. \n');
     fprintf(2,'%s\n', errormsg.message);
 
 end
-
-AhAx = AhAx(:);
-fprintf('.')

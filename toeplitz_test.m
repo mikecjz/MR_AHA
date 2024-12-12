@@ -1,6 +1,6 @@
 %% Load test data
 
-load ./Data/AhAx_test_toeplitz.mat;
+load ./Data/test_40slices_3coils_L2.mat;
 
 %% Transfer input data to GPU
 d_filtAhb = gpuArray(filtAhb);
@@ -48,13 +48,13 @@ d_AhAx = AhA_cufinufft_toep(d_filtAhb, st, d_SEs, d_Phi2Cartesian);
 toc;
 
 AhAx = reshape(gather(d_AhAx),[Nx, Ny, Nz, L]);
-%%
+%% Least Squares Reconstruction
 d_U0 = AhA_ps3D_toep(d_filtAhb, st, d_SEs, d_Phi2Cartesian);
 c2 = mean(abs(Ahb(:)),'all')./mean(abs(d_U0),'all');%real(pinv(U0(:))*Ahb(:));
-d_U0 = filtAhb*c2;
+d_U0 = gpuArray(zeros(size(d_U0),'like',single(1i)));
 
 tic;
-d_U = pcg(@(x) AhA_ps3D_toep(x, st, d_SEs, d_Phi2Cartesian), d_Ahb(:), [], 10, [], [], d_U0(:));
+d_U = pcg(@(x) AhA_ps3D_toep(x, st, d_SEs, d_Phi2Cartesian), d_Ahb(:), [], 30, [], [], d_U0(:));
 d_U = reshape(d_U, st.Nd(1), st.Nd(2), st.Nz, []);
 toc;
 

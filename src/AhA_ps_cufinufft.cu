@@ -19,7 +19,7 @@
 #include <cufft.h>
 #include <time.h>
 #include <string.h>
-
+#include <cublas_v2.h>
 typedef struct {
   int Nx; // Number of first image dimension
   int Ny; // Number of second image dimension
@@ -1043,6 +1043,10 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cufinufftf_makeplan(2, 2, modes, -1, Ntrans, 1e-6, &cufinufft_type2_plan, &opts);// make type 2 plan, deafault options
     cufinufftf_setpts(cufinufft_type2_plan, M, d_x, d_y, NULL, 0, NULL, NULL, NULL);
 
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    cuFloatComplex scale_factor_fft = make_cuFloatComplex(1.0f/(Nx*Ny*Nz), 0.0f); //FFT scaling factor
+
 
     //loop through each coil
     for (int coil = 0; coil < Ncoils; coil++)
@@ -1053,10 +1057,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
         
         AhA_by_coil(d_im, d_SE, d_Phi2, d_k, d_im_out, cufft_plan, cufinufft_type1_plan, cufinufft_type2_plan, dataParams);
 
-        //Add the output from each coil to d_AhAx
-        dim3 blockSize(256);
-        dim3 gridSize((Nx * Ny * Nz * L + 255) / 256);
-        addArrays<<<gridSize, blockSize>>>(d_AhAx, d_im_out, Nx * Ny * Nz * L);
+        cublasCaxpy(handle, Nx * Ny * Nz * L, &scale_factor_fft, d_im_out, 1, d_AhAx, 1);
         cudaDeviceSynchronize();
     }
 

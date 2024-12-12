@@ -615,11 +615,11 @@ void checkGPUArrays(const mxGPUArray *Phi2Cartesian, const mxGPUArray *im, const
  * 
  * This function implements the core AhA operation for a single coil, which consists of:
  * 1. Multiplying input image with sensitivity map (SEs * im)
- * 2. Forward FFT in Z dimension 
+ * 2. Forward 3D cuFFT
  * 3. Type 1 NUFFT to transform from uniform to non-uniform k-space
  * 4. Block-diagonal k-space update with Phi2
  * 5. Type 2 NUFFT to transform back to uniform space
- * 6. Inverse FFT in Z dimension
+ * 6. Inverse 3D cuFFT
  * 7. Conjugate multiplication with sensitivity map
  *
  * @param[in] d_im Input image on GPU device memory [Nx, Ny, Nz, L]
@@ -718,7 +718,7 @@ void AhA_by_coil(const cuFloatComplex *d_im,//input image
     seconds = milliseconds / 1000.0f;
     if (is_verbose) mexPrintf("kspaceUpdateToeplitzHermitian execution time: %.6f seconds\n", seconds);
 
-    // ========== Inverse cuFFT in the 3rd (Z) dimension ========== /
+    // ========== Batched Inverse 3D cuFFT========== /
 
     //Execute
     cudaEventRecord(start);
