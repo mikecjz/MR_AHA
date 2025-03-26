@@ -208,7 +208,7 @@ require about 13GB memory, the 3D AhA operation becomes feasible on the GPU, alb
 demanding. See [AhA_cufinufft_toep.cu](./src/AhA_cufinufft_toep.cu#L328) for details on how to
 handle if the operator is only stored in the lower triangular portion.
 
->#### "But I saw non-Hermitian $\Phi\Phi^H$ after gridding when I was doing 2D Toeplitz and we had this whole thing to enforce symmetric positive semi-definitness via eigen decomposition?", [Zihao](https://mrrl.ucla.edu/pages/Zihao_Chen) might ask.
+>"But I saw non-Hermitian $\Phi\Phi^H$ after gridding when I was doing 2D Toeplitz and we had this whole thing to enforce symmetric positive semi-definitness via eigen decomposition?", [Zihao](https://mrrl.ucla.edu/pages/Zihao_Chen) might ask.
 
 Good question! non-Hermitian matrices after gridding is also what I saw if I follow the exact
 formula detailed in [Baron et al., MRM 2018](https://onlinelibrary.wiley.com/doi/10.1002/mrm.26928).
