@@ -705,9 +705,18 @@ void AhA_by_coil(const cuFloatComplex *d_im,//input image
 
     // =========Block-Diagonal kspace update ========/
 
+    int blockSizeBlkdiag;
 
-    const int blockSizeBlkdiag = 256;
-    const int gridSizeBlkdiag = (4*imageSize + 255) / 256;
+    // To make sure shared memory is within limits
+    if (L < 24 ){
+        blockSizeBlkdiag = 256;
+    }else if (L < 48){
+        blockSizeBlkdiag = 128;
+    }else if (L < 96){
+        blockSizeBlkdiag = 64;
+    }
+
+    const int gridSizeBlkdiag = (4*imageSize + blockSizeBlkdiag -1 ) / blockSizeBlkdiag;
     const int sharedMemSizeBlkdiag = blockSizeBlkdiag * L * sizeof(cuFloatComplex);
     cudaEventRecord(start);
     //d_im_SE is in kspace due to previous cuFFT.
@@ -863,6 +872,12 @@ void mexFunction(int nlhs, mxArray *plhs[],
     Nz = (int64_t)mxGetScalar(mxGetField(prhs[1], 0, "Nz"));
     M = (size_t)mxGetScalar(mxGetField(prhs[1], 0, "M"));
     L = (int64_t)mxGetScalar(mxGetField(prhs[1], 0, "L"));
+
+    // Make sure L is not too large
+    if (L >= 96){
+        mexErrMsgIdAndTxt("AhA_cufinufft_toep:InputError", "L must be less than 96 (< 96)");
+    }
+
     // Get k-space size from Phi2 and st.traj_bart  
     mxArray *traj_bart = mxGetField(prhs[1], 0, "traj_bart");
     const mwSize *traj_bart_dims = mxGetDimensions(traj_bart);

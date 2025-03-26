@@ -784,8 +784,18 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     if (verbose) mexPrintf("permute4D execution time: %f seconds\n", time_spent);
 
 
-    const int blockSizeBlkdiag = 256;
-    const int gridSizeBlkdiag = (Ntrajs * Nz * Nkx + 255) / 256;
+    int blockSizeBlkdiag;
+
+    // To make sure shared memory is within limits
+    if (L < 24){
+        blockSizeBlkdiag = 256;
+    }else if (L < 48){
+        blockSizeBlkdiag = 128;
+    }else if (L < 96){
+        blockSizeBlkdiag = 64;
+    }
+
+    const int gridSizeBlkdiag = (Ntrajs * Nz * Nkx + blockSizeBlkdiag - 1) / blockSizeBlkdiag;
     start = clock();
     kspaceUpdateNew<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_k, d_Phi2);
     cudaDeviceSynchronize();
@@ -962,6 +972,11 @@ void mexFunction(int nlhs, mxArray *plhs[],
     const mwSize *phi2Dims = mxGetDimensions(prhs[3]);
     L = (int64_t)phi2Dims[0];
     Phi2 = mxGetComplexSingles(prhs[3]);
+
+    // Make sure L is not too large
+    if (L >= 96){
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", "L must be less than 96 (< 96)");
+    }
 
     // Get k-space size from Phi2 and st    // LeeHL
     Ntrajs = (size_t)phi2Dims[2];
