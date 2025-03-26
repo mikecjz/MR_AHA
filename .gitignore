@@ -1,5 +1,6 @@
 *.mat
 *.mexa64
 *.asv
-Data/
 *.code-workspace
+Data/
+build/

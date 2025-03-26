@@ -10,12 +10,15 @@ finufft_build   = fullfile(finufft_path ,'build');
 
 %% Realease compilation
 
-mexcuda('-v','AhA_ps_cufinufft.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft')
-mexcuda('-v','cufinufftf2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft')
-mexcuda('-v','cufinufftfspread2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft')
+mexcuda('-v','./src/AhA_ps_cufinufft.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+mexcuda('-v','./src/AhA_cufinufft_toep.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+mexcuda('-v','./src/cufinufftf2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+mexcuda('-v','./src/cufinufftfspread2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
 
 %% Debug compilation
 
-% mexcuda('-v','-G','-g','AhA_ps_cufinufft.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft')
-% mexcuda('-v','-G','-g','cufinufftf2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft')
-% mexcuda('-v','-G','-g','cufinufftfspread2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft')
+% mexcuda('-v','-G','-g','./src/AhA_ps_cufinufft.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+% mexcuda('-v','-G','-g','./src/AhA_cufinufft_toep.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+% mexcuda('-v','-G','-g','./src/cufinufftf2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+% mexcuda('-v','-G','-g','./src/cufinufftfspread2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+%

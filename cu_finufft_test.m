@@ -1,4 +1,7 @@
-load ./Data/AhAx_test.mat;
+load ./Data/AhAx_test_toeplitz.mat;
+gpuDevice(1);
+%%
+
 tic;
 AhAx = AhA_ps_cufinufft(filtAhb, st, SEs, Phi2);
 AhAx = reshape(AhAx, st.Nd(1), st.Nd(2), st.Nz, []);

@@ -19,7 +19,7 @@
 #include <cufft.h>
 #include <time.h>
 #include <string.h>
-
+#include <cublas_v2.h>
 typedef struct {
   int Nx; // Number of first image dimension
   int Ny; // Number of second image dimension
@@ -784,8 +784,18 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
     if (verbose) mexPrintf("permute4D execution time: %f seconds\n", time_spent);
 
 
-    const int blockSizeBlkdiag = 256;
-    const int gridSizeBlkdiag = (Ntrajs * Nz * Nkx + 255) / 256;
+    int blockSizeBlkdiag;
+
+    // To make sure shared memory is within limits
+    if (L < 24){
+        blockSizeBlkdiag = 256;
+    }else if (L < 48){
+        blockSizeBlkdiag = 128;
+    }else if (L < 96){
+        blockSizeBlkdiag = 64;
+    }
+
+    const int gridSizeBlkdiag = (Ntrajs * Nz * Nkx + blockSizeBlkdiag - 1) / blockSizeBlkdiag;
     start = clock();
     kspaceUpdateNew<<<gridSizeBlkdiag, blockSizeBlkdiag, blockSizeBlkdiag * L * sizeof(cuFloatComplex)>>>(d_k, d_Phi2);
     cudaDeviceSynchronize();
@@ -881,6 +891,10 @@ void AhA_by_coil(cuFloatComplex *d_im,//input image
 void mexFunction(int nlhs, mxArray *plhs[],
                  int nrhs, mxArray const *prhs[])
 {
+
+    // ==========Initialize the MathWorks GPU API. ========== //
+    mxInitGPU();
+    
     clock_t start, end;
     double time_spent;
 
@@ -959,6 +973,11 @@ void mexFunction(int nlhs, mxArray *plhs[],
     L = (int64_t)phi2Dims[0];
     Phi2 = mxGetComplexSingles(prhs[3]);
 
+    // Make sure L is not too large
+    if (L >= 96){
+        mexErrMsgIdAndTxt("AhA_ps_cufinufft:InputError", "L must be less than 96 (< 96)");
+    }
+
     // Get k-space size from Phi2 and st    // LeeHL
     Ntrajs = (size_t)phi2Dims[2];
     Nkx = (int64_t) (M/Ntrajs);
@@ -975,8 +994,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     dataParams.M = M;
     dataParams.Ntrans = Ntrans;
 
-    // ==========Initialize the MathWorks GPU API. ========== //
-    mxInitGPU();
+
 
     // Assign data parameters to device constant memory
     cudaMemcpyToSymbol(d_dataParams, &dataParams, sizeof(dataParamsStruct));
@@ -1040,6 +1058,10 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cufinufftf_makeplan(2, 2, modes, -1, Ntrans, 1e-6, &cufinufft_type2_plan, &opts);// make type 2 plan, deafault options
     cufinufftf_setpts(cufinufft_type2_plan, M, d_x, d_y, NULL, 0, NULL, NULL, NULL);
 
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    cuFloatComplex scale_factor_fft = make_cuFloatComplex(1.0f/(Nx*Ny*Nz), 0.0f); //FFT scaling factor
+
 
     //loop through each coil
     for (int coil = 0; coil < Ncoils; coil++)
@@ -1050,10 +1072,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
         
         AhA_by_coil(d_im, d_SE, d_Phi2, d_k, d_im_out, cufft_plan, cufinufft_type1_plan, cufinufft_type2_plan, dataParams);
 
-        //Add the output from each coil to d_AhAx
-        dim3 blockSize(256);
-        dim3 gridSize((Nx * Ny * Nz * L + 255) / 256);
-        addArrays<<<gridSize, blockSize>>>(d_AhAx, d_im_out, Nx * Ny * Nz * L);
+        cublasCaxpy(handle, Nx * Ny * Nz * L, &scale_factor_fft, d_im_out, 1, d_AhAx, 1);
         cudaDeviceSynchronize();
     }
 
