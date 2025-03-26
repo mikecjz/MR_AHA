@@ -3,8 +3,8 @@
 This repository holds custom CUDA code that can be used for low-rank MR reconstruction for
 stack-of-stars sampling trajectories. It contains:
 
-1. [cuFINUFFT-based AhA Operator](#cufinufft-based-aha-operator)
-2. [Toeplitz-based AhA Operator]()
+1. [cuFINUFFT-based AhA Operator](#cufinufft-based-aha-operator-less-memory-intensive)
+2. [Toeplitz-based AhA Operator](#toeplitz-based-aha-operator-very-memory-intensive)
 3. [MATLAB-cuFINUFFT interface for type-1 NUFFT](.src/cufinufftf2d1.cu)
 
 ## cuFINUFFT-based AhA Operator (Less Memory Intensive)
