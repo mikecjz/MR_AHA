@@ -1,4 +1,4 @@
-load ./Data/AhAx_test.mat;
+load ./Data/AhAx_test_toeplitz.mat;
 gpuDevice(1);
 %%
 
