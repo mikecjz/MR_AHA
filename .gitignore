@@ -4,3 +4,7 @@
 *.code-workspace
 Data/
 build/
+.cache/
+.clangd
+compile_commands.json
+

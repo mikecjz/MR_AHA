@@ -1036,7 +1036,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaMemcpy(d_Phi2, Phi2, Ntrajs * Nz * L * L * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
 
     //Permute d_Phi2 from [L, L, Ntrajs, Nz] to [Ntrajs, Nz, L, L], the latter is used down the line
-    int dimsPhi2Original[4] = {L, L, Ntrajs, Nz};
+    int dimsPhi2Original[4] = {(int)L, (int)L, (int)Ntrajs, (int)Nz};
     int permPhi2[4] = {2, 3, 0, 1};
     permute4D(&d_Phi2, dimsPhi2Original, permPhi2);
 

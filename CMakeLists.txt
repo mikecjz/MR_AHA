@@ -40,7 +40,7 @@ include_directories(${CMAKE_BINARY_DIR}/_deps/finufft-src/include)
 CPMAddPackage(
     NAME finufft
     GITHUB_REPOSITORY mikecjz/finufft
-    GIT_TAG toeplitz_v1.0.1
+    GIT_TAG toeplitz_v2.0
     OPTIONS 
         "FINUFFT_STATIC_LINKING ON"
         "FINUFFT_USE_CPU OFF"
@@ -58,6 +58,7 @@ set(MEX_SOURCES
     src/AhA_cufinufft_toep.cu
     src/cufinufftf2d1.cu
     src/cufinufftfspread2d1.cu
+    src/cufinufftfspread3d1.cu
 )
 
 foreach(SOURCE ${MEX_SOURCES})

@@ -919,7 +919,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     mxGPUArray *mxGPUArray_AhAx;
     cuFloatComplex *d_AhAx;     // output image from AhA from all coils on device
-    mwSize dims[1] = {Nx * Ny * Nz * L};
+    mwSize dims[1] = {(mwSize)(Nx * Ny * Nz * L)};
     mxGPUArray_AhAx = mxGPUCreateGPUArray(1, dims, mxSINGLE_CLASS, mxCOMPLEX, MX_GPU_INITIALIZE_VALUES);
     d_AhAx = (cuFloatComplex *)mxGPUGetData(mxGPUArray_AhAx);
 
@@ -957,7 +957,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     // make cuFFT and cufinufft plans
     cufftHandle cufft_plan;
-    int n[3] = {Nz, Nx*2, Ny*2};
+    int n[3] = {(int)Nz, (int)(Nx*2), (int)(Ny*2)};
     cufftPlanMany(&cufft_plan, 3, n, NULL, NULL, 4*Nx*Ny*Nz, NULL, NULL, 4*Nx*Ny*Nz, CUFFT_C2C, L);
 
     cufinufft_opts opts;
