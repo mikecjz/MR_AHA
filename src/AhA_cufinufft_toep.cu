@@ -978,7 +978,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     cublasHandle_t handle;
     cublasCreate(&handle);
-    cuFloatComplex scale_factor_fft = make_cuFloatComplex(1.0f/(Nx*Ny*Nz), 0.0f); //FFT scaling factor
+    cuFloatComplex scale_factor_fft = make_cuFloatComplex(1.0f, 0.0f); //FFT scaling factor
 
     cudaEvent_t start_add, stop_add;
     cudaEventCreate(&start_add);
