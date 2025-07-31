@@ -1,9 +1,15 @@
-function AhAx = AhA_ps3D_toep(x, st, SEs, Phi2)
+function AhAx = AhA_ps3D_toep(x, st, SEs, Phi2, dim)
 % AhA_ps3D_toep: wrapper for AhA_cufinufft_toep
 
 try
 
-    AhAx = AhA_cufinufft_toep(x, st, SEs, Phi2) ;
+    if dim == 2
+        AhAx = AhA_cufinufft_toep(x, st, SEs, Phi2) ;
+    elseif dim == 3
+        AhAx = AhA_cufinufft_toep_3D(x, st, SEs, Phi2) ;
+    else
+        error('dim must be 2 or 3');
+    end
 
     AhAx = AhAx(:);
     fprintf('.')

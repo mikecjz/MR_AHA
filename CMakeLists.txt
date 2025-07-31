@@ -56,6 +56,7 @@ endif()
 set(MEX_SOURCES
     src/AhA_ps_cufinufft.cu
     src/AhA_cufinufft_toep.cu
+    src/AhA_cufinufft_toep_3D.cu
     src/cufinufftf2d1.cu
     src/cufinufftfspread2d1.cu
     src/cufinufftfspread3d1.cu
