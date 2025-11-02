@@ -101,6 +101,71 @@ __global__ void Im_SE_Pad_shift_AddPhase_3D(const cuFloatComplex *d_im, const cu
 }
 
 /**
+ * @brief Multiplies image data by sensitivity encoding maps element-wise with 3D padding.
+ *
+ * This CUDA kernel handles multiplication of complex-valued 3D (plus rank) image data with
+ * sensitivity encoding map (single coil). The multiplication is broadcasted and performed element-wise and the 
+ * results are stored in the output array which should be padded to the size of 2*Nx, 2*Ny, 2*Nz and initialized to zero before function call.
+ * The phase is negated in the result if the coordinate sum is odd. This ensures that the following FFTs produce centered k-space.
+ *
+ * @param[in] d_im Readonly pointer to the input device array containing the image data. The array is a flattened
+ *             4D array with dimensions [2*Nx, 2*Ny, 2*Nz, L], where L is the number of image sets or time points. Image is padded and fftshifted.
+ * @param[in] d_SE Readonly pointer to the input device array containing the sensitivity encoding map (single coil). The array
+ *              is a flattened 3D array with dimensions [Nx, Ny, Nz].
+ * @param[out] d_im_SE Pointer to the output device array where the result of the multiplication is stored.
+ *                Dimensions [2*Nx, 2*Ny, 2*Nz, L].
+ *
+ * @note The kernel assumes that all input and output arrays are properly allocated and reside in GPU memory.
+ *       It is designed to be executed on a CUDA-capable GPU with a grid size that covers the entire volume
+ *       of the image (Nx, Ny, Nz).
+ */
+ __global__ void Im_padded_shifted_SE_3D(cuFloatComplex *d_im, const cuFloatComplex *d_SE,
+    cuFloatComplex *d_im_SE)
+{
+// Assign data parameters from constant memory
+int Nx = d_dataParams.Nx;
+int Ny = d_dataParams.Ny;
+int Nz = d_dataParams.Nz;
+int L = d_dataParams.L;
+
+// Calculate global thread idx
+int threadIdx_global = blockIdx.x * blockDim.x + threadIdx.x;
+
+//Calculate local thread coordinates with column-major order
+int x = threadIdx_global % Nx;
+int y = (threadIdx_global / Nx) % Ny;
+int z = threadIdx_global / (Nx * Ny);
+
+int x_hat = x + Nx/2; //x hat is the x-coordinate in the padded grid
+int y_hat = y + Ny/2; //y hat is the y-coordinate in the padded grid
+int z_hat = z + Nz/2; //z hat is the z-coordinate in the padded grid
+
+x_hat = (x_hat + Nx) % (2 * Nx); //fftshift-ed coordinate
+y_hat = (y_hat + Ny) % (2 * Ny); //fftshift-ed coordinate
+z_hat = (z_hat + Nz) % (2 * Nz); //fftshift-ed coordinate
+
+if (x < Nx && y < Ny && z < Nz)
+{
+int se_index = ((z * Ny + y) * Nx + x);
+cuFloatComplex se_val = d_SE[se_index];
+
+//Multiply sensitivity map with image.
+//Phase is negated in the result if the coordinate sum is odd
+for (int l = 0; l < L; l++)
+{
+int im_index =      ((l * Nz*2 + z_hat) * Ny*2 + y_hat) * Nx*2 + x_hat;
+int im_SEs_index =  ((l * Nz*2 + z_hat) * Ny*2 + y_hat) * Nx*2 + x_hat;
+
+float phase = 1-2*((x+y+z)&1); //1 if even, -1 if odd
+
+d_im_SE[im_SEs_index] = cuCmulf(se_val, d_im[im_index]);
+
+
+}
+}
+}
+
+/**
  * @brief Performs adjoint operation of sensitivity encoding by multiplying image data with conjugate of sensitivity maps.
  *
  * This CUDA kernel performs the adjoint operation of sensitivity encoding by multiplying complex-valued 3D (plus rank) image data 
@@ -415,18 +480,46 @@ void AhA_by_coil_3D(const cuFloatComplex *d_im,//input image
     int blockSize = 256;
     int gridSize = (imageSize + 255) / 256;
 
+    // ==========Amplify image simuplating Type-2 NUFFT========== //
+
+    cuFloatComplex *d_im_amplified;
+    cuFloatComplex *d_im_temp;
+    cudaMalloc(&d_im_amplified, paddedImageSize * sizeof(cuFloatComplex));
+    cudaMemset(d_im_amplified, 0, paddedImageSize * sizeof(cuFloatComplex));
+    cudaMalloc(&d_im_temp, imageSize * sizeof(cuFloatComplex));
+    cudaMemcpy(d_im_temp, d_im, imageSize * sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
+
+    //d_im_SE is now in image space.
+    cudaEventRecord(start);
+    cufinufftf_deconvolve(cufinufft_type2_plan, d_im_temp, d_im_amplified);
+
+    cudaFree(d_im_temp);
+
+    // shiftAndCropImage_3D<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
+
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    seconds = milliseconds / 1000.0f;
+    if (is_verbose) mexPrintf("type2 cufinufftf_deconvolve execution time: %.6f seconds\n", seconds);
+
+
+    // Setting up pointers for sensitivity encoded images
     cuFloatComplex *d_im_SE;
     cudaMalloc(&d_im_SE, paddedImageSize * sizeof(cuFloatComplex));
     cudaMemset(d_im_SE, 0, paddedImageSize * sizeof(cuFloatComplex));
 
     // ==========Broadcast SE to image input on GPU. (SEs * im)========== //
     cudaEventRecord(start);
-    Im_SE_Pad_shift_AddPhase_3D<<<gridSize, blockSize>>>(d_im, d_SE, d_im_SE);
+    Im_padded_shifted_SE_3D<<<gridSize, blockSize>>>(d_im_amplified, d_SE, d_im_SE);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&milliseconds, start, stop);
     seconds = milliseconds / 1000.0f;
     if (is_verbose) mexPrintf("Im_SE_Pad_shift_AddPhase_3D execution time: %.6f seconds\n", seconds);
+
+    cudaFree(d_im_amplified);
 
     // ========== Batched Forward 3D cuFFT ========== /
     cudaEventRecord(start);
@@ -486,6 +579,8 @@ void AhA_by_coil_3D(const cuFloatComplex *d_im,//input image
     //d_im_SE is now in image space.
     cudaEventRecord(start);
     cufinufftf_deconvolve(cufinufft_type1_plan, d_im_SE_deconv, d_im_SE);
+
+    // shiftAndCropImage_3D<<<gridSize, blockSize>>>(d_im_SE, d_im_SE_deconv);
 
 
     cudaEventRecord(stop);

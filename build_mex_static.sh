@@ -10,6 +10,7 @@ fi
 # Parse command line arguments
 CMAKE_BUILD_TYPE="Release"
 CUFINUFFT_DEBUG="OFF"
+REBUILD_FLAG=false
 
 # Function to display help message
 show_help() {
@@ -18,6 +19,7 @@ show_help() {
     echo "Options:"
     echo "  -h, --help           Show this help message"
     echo "  --debug              Build MEX files in debug mode"
+    echo "  --rebuild            Clean up the build directory before building"
     echo ""
     exit 0
 }
@@ -31,6 +33,10 @@ while [[ $# -gt 0 ]]; do
             CMAKE_BUILD_TYPE="Debug"
             shift
             ;;
+        --rebuild)
+            REBUILD_FLAG=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
             echo "Use -h or --help to see available options"
@@ -38,6 +44,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Clean up the build directory only if --rebuild flag is set
+if [ "$REBUILD_FLAG" = true ]; then
+    rm -rf build/
+fi
 
 mkdir -p build
 cd build
@@ -51,5 +62,3 @@ mv *.mexa64 ../
 
 
 cd ..
-# Clean up the build directory
-rm -rf build/

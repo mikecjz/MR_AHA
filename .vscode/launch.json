@@ -65,6 +65,37 @@
                 }
             ],
             "miDebuggerPath": "/usr/local/cuda-12.0/bin/cuda-gdb"
+        },
+        {
+            "name": "toeplitz_test_3D",
+            "type": "cppdbg",
+            "request": "launch",
+            "preLaunchTask": "", 
+            "program": "/usr/local/MATLAB/R2022b/bin/glnxa64/MATLAB",
+            "args": ["-r", "toep_AhA_3D_test"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name":"LD_LIBRARY_PATH",
+                    "value":"/home/chenj6/Toolboxes/finufft_toep/build:${env:LD_LIBRARY_PATH}",
+                },
+                {
+                    "name":"CUDA_VISIBLE_DEVICES",
+                    "value":"1"
+                }
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "text": "handle SIGSEGV nostop"
+                },
+                {
+                     "text": "handle SIGSEGV noprint"
+                }
+            ],
+            "miDebuggerPath": "/usr/local/cuda-12/bin/cuda-gdb"
         }
     ]
 }

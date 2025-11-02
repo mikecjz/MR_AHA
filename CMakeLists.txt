@@ -40,7 +40,7 @@ include_directories(${CMAKE_BINARY_DIR}/_deps/finufft-src/include)
 CPMAddPackage(
     NAME finufft
     GITHUB_REPOSITORY mikecjz/finufft
-    GIT_TAG toeplitz_v2.0
+    GIT_TAG toeplitz_v2.0.2
     OPTIONS 
         "FINUFFT_STATIC_LINKING ON"
         "FINUFFT_USE_CPU OFF"

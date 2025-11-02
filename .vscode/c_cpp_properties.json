@@ -4,10 +4,10 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
-                "/mnt/gpussd1/jc_350/matlab/matlab2023b/extern/include",
-                "/mnt/gpussd1/jc_350/matlab/matlab2023b/toolbox/parallel/gpu/extern/include",
-                "/home/jc_350/Toolboxes/finufft/include",
-                "/home/jc_350/Toolboxes/finufft/src"
+                "/usr/local/MATLAB/R2022b/extern/include",
+                "/usr/local/MATLAB/R2022b/toolbox/parallel/gpu/extern/include",
+                "/home/chenj6/Toolboxes/finufft_toep/include",
+                "/home/chenj6/Toolboxes/finufft_toep/src"
             ],
             "defines": [],
             "cStandard": "c17",

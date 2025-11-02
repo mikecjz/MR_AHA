@@ -108,6 +108,7 @@ st.L = 1;
 Phi2 = single(1i * ones(st.M, 1));
 
 d_Phi2Cartesian = cufinufftfspread3d1(single(st.om(:,1)), single(st.om(:,2)), single(st.om(:,3)), Phi2, +1,1e-6, N, N, N, st.M, 1);
+% d_Phi2Cartesian = gpuArray(single(1i* ones(2*N, 2*N, 2*N)));
 
 d_Phi2Cartesian = d_Phi2Cartesian ./ single(1i);
 
@@ -115,14 +116,17 @@ d_Phi2Cartesian = d_Phi2Cartesian ./ single(1i);
 
 d_Ahb1 = gpuArray(Ahb1);
 d_filtAhb1 = gpuArray(filtAhb1);
-% d_SEs = gpuArray(SEs);
-d_SEs = gpuArray(1i * ones(N, N, N, 2,'like', single(1i)));
+d_SEs = gpuArray(SEs);
+% d_SEs = gpuArray(1i * ones(N, N, N, 2,'like', single(1i)));
 
-
-
-%% AhA test
+range = 1:288;
+delta = zeros(N, N, N, 'like', single(1i));
+delta(range, range, range) = 1 + 1i;
+d_delta = gpuArray(delta);
+%% AhA test Toep
 tic;
 d_AhAx = AhA_cufinufft_toep_3D(d_filtAhb1, st, d_SEs, d_Phi2Cartesian);
+% d_AhAx = AhA_toep_nodeconv(d_filtAhb1, d_SEs, d_Phi2Cartesian);
 toc;
 
 AhAx_toep = gather(d_AhAx);
@@ -145,21 +149,21 @@ img_recon = gather(d_img);
 %% AhA test cufinufft
 
 tic;
-d_AhAx = AhA_koosh_cufinufft(d_filtAhb1, st, d_SEs);
+d_AhAx = AhA_koosh_cufinufft(d_filtAhb1, st, d_SEs, DCF);
 toc;
 
 AhAx = gather(d_AhAx);
 AhAx = reshape(AhAx, N, N, N);
 
 %% CG Test
-d_img0 = AhA_koosh_cufinufft(d_filtAhb1, st, d_SEs);
+d_img0 = AhA_koosh_cufinufft(d_filtAhb1, st, d_SEs, DCF);
 
 c2 = mean(abs(Ahb1(:)),'all')./mean(abs(d_img0),'all');%real(pinv(U0(:))*Ahb(:));
 d_img0 = d_filtAhb1 * c2 * 5;
 
 
 tic;
-d_img = pcg(@(x) AhA_koosh_cufinufft(x, st, d_SEs), d_Ahb1(:), [], 30, [], [], []);
+d_img = pcg(@(x) AhA_koosh_cufinufft(x, st, d_SEs, DCF), d_filtAhb1(:), [], 4, @(x)koosh_precond(x, st, DCF), [], d_filtAhb1(:));
 d_img = reshape(d_img, st.Nd(1), st.Nd(2), st.Nd(3), []);
 toc;
 
