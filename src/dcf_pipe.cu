@@ -112,7 +112,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     // Create on device variables
     float *d_kx, *d_ky, *d_kz;
-    cuFloatComplex *d_c, *d_dcf, *d_fw, *d_im;
+    cuFloatComplex *d_c, *d_dcf, *d_fw;
 
     // Allocate device memories
     cudaMalloc(&d_kx, M * sizeof(float));
@@ -120,7 +120,6 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaMalloc(&d_kz, M * sizeof(float));
     cudaMalloc(&d_c, M  * sizeof(cuFloatComplex));
     cudaMalloc(&d_fw, im_padded_size * sizeof(cuFloatComplex));
-    cudaMalloc(&d_im, im_size * sizeof(cuFloatComplex));
 
     //Get pointer to underlying data of dm_dcf
     d_dcf = (cuFloatComplex *)mxGPUGetData(dm_dcf);
@@ -178,8 +177,9 @@ void mexFunction(int nlhs, mxArray *plhs[],
     start = clock();
     
     for (int i = 0; i < num_iterations; i++) {
-        cufinufftf_extract(plan_type1, d_dcf, d_im, d_fw);
-        cufinufftf_extract(plan_type2, d_c, d_im, d_fw);
+        cufinufftf_extract(plan_type1, d_dcf, d_fw);
+
+        cufinufftf_extract(plan_type2, d_c, d_fw);
         divideArraysInPlace<<<(M+255)/256, 256>>>(d_dcf, d_c, M);
 
     }
@@ -203,7 +203,6 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaFree(d_kz);
     cudaFree(d_c);
     cudaFree(d_fw);
-    cudaFree(d_im);
     //mexPrintf("cufinufftf_cleancup Complete\n");
 
     //Create output 

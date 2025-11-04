@@ -31,4 +31,13 @@ disp('Setting Up GPU Complete')
 
 
 %%
-d_DCF = dcf_pipe(kx, ky, kz, 1e-6, N, N, N, numel(kx),10);
+d_DCF = dcf_pipe(kx, ky, kz, 1e-6, N, N, N, numel(kx),20);
+disp('First DCF Finished')
+
+
+DCF_pipe = abs(reshape(gather(d_DCF),N, []));
+
+close all hidden
+
+figure;plot(DCF(:,line));
+figure;plot(DCF_pipe(:,line));

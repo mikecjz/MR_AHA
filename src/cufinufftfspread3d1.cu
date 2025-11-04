@@ -99,14 +99,13 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     // Create on device variables
     float *d_x, *d_y, *d_z;
-    cuFloatComplex *d_k, *d_im, *d_fw;
+    cuFloatComplex *d_k, *d_fw;
 
     // Allocate device memories
     cudaMalloc(&d_x, M * sizeof(float));
     cudaMalloc(&d_y, M * sizeof(float));
     cudaMalloc(&d_z, M * sizeof(float));
     cudaMalloc(&d_k, M * Ntrans * sizeof(cuFloatComplex));
-    cudaMalloc(&d_im, (size_t)Nx * (size_t)Ny * (size_t)Nz * Ntrans * sizeof(cuFloatComplex));
     d_fw = (cuFloatComplex *)mxGPUGetData(d_Phi2Cartesian);
 
 
@@ -145,7 +144,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     /************ EXECUTE SPREADING AND EXTRACT************/
     start = clock();
-    cufinufftf_extract(plan, d_k, d_im, d_fw);
+    cufinufftf_extract(plan, d_k, d_fw);
     end = clock();
     double timeExecute = ((double)(end-start))/ CLOCKS_PER_SEC;
     mexPrintf("cufinufftf 3D spreading execution Time (s): %.5f\n", timeExecute);
@@ -169,7 +168,6 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaFree(d_y);
     cudaFree(d_z);
     cudaFree(d_k);
-    cudaFree(d_im);
     //mexPrintf("cufinufftf_cleancup Complete\n");
 
     //Create output 
