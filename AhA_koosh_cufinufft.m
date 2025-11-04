@@ -1,4 +1,4 @@
-function AhAx = AhA_koosh_cufinufft(x, st, SEs)
+function AhAx = AhA_koosh_cufinufft(x, st, SEs, DCF)
 
 Ncoils = size(SEs, 4);
 M = st.M;
@@ -25,13 +25,14 @@ FhFx = gpuArray(zeros(N, N, N, Ncoils,'like', single(1i)));
 
 for i = 1:Ncoils
 
-    FhFx(:,:,:,i) = cufinufft3d1(d_kx, d_ky, d_kz, kspace(:,i), -1, 1e-6, N, N,N);
+% %     FhFx(:,:,:,i) = cufinufft3d1(d_kx, d_ky, d_kz, kspace(:,i) .* DCF(:), -1, 1e-6, N, N,N);
+FhFx(:,:,:,i) = cufinufft3d1(d_kx, d_ky, d_kz, kspace(:,i), -1, 1e-6, N, N,N);
 
 end
 
 AhAx = sum(FhFx .* conj(SEs), 4);
 
-AhAx = AhAx(:);
+AhAx = AhAx(:) / (N^3) * 8;
 
 fprintf('.')
 

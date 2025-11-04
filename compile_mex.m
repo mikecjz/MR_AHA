@@ -11,12 +11,13 @@ gpu_arch = '75';
 
 %% Realease compilation
 
-mexcuda('-v','./src/AhA_ps_cufinufft.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
-mexcuda('-v','./src/AhA_cufinufft_toep.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
-mexcuda('-v','./src/AhA_cufinufft_toep_3D.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
-mexcuda('-v','./src/cufinufftf2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
-mexcuda('-v','./src/cufinufftfspread2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
-mexcuda('-v','./src/cufinufftfspread3d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+mexcuda('-v',['NVCCFLAGS=-gencode=arch=compute_' gpu_arch ',code=sm_' gpu_arch],'./src/AhA_ps_cufinufft.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+mexcuda('-v',['NVCCFLAGS=-gencode=arch=compute_' gpu_arch ',code=sm_' gpu_arch],'./src/AhA_cufinufft_toep.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+mexcuda('-v',['NVCCFLAGS=-gencode=arch=compute_' gpu_arch ',code=sm_' gpu_arch],'./src/AhA_cufinufft_toep_3D.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+mexcuda('-v',['NVCCFLAGS=-gencode=arch=compute_' gpu_arch ',code=sm_' gpu_arch],'./src/cufinufftf2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+mexcuda('-v',['NVCCFLAGS=-gencode=arch=compute_' gpu_arch ',code=sm_' gpu_arch],'./src/cufinufftfspread2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+mexcuda('-v',['NVCCFLAGS=-gencode=arch=compute_' gpu_arch ',code=sm_' gpu_arch],'./src/cufinufftfspread3d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
+mexcuda('-v',['NVCCFLAGS=-gencode=arch=compute_' gpu_arch ',code=sm_' gpu_arch],'./src/dcf_pipe.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
 
 %% Debug compilation
 
@@ -25,4 +26,4 @@ mexcuda('-v','./src/cufinufftfspread3d1.cu','-R2018a',['-I' finufft_include],['-
 % mexcuda('-v','-G','-g',['NVCCFLAGS=-gencode=arch=compute_' gpu_arch ',code=sm_' gpu_arch],'./src/AhA_cufinufft_toep_3D.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
 % mexcuda('-v','-G','-g',['NVCCFLAGS=-gencode=arch=compute_' gpu_arch ',code=sm_' gpu_arch],'./src/cufinufftf2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
 % mexcuda('-v','-G','-g',['NVCCFLAGS=-gencode=arch=compute_' gpu_arch ',code=sm_' gpu_arch],'./src/cufinufftfspread2d1.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')
-%
+% mexcuda('-v','-G','-g',['NVCCFLAGS=-gencode=arch=compute_' gpu_arch ',code=sm_' gpu_arch],'./src/dcf_pipe.cu','-R2018a',['-I' finufft_include],['-L' finufft_build],['-L' cuda_lib_path],'-lcufinufft','-lcufft','-lcublas')

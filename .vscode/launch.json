@@ -40,14 +40,14 @@
             "type": "cppdbg",
             "request": "launch",
             "preLaunchTask": "", 
-            "program": "/mnt/gpussd1/jc_350/matlab/matlab2023b/bin/glnxa64/MATLAB",
+            "program": "/usr/local/MATLAB/R2022b/bin/glnxa64/MATLAB",
             "args": ["-r", "toeplitz_test"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [
                 {
                     "name":"LD_LIBRARY_PATH",
-                    "value":"/home/jc_350/Toolboxes/finufft/build:${env:LD_LIBRARY_PATH}",
+                    "value":"/home/chenj6/Toolboxes/finufft_toep/build:${env:LD_LIBRARY_PATH}",
                 },
                 {
                     "name":"CUDA_VISIBLE_DEVICES",
@@ -67,12 +67,12 @@
             "miDebuggerPath": "/usr/local/cuda-12.0/bin/cuda-gdb"
         },
         {
-            "name": "toeplitz_test_3D",
+            "name": "toep_test_3D",
             "type": "cppdbg",
             "request": "launch",
             "preLaunchTask": "", 
             "program": "/usr/local/MATLAB/R2022b/bin/glnxa64/MATLAB",
-            "args": ["-r", "toep_AhA_3D_test"],
+            "args": ["-r", "toep_test_3D"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [
@@ -83,6 +83,37 @@
                 {
                     "name":"CUDA_VISIBLE_DEVICES",
                     "value":"1"
+                }
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "text": "handle SIGSEGV nostop"
+                },
+                {
+                     "text": "handle SIGSEGV noprint"
+                }
+            ],
+            "miDebuggerPath": "/usr/local/cuda-12/bin/cuda-gdb"
+        },
+        {
+            "name": "dcf_test_3D",
+            "type": "cppdbg",
+            "request": "launch",
+            "preLaunchTask": "", 
+            "program": "/usr/local/MATLAB/R2022b/bin/glnxa64/MATLAB",
+            "args": ["-r", "dcf_test"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name":"LD_LIBRARY_PATH",
+                    "value":"/home/chenj6/Toolboxes/finufft_toep/build:${env:LD_LIBRARY_PATH}",
+                },
+                {
+                    "name":"CUDA_VISIBLE_DEVICES",
+                    "value":"6"
                 }
             ],
             "externalConsole": false,
