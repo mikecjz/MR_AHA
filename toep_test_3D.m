@@ -3,7 +3,7 @@ CURRENTDIR = pwd;
 
 
 addpath('/home/chenj6/Toolboxes/MT_CUDA')
-addpath('/home/chenj6/Toolboxes/finufft/build/matlab')
+addpath('/home/chenj6/Toolboxes/finufft_toep/matlab')
 addpath('/home/chenj6/projects/coronary/SENSE')
 load('./Data/SENSE_test.mat');
 
@@ -14,14 +14,21 @@ cd(CURRENTDIR);
 
 %%
 % get DCF
+load('./Data/SENSE_test.mat', 'kx','ky','kz');
 N = size(kx,1);
 Ntrajs = numel(kx) / N;
 
-d_kx = gpuArray(single(kx(:)/N * 2*pi));
-d_ky = gpuArray(single(ky(:)/N * 2*pi));
-d_kz = gpuArray(single(kz(:)/N * 2*pi));
+kx = single(kx(:)/N * 2*pi);
+ky = single(ky(:)/N * 2*pi);
+kz = single(kz(:)/N * 2*pi);
 
-% DCF = dcf_cufinufft3d(kx, ky, kz, N, Ntrajs, 1);
+d_kx = gpuArray(kx);
+d_ky = gpuArray(ky);
+d_kz = gpuArray(kz);
+
+% DCF = dcf_cufinufft3d(kx, ky, kz, N, Ntrajs, 20);
+DCF = gather(dcf_pipe(kx, ky, kz, 1e-6, N, N, N, numel(kx),5));
+
 % DCF = sdc3_MAT(crds,numIter,effMtx,verbose,osf);
 % DCF = dcf_func([kx(:), ky(:), kz(:)],1);
 % load('temp_DCF.mat')
@@ -34,7 +41,7 @@ DCF = reshape(DCF,N,[]);
 channels = size(Raw_data1,2);
 img_grid1 = zeros(N,N,N,channels, 'like', single(1i));
 img_grid2 = zeros(N,N,N,channels, 'like', single(1i));
-
+        
 img_bp1 = zeros(N,N,N,channels, 'like', single(1i));
 img_bp2 = zeros(N,N,N,channels, 'like', single(1i));
 
@@ -70,7 +77,7 @@ filtAhb2 = sum(img_grid2 .* conj(SEs), 4);
 Ahb1 = sum(img_bp1 .* conj(SEs), 4);
 Ahb2 = sum(img_bp2 .* conj(SEs), 4);
 
-
+gpuDevice(1);
 %% Sensitivity map
 
 % kspace_1 = ft1d(ft1d(ft1d(img_grid1,1),2),3);
@@ -93,9 +100,6 @@ Ahb2 = sum(img_bp2 .* conj(SEs), 4);
 
 %% st
 
-kx = single(kx(:)/N * 2*pi);
-ky = single(ky(:)/N * 2*pi);
-kz = single(kz(:)/N * 2*pi);
 
 
 st.om = [kx(:), ky(:), kz(:)];
@@ -111,6 +115,10 @@ d_Phi2Cartesian = cufinufftfspread3d1(single(st.om(:,1)), single(st.om(:,2)), si
 % d_Phi2Cartesian = gpuArray(single(1i* ones(2*N, 2*N, 2*N)));
 
 d_Phi2Cartesian = d_Phi2Cartesian ./ single(1i);
+
+%% Spread using native interface
+
+d_Phi2Cartesian = get_toep(kx, ky, kz, N);
 
 %% Setup GPU arrays
 

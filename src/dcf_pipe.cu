@@ -112,13 +112,14 @@ void mexFunction(int nlhs, mxArray *plhs[],
 
     // Create on device variables
     float *d_kx, *d_ky, *d_kz;
-    cuFloatComplex *d_c, *d_dcf, *d_fw;
+    cuFloatComplex *d_c1, *d_c2, *d_dcf, *d_fw;
 
     // Allocate device memories
     cudaMalloc(&d_kx, M * sizeof(float));
     cudaMalloc(&d_ky, M * sizeof(float));
     cudaMalloc(&d_kz, M * sizeof(float));
-    cudaMalloc(&d_c, M  * sizeof(cuFloatComplex));
+    cudaMalloc(&d_c1, M  * sizeof(cuFloatComplex));
+    cudaMalloc(&d_c2, M  * sizeof(cuFloatComplex));
     cudaMalloc(&d_fw, im_padded_size * sizeof(cuFloatComplex));
 
     //Get pointer to underlying data of dm_dcf
@@ -131,7 +132,8 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaMemcpy(d_kz, kz, M * sizeof(float), cudaMemcpyHostToDevice);
 
     // Initialize d_k and d_dcf = 1 + 0i
-    initComplexOnes<<<(M+255)/256, 256>>>(d_c, M);
+    initComplexOnes<<<(M+255)/256, 256>>>(d_c1, M);
+    initComplexOnes<<<(M+255)/256, 256>>>(d_c2, M);
     initComplexOnes<<<(M+255)/256, 256>>>(d_dcf, M);
     cudaDeviceSynchronize();
 
@@ -177,12 +179,15 @@ void mexFunction(int nlhs, mxArray *plhs[],
     start = clock();
     
     for (int i = 0; i < num_iterations; i++) {
-        cufinufftf_extract(plan_type1, d_dcf, d_fw);
-
-        cufinufftf_extract(plan_type2, d_c, d_fw);
-        divideArraysInPlace<<<(M+255)/256, 256>>>(d_dcf, d_c, M);
-
+        cufinufftf_extract(plan_type1, d_c1, d_fw);
+        cudaDeviceSynchronize();
+        cufinufftf_extract(plan_type2, d_c2, d_fw);
+        cudaDeviceSynchronize();
+        divideArraysInPlace<<<(M+255)/256, 256>>>(d_c1  , d_c2, M);
+        cudaDeviceSynchronize();
     }
+
+    cudaMemcpy(d_dcf, d_c1, M * sizeof(cuFloatComplex), cudaMemcpyDeviceToDevice);
 
 
     end = clock();
@@ -201,7 +206,8 @@ void mexFunction(int nlhs, mxArray *plhs[],
     cudaFree(d_kx);
     cudaFree(d_ky);
     cudaFree(d_kz);
-    cudaFree(d_c);
+    cudaFree(d_c1);
+    cudaFree(d_c2);
     cudaFree(d_fw);
     //mexPrintf("cufinufftf_cleancup Complete\n");
 

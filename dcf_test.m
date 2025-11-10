@@ -31,11 +31,13 @@ disp('Setting Up GPU Complete')
 
 
 %%
-d_DCF = dcf_pipe(kx, ky, kz, 1e-6, N, N, N, numel(kx),20);
-disp('First DCF Finished')
+
+for i = 1:5
+DCF_pipe = gather(dcf_pipe(kx, ky, kz, 1e-6, N, N, N, numel(kx),20));
+end
 
 
-DCF_pipe = abs(reshape(gather(d_DCF),N, []));
+DCF_pipe = abs(reshape((DCF_pipe),N, []));
 
 close all hidden
 
