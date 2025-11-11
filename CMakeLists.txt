@@ -3,10 +3,12 @@ cmake_minimum_required(VERSION 3.18)  # Increased minimum version
 # Add this line near the top of your CMakeLists.txt, after cmake_minimum_required
 include(cmake/CPM.cmake)
 
+# Set CUDA architecture
+set(CMAKE_CUDA_ARCHITECTURES 75;80;86;89;90)  # Adjust these values as needed
+
 project(MT_CUDA CUDA C)
 
-# Set CUDA architecture
-#set(CMAKE_CUDA_ARCHITECTURES 86 80)  # Adjust these values as needed
+
 
 # Find CUDA
 find_package(CUDA REQUIRED)
@@ -40,11 +42,14 @@ include_directories(${CMAKE_BINARY_DIR}/_deps/finufft-src/include)
 CPMAddPackage(
     NAME finufft
     GITHUB_REPOSITORY mikecjz/finufft
-    GIT_TAG toeplitz_v1.0.1
+    GIT_TAG toeplitz_v2.0.3
+    CMAKE_ARGS
+        -DCMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}
     OPTIONS 
         "FINUFFT_STATIC_LINKING ON"
         "FINUFFT_USE_CPU OFF"
-        "BUILD_CUDA ON"
+        "FINUFFT_USE_CUDA ON"
+        "FINUFFT_BUILD_MATLAB OFF"
 )
 
 # Ensure cufinufft target exists
