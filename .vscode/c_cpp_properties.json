@@ -3,11 +3,13 @@
         {
             "name": "Linux",
             "includePath": [
+                "${workspaceFolder}/include",
+                "${workspaceFolder}/src/core",
+                "${workspaceFolder}/finufft/include",
                 "${workspaceFolder}/**",
-                "/mnt/gpussd1/jc_350/matlab/matlab2023b/extern/include",
-                "/mnt/gpussd1/jc_350/matlab/matlab2023b/toolbox/parallel/gpu/extern/include",
-                "/home/jc_350/Toolboxes/finufft/include",
-                "/home/jc_350/Toolboxes/finufft/src"
+                "/usr/local/cuda/include",
+                "${env:MATLAB_ROOT}/extern/include",
+                "${env:MATLAB_ROOT}/toolbox/parallel/gpu/extern/include"
             ],
             "defines": [],
             "cStandard": "c17",

@@ -1,173 +1,232 @@
-# MT_CUDA 
+# MT_CUDA
 
-This repository holds custom CUDA code that can be used for low-rank MR reconstruction for
-stack-of-stars sampling trajectories. It contains:
+GPU evaluation of the forward normal operator $A^H A$ for **non-Cartesian MRI with low-rank
+(subspace / MR-Multitasking) modelling**, via a Toeplitz embedding.
 
-1. [cuFINUFFT-based AhA Operator](#cufinufft-based-aha-operator-less-memory-intensive)
-2. [Toeplitz-based AhA Operator](#toeplitz-based-aha-operator-very-memory-intensive)
-3. [MATLAB-cuFINUFFT interface for type-1 NUFFT](src/cufinufftf2d1.cu)
+The numerics live in a standalone CUDA/C++ library with a pure C surface. MATLAB, Python and plain
+C/C++ all call the same code:
 
-## cuFINUFFT-based AhA Operator (Less Memory Intensive)
+```
+include/mt_cuda/mt_cuda.h   public C API  (extern "C")
+src/core/                   the C++/CUDA implementation  ->  libmt_cuda
+matlab/                     MEX gateways + .m wrappers
+python/                     ctypes binding + CuPy-friendly API
+examples/                   standalone C++/CUDA example
+legacy/                     the previous MATLAB-only implementation (reference only)
+```
 
-An implementation in c and cuda-based source codes to perform efficient GPU-based AhA operation for
-stack-of-stars trajectory in MR-Multitasking reconconstruction. Under the hood, it makes API calls
-to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) and
-[cufinufft](https://finufft.readthedocs.io/enlatest/c_gpu.html) for both uniform and non-uniform
-FFTs. This repo also contains self-defined CUDA kernels to perform operations such as
-coil-sensitivity maps multiplication (broadcast) and block-diagnal low-rank kspace update with
-$\Phi\Phi^H$. The main function is [AhA_ps_cufinufft.cu](src/AhA_ps_cufinufft.cu). Additionally, this
-repo contains example simple nufft API calls to [cufinufftf2d1(GPU)](src/cufinufftf2d1.cu) and
-[finufftf2d1(CPU)](src/finufftf2d1.c).
-
->ⓘ Use [cu_finufft_test.m](./cu_finufft_test.m) to test the Toeplitz-based operator. Test data is
->provided and can be downloaded here --> ([cuFINUFFT Test
->Data](https://junzhou.chen.engineer/MT_TEST/AhAx_test.mat)).
-
-At the moment, the AhA operation takes around 5.8 seconds for a image matrix size of $320 \times 320
-\times 56$ with $L = 16$ and $Ncoils = 12$.
-
->Hardware environments:
-> * NVIDIA GeForce RTX 3090 (24G)
-> * NVIDIA-SMI 535.171.04
-> * Driver Version: 535.171.04
-> * CUDA Version: 12.2
-
-## Toeplitz-based AhA Operator (VERY Memory Intensive)
-
-### The Fastest Stack-of-Stars MR-Multitasking Reconstruction West of Mississippi ([Why Toeplitz?](#why-toeplitz-and-how-does-it-work))
-
-An implementation c and cuda-based source codes to perform efficient GPU-and-Toeplitz-based AhA
-operation for stack-of-stars trajectory in MR-Multitasking reconstruction. Under the hood, it makes
-API calls to [cuFFT](https://docs.nvidia.com/cuda/cufft/index.html) for uniform FFTs. We use a
-[modified cufinufft](https://github.com/mikecjz/finufft/tree/toeplitz) to
-[spread](src/cufinufftfspread2d1.cu) the non-Cartesian $\Phi\Phi^H$ operator to Cartesian grid.
-
->ⓘ Use [toeplitz_test.m](./toeplitz_test.m) to test the Toeplitz-based operator. Test data is
->provided and can be downloaded here --> ([Toeplitz Test
->Data](https://junzhou.chen.engineer/MT_TEST/AhAx_test_toeplitz.mat)).
-
-
-At the moment, the Toeplitz AhA operation takes around 1.2 seconds for a image matrix size of $320
-\times 320 \times 56$ with $L = 12$ and $Ncoils = 12$.
-
->Hardware environments:
->
-> * NVIDIA GeForce RTX 3090 (24G)
-> * NVIDIA-SMI 535.171.04
-> * Driver Version: 535.171.04
-> * CUDA Version: 12.2
->
-> ⚠️ The above image dimensions are about the maximum this hardware can support due to memory
-> limitations.
-
-## Compilation and Usage
->
->CAUTION: This project is in its alpha phase. Please exercise patience when setting up necessary
->environments for compilation and runtime. The author has undertaken efforts to reduce the chance of
->unexpected errors but they still might occur and lead to matlab crashing.
-
-#### Dependencies
-
-1. You will need to have [CUDA toolkit](https://developer.nvidia.com/cuda-toolkit) installed.
-2. You will need to download and compile [modified
-   finufft](https://github.com/mikecjz/finufft/tree/toeplitz) with [CUDA
-   enabled](https://finufft.readthedocs.io/en/latest/install_gpu.html).
-3. You will need matlab version R2018a or later.
-
-#### Compilation
-
-1. Set the paths in [compile_mex.m](./compile_mex.m).
-2. run [compile_mex.m](./compile_mex.m) in matlab.
-
->To compile with debug flags, uncomment the debug section.
-
-#### Runtime Environments
-Because the mex is compiled with references to compiled dynamic libraries from finufft and cuFFT, it
-is necessary to let matlab know where to find these libraries. This is achieved by setting the
-environment variable `LD_LIBRARY_PATH` before launching matlab. Additionally, in a multi-GPU server,
-we want to handle the GPU selection by setting the encironment variable `CUDA_VISIBLE_DEVICES`
-before launching matlab since we are making low-level API calls to CUDA codes. 
-
-A shell script [matlab_with_env.sh](./scripts/matlab_with_env.sh) is provided to launch matlab after
-selecting the GPU with the largest available memory and setting the `LD_LIBRARY_PATH` variable.
-
-1. Set the `FINUFFT_LIB` and `CUDA_LIB` variables inside the script.
-2. Make sure the script is executable. If not, run in shell:
-
-    ```bash
-    chmod +x ./matlab_with_env.sh
-    ```
-
-3. Launch matlab using the script
-
-    ```bash
-    ./matlab_with_env.sh
-    ```
-
-    >Note: Copy the script in one of your `PATH` folders (e.g. `$HOME/.local/bin`) to launch without
-    >the relative path indicator `./`
-
-### Linking cuFINUFFT statically (CMake)
+Everything runs on the GPU. All array arguments are device pointers (`gpuArray` in MATLAB,
+`cupy.ndarray` in Python); the library never copies bulk data through the host.
 
 ---
-A script ([build_mex_static.sh](./build_mex_static.sh)) is provided to compile the mex files using
-CMake. The only requirement is you set the env variable `MATLAB_ROOT` before launching.
 
-To figure out your matlabroot, run in matlab
+## Contents
+
+1. [The two operations](#the-two-operations)
+2. [Conventions](#conventions)
+3. [Building](#building)
+4. [MATLAB](#matlab)
+5. [Python](#python)
+6. [C / C++](#c--c)
+7. [Why Toeplitz and how does it work?](#why-toeplitz-and-how-does-it-work)
+8. [Implementation notes](#implementation-notes)
+
+---
+
+## The two operations
+
+### `calc_toep` — one-off pre-computation
+
+```
+phi2_toep = calc_toep(phi2, traj, config)
+```
+
+Turns the non-Cartesian Gram blocks $\Phi^H\Phi$, one $L \times L$ matrix per trajectory, into the
+Cartesian block-diagonal multiplier used by the operator. Internally: pack each block into a
+triangle, type-1 cufinufft onto the upsampled grid, centred inverse FFT, optional mask gather.
+
+### `AhA_Toeplitz` — the hot loop
+
+```
+AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config)
+AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
+```
+
+For every coil: multiply by the sensitivity map, zero-pad onto the upsampled grid, FFT, multiply by
+the Hermitian $L \times L$ block at each k-space location, inverse FFT, crop, multiply by the
+adjoint sensitivity map, accumulate. No NUFFT is evaluated here, which is the whole point of the
+Toeplitz embedding.
+
+---
+
+## Conventions
+
+**Column-major.** Every array shape in this document and in the C header is column-major (MATLAB /
+Fortran). Row-major callers (NumPy, CuPy) reverse the dimension order — the memory layout is
+identical, so nothing ever has to be permuted.
+
+**Centred arrays.** Image-space and k-space arrays have their origin in the *middle* of the array,
+at index `floor(dim/2)`. The library performs the required shifts internally by index remapping, so
+the convention is exact for even and odd matrix sizes alike.
+
+**Single precision.** All complex data is `complexFloat` (`single` gpuArray, `complex64` CuPy).
+
+### Array shapes
+
+| Array | 2D | 3D and stack |
+| ----- | -- | ------------ |
+| `x` | `[Nx, Ny, L]` | `[Nx, Ny, Nz, L]` |
+| `SEs` | `[Nx, Ny, Ncoils]` | `[Nx, Ny, Nz, Ncoils]` |
+| `phi2_toep` (unmasked) | `[Mx, My, (L²+L)/2]` | `[Mx, My, Mz, (L²+L)/2]` |
+| `phi2_toep` (masked) | `[num_masked, (L²+L)/2]` | `[num_masked, (L²+L)/2]` |
+| `phi2` | `[Ntrajs, L*L]` | `[Ntrajs, L*L]`, or `[Ntrajs, Nkz, L*L]` for stack |
+| `traj` | `[Ntrajs, Nkx, 2]` | `[Ntrajs, Nkx, 3]`, or `[Ntrajs, Nkx, 2]` for stack |
+| `AhAx` | same as `x` | same as `x` |
+
+There is one sensitivity map per coil; it is shared by every rank.
+
+`traj` holds coordinates in **radians per unit of the un-padded image grid**, i.e. the usual
+$[-\pi, \pi)$ range.
+
+### `config`
+
+| Field | Meaning |
+| ----- | ------- |
+| `traj_type` | `'2D'`, `'3D'` or `'stack'` |
+| `n_dim` | `[Nx Ny]` or `[Nx Ny Nz]` |
+| `L` | number of ranks |
+| `triangulation` | `'upper'` or `'lower'` — which half of each Hermitian block is stored |
+| `phi2_dim` | upsampled Toeplitz size `[Mx My]` or `[Mx My Mz]`, typically `2*n_dim` |
+| `is_masked` | whether `phi2_toep` is stored only at selected upsampled samples |
+
+Optional: `n_coils`, `num_masked`, `eps`, `mem_fraction`, `gpu_device_id`, `verbose`. The MATLAB helper `mt_default_config` and the Python `mt_cuda.make_config` fill in
+sensible defaults.
+
+### Triangular packing
+
+Only $(L^2+L)/2$ of the $L^2$ entries of each block are stored; the rest follows from
+$A_{ij} = \overline{A_{ji}}$. Both packings are the column-major packing of the corresponding MATLAB
+triangle, i.e. exactly `A(tril(true(L)))` / `A(triu(true(L)))`.
+
+### Masking
+
+`mask` holds linear indices into the *centred* upsampled grid `phi2_dim`, 1-based in MATLAB and
+0-based in Python and C. Samples outside the mask contribute nothing. This is what makes a large 3D
+operator fit in GPU memory when the upsampled k-space support is sparse.
+
+---
+
+## Building
+
+Requirements: CUDA toolkit (11.x or 12.x), CMake ≥ 3.18, a C++17 compiler, and the bundled FINUFFT
+submodule. Unlike the previous version, **stock upstream FINUFFT is enough** — no fork is needed.
+
+```bash
+git submodule update --init --recursive
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CUDA_ARCHITECTURES=75           \
+      -DMT_CUDA_BUILD_PYTHON=ON               \
+      -DMT_CUDA_BUILD_MATLAB=ON               \
+      -DMT_CUDA_BUILD_EXAMPLES=ON
+cmake --build build -j
+```
+
+| Option | Default | Produces |
+| ------ | ------- | -------- |
+| — | | `build/libmt_cuda.a` — the standalone library |
+| `MT_CUDA_BUILD_PYTHON` | `ON` | `build/lib/libmt_cuda_c.so` — for the ctypes binding |
+| `MT_CUDA_BUILD_MATLAB` | `OFF` | `build/matlab/*.mexa64` — needs `MATLAB_ROOT` and the Parallel Computing Toolbox |
+| `MT_CUDA_BUILD_EXAMPLES` | `OFF` | `build/mt_example_aha` |
+
+Set `MATLAB_ROOT` (or `-DMatlab_ROOT_DIR=...`) to your `matlabroot` before configuring with
+`MT_CUDA_BUILD_MATLAB=ON`.
+
+---
+
+## MATLAB
+
+Put both `matlab/` and `build/matlab/` on the MATLAB path.
 
 ```matlab
-matlabroot
+config = mt_default_config('stack', [320 320 56], 16);
+
+Om = calc_toep(phi2, traj, config);          % once
+for it = 1:n_iter
+    AhAx = AhA_Toeplitz(x, SEs, Om, config); % inside the CG loop
+end
 ```
 
-Set environment and run compile script
+Masked operator:
+
+```matlab
+config = mt_default_config('stack', [320 320 56], 16, 'is_masked', true);
+Om     = calc_toep(phi2, traj, config, mask);   % mask: 1-based linear indices
+AhAx   = AhA_Toeplitz(x, SEs, Om, config, mask);
+```
+
+The `.m` wrappers move host arrays to the GPU, cast to complex `single`, derive `n_coils` from
+`size(SEs)`, and convert the 1-based mask to the 0-based `int64` mask the gateway expects. Call `AhA_Toeplitz_mex` / `calc_toep_mex` directly only if you want to skip that.
+
+> ⓘ MATLAB must have initialised its GPU before the first MEX call. Running `gpuDevice(1)`, or
+> simply creating any `gpuArray`, is enough; the wrappers do this implicitly by moving their inputs.
+
+---
+
+## Python
 
 ```bash
-export MATLAB_ROOT=</path/to/matlab>
-
-./build_mex_static.sh
+cmake -S . -B build -DMT_CUDA_BUILD_PYTHON=ON && cmake --build build -j
+pip install -e python
+pip install cupy-cuda12x        # match your CUDA toolkit
 ```
 
-This will pull the [modified finufft](https://github.com/mikecjz/finufft/tree/toeplitz)
-automatically, compile it, and link its static `libcufinufft.a` library to the mex files.
+```python
+import mt_cuda
 
-The `FINUFFT_LIB` environment is then unnecessary. `CUDA_LIB` is still required.
->#### :warning: Known Issue 
->If you use CMake to compile. [Manually initializing
->GPU](https://www.mathworks.com/help/parallel-computing/mxinitgpu.html) in matlab before running the
->mex functions.
-> * Option 1: Run gpuDevice(gpuIndex).
-> * Option 2: Create any gpuArray.
->
->Otherwise you will get an error. Something like:
->
->```
->Invalid MEX-file 'MT_CUDA/AhA_ps_cufinufft.mexa64': MT_CUDA/>AhA_ps_cufinufft.mexa64: undefined symbol: mxInitGPU
->```
+cfg = mt_cuda.make_config("stack", (320, 320, 56), L=16, n_coils=12)
 
-## Development and Debugging in Visual Studio Code
-
-This code was developed in Visual Studio Code remotely with ssh. Set the `includePath` in
-[c_cpp_properties.json](/.vscode/c_cpp_properties.json) for IntelliSense and auto code completion.
-
-To launch debug session:
-
-1. Compile mex with debug flags enabled.
-2. Change `program` in [launch.json](/.vscode/launch.json) to the matlab executable file in your
-   server.
-3. Make sure `environment` for `LD_LIBRARY_PATH` in [launch.json](/.vscode/launch.json) is set to
-   the specification described above.
-4. Set breakpoints in [AhA_cufinufft_toep.cu](./src/AhA_cufinufft_toep.cu) and launch directly in VS
-   Code.
-
-Use the [MATLAB GPU CUDA and MEX Programming
-Manual](https://www.mathworks.com/help/parallel-computing/gpu-cuda-and-mex-programming.html) as a
-reference for development.
-
-## Useful troubleshooting commands
-
-```bash
-nm -D <FINUFFT_DIR>/build/libcufinufft.so | grep cufinufft2d1_exec
+Om = mt_cuda.calc_toep(cfg, phi2, traj)
+with mt_cuda.AhAPlan(cfg) as plan:
+    for _ in range(n_iter):
+        y = plan.apply(x, SEs, Om)
 ```
+
+Shapes are the reverse of the table above, because CuPy is row-major: `x` is `(L, Nz, Ny, Nx)`,
+`SEs` is `(Ncoils, Nz, Ny, Nx)`, `traj` is `(ndim, Nkx, Ntrajs)`, and so on. See
+[`python/README.md`](python/README.md).
+
+---
+
+## C / C++
+
+```c
+#include "mt_cuda/mt_cuda.h"
+
+mt_config cfg;
+mt_config_defaults(&cfg, MT_TRAJ_STACK);
+cfg.n_dim[0] = 320; cfg.n_dim[1] = 320; cfg.n_dim[2] = 56;
+cfg.phi2_dim[0] = 640; cfg.phi2_dim[1] = 640; cfg.phi2_dim[2] = 56;
+cfg.L = 16; cfg.n_coils = 12;
+
+mt_calc_toep(&cfg, d_phi2, d_traj, Ntrajs, Nkx, NULL, d_toep);
+
+mt_aha_plan plan;
+mt_aha_plan_create(&cfg, &plan);
+for (int it = 0; it < n_iter; ++it)
+    mt_aha_plan_execute(plan, d_x, d_SEs, d_toep, NULL, d_AhAx);
+mt_aha_plan_destroy(plan);
+```
+
+Every entry point returns `MT_SUCCESS` (0) or a negative `mt_status`; `mt_status_string` gives the
+category and `mt_last_error` the detailed, thread-local diagnostic. `mt_aha_toeplitz` is the
+one-shot convenience form. Link against `mt_cuda`, or `target_link_libraries(your_target mt_cuda)`
+after `add_subdirectory(MT_CUDA)`.
+
+[`examples/example_aha.cu`](examples/example_aha.cu) is a complete, self-contained program that
+builds a synthetic stack-of-stars problem and checks the operator's Hermitian symmetry.
+
+---
 
 ## Why Toeplitz and How Does It Work?
 
@@ -193,42 +252,78 @@ usually use NUFFT packages to estimate them (see [Baron et al., MRM
 2018](https://onlinelibrary.wiley.com/doi/10.1002/mrm.26928)).
 
 Under MR-Multitasking, the AhA operator is block-Toeplitz, which can be diagonalized similarly, with
-the "diagonal" aspect being block-diagonal, a.k.a. the gridded $\Phi\Phi^H$ operator.
+the "diagonal" aspect being block-diagonal, a.k.a. the gridded $\Phi\Phi^H$ operator — this is
+`phi2_toep`.
 
 The challenge for 3D stack-of-stars AhA is that there is usually not enough GPU memory to hold the
-gridded $\Phi\Phi^H$ operator, which has a size of $2Nx \times 2Ny \times Nz \times L \times L$. For
-the image parameters mentioned above, the gridded $\Phi\Phi^H$ operator is about 26GB under single
-precision and a 24G GPU cannot hold it.
+gridded $\Phi\Phi^H$ operator, which has a size of $2N_x \times 2N_y \times N_z \times L \times L$.
+For a $320 \times 320 \times 56$ matrix with $L = 16$, that is about 26 GB in single precision and a
+24 GB GPU cannot hold it.
 
-Luckily for us, each individual matrix ($L \times L$) of the gridded $\Phi\Phi^H$ operator is
-[Hermitian](https://en.wikipedia.org/wiki/Hermitian_matrix). This means that the lower triangular
-portion of the matrix is an exact copy of the complex conjugate of the upper portion and vice versa.
-If we only store the lower triangular portion of the gridded $\Phi\Phi^H$ operator, which will only
-require about 13GB memory, the 3D AhA operation becomes feasible on the GPU, albeit still memory
-demanding. See [AhA_cufinufft_toep.cu](./src/AhA_cufinufft_toep.cu#L328) for details on how to
-handle if the operator is only stored in the lower triangular portion.
+Luckily for us, each individual $L \times L$ matrix of the gridded $\Phi\Phi^H$ operator is
+[Hermitian](https://en.wikipedia.org/wiki/Hermitian_matrix), so the lower triangle is the complex
+conjugate of the upper one. Storing a single triangle — which is what `config.triangulation`
+selects — halves that to about 13 GB and makes the 3D operator feasible. When even that is too
+much, `config.is_masked` keeps only the upsampled k-space samples that actually carry signal.
 
->"But I saw non-Hermitian $\Phi\Phi^H$ after gridding when I was doing 2D Toeplitz and we had this whole thing to enforce symmetric positive semi-definitness via eigen decomposition?", [Zihao](https://mrrl.ucla.edu/pages/Zihao_Chen) might ask.
+### A note on Hermitian symmetry and the old "deconvolve" hack
 
-Good question! non-Hermitian matrices after gridding is also what I saw if I follow the exact
-formula detailed in [Baron et al., MRM 2018](https://onlinelibrary.wiley.com/doi/10.1002/mrm.26928).
-For non-low-rank applications, this formula no doubt works well. However, for the low-rank case like
-MR-Multitasking, let's take a closer look why the Hermitian symmetry might be disrupted.
+The previous implementation observed that the gridded $\Phi\Phi^H$ came out slightly non-Hermitian,
+and blamed the deconvolution (transfer-function division) step of the type-1 NUFFT; it worked around
+this with a [FINUFFT fork](https://github.com/mikecjz/finufft/tree/toeplitz) exposing the spreading
+and deconvolution stages separately.
 
-A standard type 1 NUFFT (non-uniform to uniform) involves the following steps:
+That workaround is gone. Hermitian symmetry is now enforced *structurally*: only one triangle is
+ever computed and stored, and the mirrored half is produced by conjugation inside the
+block-diagonal kernel. The gridded operator is therefore Hermitian by construction, to machine
+precision, whatever the NUFFT does internally — which also means unmodified upstream FINUFFT works.
+[`examples/example_aha.cu`](examples/example_aha.cu) checks
+$\langle y, A^HAx\rangle = \langle A^HAy, x\rangle$ end to end.
 
-1. Spread the non-Cartesian coordinates to oversampled Cartesian grid via convolution with a kernel
-   (e.g. Kaiser-Bessel, exponential of semicircle).
-2. Perform FFT.
-3. Crop and deconvolve by dividing the output with the transfer function of the kernel.
-4. (Only for recovering $\Lambda$ for Toeplitz operations) Peform inverse FFT.
+---
 
-If we spread the Hermitian $\Phi\Phi^H$ to Cartesian grid via a real and non-negative kernel, there
-is `NO REASON` to believe the elements in the gridded operator is `NOT` also Hermitian. My
-hypothesis is that the Hermitian symmetry is disrupted by the "decolvultion" in step 3. This is why
-we have [modified finufft](https://github.com/mikecjz/finufft/tree/toeplitz) such that we hijack the
-nufft process and expose the
-[spreading](https://github.com/mikecjz/finufft/blob/5d438feb35925e114ad0cc4535258f92041b0e14/src/cuda/2d/cufinufft2d.cu#L81C5-L81C25)
-and the
-[deconvolution](https://github.com/mikecjz/finufft/blob/5d438feb35925e114ad0cc4535258f92041b0e14/src/cuda/2d/cufinufft2d.cu#L147C5-L147C28)
-API.
+## Implementation notes
+
+**No scaling anywhere in the hot loop.** `calc_toep` evaluates the type-1 NUFFT with sign $-1$ and
+then a *normalised* centred inverse FFT. Since the point-spread functions of the two signs are
+spatial reflections of one another, $p^{-}[d] = p^{+}[-d]$, this equals
+$\mathrm{DFT}(p^{+})/\prod M$ — exactly the multiplier needed between the two unnormalised cuFFTs of
+`AhA_Toeplitz`. The $1/\prod M$ is therefore baked into `phi2_toep` and no scaling survives in the
+iteration.
+
+**Centring by index remap, not phase modulation.** The pad and crop kernels write and read at
+$(x_d - \lfloor N_d/2 \rfloor) \bmod M_d$, and the block-diagonal kernel converts between natural
+and centred order on the fly. This makes the pad/crop pair an exact adjoint pair (so the composed
+operator is Hermitian whenever the multiplier is), removes two full array passes per FFT, and is
+exact for odd matrix sizes, which a $(-1)^{x+y}$ modulation is not.
+
+**Stack-of-stars.** `kz` is already Cartesian, so `Mz = Nz`: `calc_toep` runs a 2D type-1 per kz
+encode with no transform and no shift along z, while `AhA_Toeplitz` still runs a full 3D FFT because
+z participates in the image-domain transform. `phi2` therefore carries an extra `Nkz` axis.
+
+**Memory.** `calc_toep` chunks its work over the $(L^2+L)/2$ triangular components and sizes the
+chunk against `cudaMemGetInfo`, honouring `config.mem_fraction` (default: half the free memory); it
+also bounds cufinufft's internal fine grid through `gpu_maxbatchsize`. An `mt_aha_plan` holds one
+`[Mx, My, Mz, L]` working buffer for the lifetime of the plan, so the iteration allocates nothing.
+
+**Re-entrancy.** No `__constant__` or other shared device state: kernel geometry travels by value.
+Several plans, CUDA streams and host threads can be in flight at once, and `mt_last_error` is
+thread-local. `config.stream` selects the stream; `config.gpu_device_id = -1` (the default for
+MATLAB and Python) keeps whichever device the caller has selected.
+
+---
+
+## Development and debugging in Visual Studio Code
+
+Set `includePath` in [.vscode/c_cpp_properties.json](.vscode/c_cpp_properties.json) to include
+`include/`, `src/core/`, `finufft/include/` and the CUDA and MATLAB headers for IntelliSense.
+
+To debug the MEX gateways: build with `-DCMAKE_BUILD_TYPE=Debug`, point `program` in
+[.vscode/launch.json](.vscode/launch.json) at your MATLAB executable, and set breakpoints in
+`matlab/*.cu` or `src/core/*.cu`. The [MATLAB GPU CUDA and MEX Programming
+Manual](https://www.mathworks.com/help/parallel-computing/gpu-cuda-and-mex-programming.html) is the
+reference for the MathWorks side.
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE).

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mt-cuda"
+version = "1.0.0"
+description = "GPU forward normal operator for low-rank non-Cartesian MRI (MR-Multitasking)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "PolyForm-Noncommercial-1.0.0" }
+authors = [{ name = "Junzhou Chen", email = "junzhou@chen.engineer" }]
+
+# CuPy is required at run time but the correct wheel depends on the installed
+# CUDA toolkit, so it is left to the user: pip install cupy-cuda12x
+dependencies = []
+
+[project.optional-dependencies]
+cuda12 = ["cupy-cuda12x"]
+cuda11 = ["cupy-cuda11x"]
+
+[tool.setuptools]
+packages = ["mt_cuda"]
