@@ -1,8 +1,8 @@
-function config = mt_default_config(traj_type, n_dim, L, varargin)
-%MT_DEFAULT_CONFIG  Build a config struct for AHA_TOEPLITZ and CALC_TOEP.
+function config = mr_default_config(traj_type, n_dim, L, varargin)
+%MR_DEFAULT_CONFIG  Build a config struct for AHA_TOEPLITZ and CALC_TOEP.
 %
-%   config = MT_DEFAULT_CONFIG(traj_type, n_dim, L)
-%   config = MT_DEFAULT_CONFIG(traj_type, n_dim, L, 'Name', Value, ...)
+%   config = MR_DEFAULT_CONFIG(traj_type, n_dim, L)
+%   config = MR_DEFAULT_CONFIG(traj_type, n_dim, L, 'Name', Value, ...)
 %
 %   INPUTS
 %     traj_type  '2D', '3D' or 'stack'.
@@ -22,7 +22,7 @@ function config = mt_default_config(traj_type, n_dim, L, varargin)
 %     'verbose'        false (default).
 %
 %   EXAMPLE
-%     config = mt_default_config('stack', [256 256 64], 16);
+%     config = mr_default_config('stack', [256 256 64], 16);
 %     Om     = calc_toep(phi2, traj, config);
 %     AhAx   = AhA_Toeplitz(x, SEs, Om, config);
 %
@@ -48,11 +48,11 @@ function config = mt_default_config(traj_type, n_dim, L, varargin)
         case '3d',    n_spatial = 3;
         case 'stack', n_spatial = 3;
         otherwise
-            error('MT_CUDA:config:trajType', ...
+            error('MR_AHA:config:trajType', ...
                   'traj_type must be ''2D'', ''3D'' or ''stack''.');
     end
     if numel(n_dim) ~= n_spatial
-        error('MT_CUDA:config:nDim', ...
+        error('MR_AHA:config:nDim', ...
               'n_dim must have %d entries for traj_type ''%s''.', ...
               n_spatial, traj_type);
     end

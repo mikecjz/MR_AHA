@@ -1,4 +1,4 @@
-"""MT_CUDA -- GPU forward normal operator for low-rank non-Cartesian MRI.
+"""MR_AHA -- GPU forward normal operator for low-rank non-Cartesian MRI.
 
 The package exposes two operations, mirroring the MATLAB interface:
 
@@ -11,20 +11,20 @@ The package exposes two operations, mirroring the MATLAB interface:
 
 Every array is a CuPy array resident on the GPU. Because the project documents
 arrays in column-major (MATLAB) order while NumPy and CuPy are row-major, all
-shapes are reversed here; see :mod:`mt_cuda.api` for the full table.
+shapes are reversed here; see :mod:`mr_aha.api` for the full table.
 
 Example:
-    >>> import cupy, mt_cuda
-    >>> cfg = mt_cuda.make_config('stack', (256, 256, 64), L=16, n_coils=8)
-    >>> Om = mt_cuda.calc_toep(cfg, phi2, traj)          # doctest: +SKIP
-    >>> with mt_cuda.AhAPlan(cfg) as plan:               # doctest: +SKIP
+    >>> import cupy, mr_aha
+    >>> cfg = mr_aha.make_config('stack', (256, 256, 64), L=16, n_coils=8)
+    >>> Om = mr_aha.calc_toep(cfg, phi2, traj)          # doctest: +SKIP
+    >>> with mr_aha.AhAPlan(cfg) as plan:               # doctest: +SKIP
     ...     y = plan.apply(x, SEs, Om)
 """
 
 from .api import (
     AhAPlan,
-    MTConfig,
-    MTError,
+    MRConfig,
+    MRError,
     TrajType,
     Triangulation,
     aha_toeplitz,
@@ -36,8 +36,8 @@ from .api import (
 
 __all__ = [
     "AhAPlan",
-    "MTConfig",
-    "MTError",
+    "MRConfig",
+    "MRError",
     "TrajType",
     "Triangulation",
     "aha_toeplitz",

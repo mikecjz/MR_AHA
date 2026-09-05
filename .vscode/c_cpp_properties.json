@@ -12,6 +12,7 @@
                 "${env:MATLAB_ROOT}/toolbox/parallel/gpu/extern/include"
             ],
             "defines": [],
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
             "cStandard": "c17",
             "cppStandard": "c++17",
             "intelliSenseMode": "linux-clang-x64"

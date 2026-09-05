@@ -1,18 +1,18 @@
 /**
- * @file mt_kernels.cuh
- * @brief Declarations of the CUDA kernels backing the MT_CUDA operators.
+ * @file mr_kernels.cuh
+ * @brief Declarations of the CUDA kernels backing the MR_AHA operators.
  *
  * Not part of the public API. All kernels take their geometry by value through
- * ::mt_dims (or explicit scalars) so that no shared device state exists and the
+ * ::mr_dims (or explicit scalars) so that no shared device state exists and the
  * library stays re-entrant across plans, streams and host threads.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */
 
-#ifndef MT_CUDA_MT_KERNELS_CUH
-#define MT_CUDA_MT_KERNELS_CUH
+#ifndef MR_AHA_MR_KERNELS_CUH
+#define MR_AHA_MR_KERNELS_CUH
 
-#include "mt_internal.cuh"
+#include "mr_internal.cuh"
 
 /* ------------------------------------------------------------------------ */
 /* AhA kernels                                                              */
@@ -37,13 +37,13 @@
  * @param[in]  coil   Index of the coil being processed.
  * @param[in]  dims   Geometry descriptor.
  */
-__global__ void mt_k_pad_mul_se(mt_complex *d_pad, const mt_complex *d_x,
-                                const mt_complex *d_SEs, int coil, mt_dims dims);
+__global__ void mr_k_pad_mul_se(mr_complex *d_pad, const mr_complex *d_x,
+                                const mr_complex *d_SEs, int coil, mr_dims dims);
 
 /**
  * @brief Crop the padded volume, apply @f$S_c^H@f$ and accumulate into `AhAx`.
  *
- * Exact adjoint of ::mt_k_pad_mul_se: the same index remap is used, so the
+ * Exact adjoint of ::mr_k_pad_mul_se: the same index remap is used, so the
  * pad/crop pair is @f$\mathcal{P}@f$ and @f$\mathcal{P}^H@f$ and the composed
  * operator is Hermitian whenever the block-diagonal multiplier is.
  *
@@ -55,9 +55,9 @@ __global__ void mt_k_pad_mul_se(mt_complex *d_pad, const mt_complex *d_x,
  *                           (used for the first coil, avoiding a memset).
  * @param[in]     dims       Geometry descriptor.
  */
-__global__ void mt_k_crop_mul_conj_se(mt_complex *d_out, const mt_complex *d_pad,
-                                      const mt_complex *d_SEs, int coil,
-                                      int accumulate, mt_dims dims);
+__global__ void mr_k_crop_mul_conj_se(mr_complex *d_out, const mr_complex *d_pad,
+                                      const mr_complex *d_SEs, int coil,
+                                      int accumulate, mr_dims dims);
 
 /**
  * @brief In-place Hermitian block-diagonal multiply over the whole grid.
@@ -71,25 +71,25 @@ __global__ void mt_k_crop_mul_conj_se(mt_complex *d_out, const mt_complex *d_pad
  * the kernel converts indices on the fly; this is what removes the need for any
  * explicit fftshift pass between the cuFFTs.
  *
- * Requires `blockDim.x * L * sizeof(mt_complex)` bytes of dynamic shared
+ * Requires `blockDim.x * L * sizeof(mr_complex)` bytes of dynamic shared
  * memory to stage each thread's input vector.
  *
  * @param[in,out] d_pad       Padded k-space `[Mx, My, Mz, L]`, natural order.
  * @param[in]     d_phi2_toep Packed blocks `[Mx, My, Mz, (L^2+L)/2]`, centred.
  * @param[in]     dims        Geometry descriptor.
  */
-__global__ void mt_k_blockdiag_dense(mt_complex *d_pad,
-                                     const mt_complex *d_phi2_toep, mt_dims dims);
+__global__ void mr_k_blockdiag_dense(mr_complex *d_pad,
+                                     const mr_complex *d_phi2_toep, mr_dims dims);
 
 /**
  * @brief Hermitian block-diagonal multiply restricted to masked locations.
  *
- * Gathers the rank vectors at the ::mt_config::num_masked retained locations,
+ * Gathers the rank vectors at the ::mr_config::num_masked retained locations,
  * applies the corresponding packed blocks, and writes the result to a compact
  * `[num_masked, L]` buffer. The caller then zeroes the padded grid and calls
- * ::mt_k_scatter_masked, which realises the "zero outside the mask" semantics.
+ * ::mr_k_scatter_masked, which realises the "zero outside the mask" semantics.
  *
- * Requires `blockDim.x * L * sizeof(mt_complex)` bytes of dynamic shared memory.
+ * Requires `blockDim.x * L * sizeof(mr_complex)` bytes of dynamic shared memory.
  *
  * @param[out] d_compact    Result buffer `[num_masked, L]`.
  * @param[in]  d_pad        Padded k-space `[Mx, My, Mz, L]`, natural order.
@@ -98,11 +98,11 @@ __global__ void mt_k_blockdiag_dense(mt_complex *d_pad,
  * @param[in]  num_masked   Number of retained locations.
  * @param[in]  dims         Geometry descriptor.
  */
-__global__ void mt_k_blockdiag_masked(mt_complex *d_compact,
-                                      const mt_complex *d_pad,
-                                      const mt_complex *d_phi2_toep,
+__global__ void mr_k_blockdiag_masked(mr_complex *d_compact,
+                                      const mr_complex *d_pad,
+                                      const mr_complex *d_phi2_toep,
                                       const int64_t *d_mask,
-                                      long long num_masked, mt_dims dims);
+                                      long long num_masked, mr_dims dims);
 
 /**
  * @brief Scatter a compact `[num_masked, L]` buffer back onto the padded grid.
@@ -117,9 +117,9 @@ __global__ void mt_k_blockdiag_masked(mt_complex *d_compact,
  * @param[in]  num_masked Number of retained locations.
  * @param[in]  dims       Geometry descriptor.
  */
-__global__ void mt_k_scatter_masked(mt_complex *d_pad, const mt_complex *d_compact,
+__global__ void mr_k_scatter_masked(mr_complex *d_pad, const mr_complex *d_compact,
                                     const int64_t *d_mask, long long num_masked,
-                                    mt_dims dims);
+                                    mr_dims dims);
 
 /* ------------------------------------------------------------------------ */
 /* calc_toep kernels                                                        */
@@ -134,7 +134,7 @@ __global__ void mt_k_scatter_masked(mt_complex *d_pad, const mt_complex *d_compa
  * @param[in]  L        Rank.
  * @param[in]  tri_upper Non-zero to keep the upper triangle.
  */
-__global__ void mt_k_extract_tri(mt_complex *d_tri, const mt_complex *d_phi2,
+__global__ void mr_k_extract_tri(mr_complex *d_tri, const mr_complex *d_phi2,
                                  long long nbatch, int L, int tri_upper);
 
 /**
@@ -156,7 +156,7 @@ __global__ void mt_k_extract_tri(mt_complex *d_tri, const mt_complex *d_phi2,
  *                      for every chunk.
  * @param[in]  ntri     Total number of triangular components, `(L^2+L)/2`.
  */
-__global__ void mt_k_fill_strengths(mt_complex *d_c, const mt_complex *d_tri,
+__global__ void mr_k_fill_strengths(mr_complex *d_c, const mr_complex *d_tri,
                                     long long Ntrajs, long long Nkx,
                                     int Nkz_eff, long long t0, int chunk,
                                     long long ntri);
@@ -173,7 +173,7 @@ __global__ void mt_k_fill_strengths(mt_complex *d_c, const mt_complex *d_tri,
  * @param[in]  s0,s1,s2 Per-axis centre offsets `floor(m/2)`, or 0 to skip.
  * @param[in]  batch  Number of volumes.
  */
-__global__ void mt_k_to_natural(mt_complex *dst, const mt_complex *src,
+__global__ void mr_k_to_natural(mr_complex *dst, const mr_complex *src,
                                 int m0, int m1, int m2, int s0, int s1, int s2,
                                 long long batch);
 
@@ -188,7 +188,7 @@ __global__ void mt_k_to_natural(mt_complex *dst, const mt_complex *src,
  * @param[in]  scale  Real factor applied to every element (the @f$1/\prod M@f$
  *                    of the unnormalised inverse cuFFT).
  */
-__global__ void mt_k_to_centered_scale(mt_complex *dst, const mt_complex *src,
+__global__ void mr_k_to_centered_scale(mr_complex *dst, const mr_complex *src,
                                        int m0, int m1, int m2,
                                        int s0, int s1, int s2,
                                        long long batch, float scale);
@@ -210,7 +210,7 @@ __global__ void mt_k_to_centered_scale(mt_complex *dst, const mt_complex *src,
  * @param[in]  batch      Number of volumes in this chunk.
  * @param[in]  scale      Real factor applied to every element.
  */
-__global__ void mt_k_gather_masked_scale(mt_complex *dst, const mt_complex *src,
+__global__ void mr_k_gather_masked_scale(mr_complex *dst, const mr_complex *src,
                                          const int64_t *d_mask,
                                          long long num_masked,
                                          int m0, int m1, int m2,
@@ -218,4 +218,4 @@ __global__ void mt_k_gather_masked_scale(mt_complex *dst, const mt_complex *src,
                                          long long t0, long long batch,
                                          float scale);
 
-#endif /* MT_CUDA_MT_KERNELS_CUH */
+#endif /* MR_AHA_MR_KERNELS_CUH */

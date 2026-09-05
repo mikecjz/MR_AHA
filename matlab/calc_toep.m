@@ -43,7 +43,7 @@ function phi2_toep = calc_toep(phi2, traj, config, mask)
 %   The result already absorbs the 1/prod(config.phi2_dim) normalisation of the
 %   FFT pair used by AHA_TOEPLITZ, so no further scaling is required anywhere.
 %
-%   See also AHA_TOEPLITZ, MT_DEFAULT_CONFIG.
+%   See also AHA_TOEPLITZ, MR_DEFAULT_CONFIG.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
@@ -56,12 +56,12 @@ function phi2_toep = calc_toep(phi2, traj, config, mask)
     if ~isa(traj, 'gpuArray'), traj = gpuArray(traj); end
     if ~strcmp(classUnderlying(traj), 'single'), traj = single(traj); end
     if ~isreal(traj)
-        error('MT_CUDA:calc_toep:complexTraj', 'traj must be real-valued.');
+        error('MR_AHA:calc_toep:complexTraj', 'traj must be real-valued.');
     end
 
     if nargin < 4 || isempty(mask)
         if isfield(config, 'is_masked') && config.is_masked
-            error('MT_CUDA:calc_toep:missingMask', ...
+            error('MR_AHA:calc_toep:missingMask', ...
                   'config.is_masked is true, so a mask must be supplied.');
         end
         phi2_toep = calc_toep_mex(phi2, traj, config);

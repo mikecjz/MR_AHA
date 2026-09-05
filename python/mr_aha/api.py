@@ -1,6 +1,6 @@
-"""High-level, CuPy-friendly interface to MT_CUDA.
+"""High-level, CuPy-friendly interface to MR_AHA.
 
-MT_CUDA evaluates the forward normal operator :math:`A^H A` for non-Cartesian
+MR_AHA evaluates the forward normal operator :math:`A^H A` for non-Cartesian
 MRI with low-rank (subspace / MR-Multitasking) modelling, using a Toeplitz
 embedding so that no non-uniform FFT is needed inside the iteration loop.
 
@@ -31,11 +31,11 @@ from __future__ import annotations
 import ctypes
 from typing import Optional, Sequence
 
-from ._lib import MTConfig, MTError, TrajType, Triangulation, check, lib
+from ._lib import MRConfig, MRError, TrajType, Triangulation, check, lib
 
 __all__ = [
-    "MTConfig",
-    "MTError",
+    "MRConfig",
+    "MRError",
     "TrajType",
     "Triangulation",
     "make_config",
@@ -48,7 +48,7 @@ __all__ = [
 
 
 def _cupy():
-    """Import CuPy lazily so that ``import mt_cuda`` works without a GPU.
+    """Import CuPy lazily so that ``import mr_aha`` works without a GPU.
 
     Returns:
         The imported :mod:`cupy` module.
@@ -60,7 +60,7 @@ def _cupy():
         import cupy  # noqa: PLC0415
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise ImportError(
-            "mt_cuda's Python interface needs CuPy for GPU array management; "
+            "mr_aha's Python interface needs CuPy for GPU array management; "
             "install the wheel matching your CUDA toolkit, e.g. "
             "`pip install cupy-cuda12x`."
         ) from exc
@@ -114,8 +114,8 @@ def make_config(
     stream=None,
     mem_fraction: float = 0.5,
     verbose: bool = False,
-) -> MTConfig:
-    """Build a validated :class:`MTConfig`.
+) -> MRConfig:
+    """Build a validated :class:`MRConfig`.
 
     Args:
         traj_type: ``'2D'``, ``'3D'`` or ``'stack'`` (or a :class:`TrajType`).
@@ -139,15 +139,15 @@ def make_config(
         verbose: Print per-stage progress.
 
     Returns:
-        A populated and validated :class:`MTConfig`.
+        A populated and validated :class:`MRConfig`.
 
     Raises:
         ValueError: If ``n_dim`` or ``phi2_dim`` has the wrong length.
-        MTError: If the library rejects the configuration.
+        MRError: If the library rejects the configuration.
     """
     tt = TrajType.parse(traj_type)
-    cfg = MTConfig()
-    check(lib.mt_config_defaults(ctypes.byref(cfg), tt), "mt_config_defaults")
+    cfg = MRConfig()
+    check(lib.mr_config_defaults(ctypes.byref(cfg), tt), "mr_config_defaults")
 
     n_spatial = cfg.n_spatial
     n_dim = [int(v) for v in n_dim]
@@ -183,7 +183,7 @@ def make_config(
     cfg.verbose = 1 if verbose else 0
     cfg.stream = _stream_ptr(stream)
 
-    check(lib.mt_config_validate(ctypes.byref(cfg)), "mt_config_validate")
+    check(lib.mr_config_validate(ctypes.byref(cfg)), "mr_config_validate")
     return cfg
 
 
@@ -216,10 +216,10 @@ def num_tri(L: int) -> int:
     Returns:
         ``L * (L + 1) // 2``.
     """
-    return int(lib.mt_num_tri(int(L)))
+    return int(lib.mr_num_tri(int(L)))
 
 
-def phi2_toep_shape(cfg: MTConfig) -> tuple:
+def phi2_toep_shape(cfg: MRConfig) -> tuple:
     """Row-major shape of the ``phi2_toep`` array for a configuration.
 
     Args:
@@ -256,7 +256,7 @@ def _check_size(array, expected: int, name: str) -> None:
         )
 
 
-def calc_toep(cfg: MTConfig, phi2, traj, mask=None, out=None):
+def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None):
     """Pre-compute the block-diagonal Toeplitz operator ``phi2_toep``.
 
     Args:
@@ -280,7 +280,7 @@ def calc_toep(cfg: MTConfig, phi2, traj, mask=None, out=None):
 
     Raises:
         ValueError: If an array has the wrong size or a mask is missing.
-        MTError: If the library reports a failure.
+        MRError: If the library reports a failure.
     """
     cupy = _cupy()
 
@@ -300,7 +300,7 @@ def calc_toep(cfg: MTConfig, phi2, traj, mask=None, out=None):
             raise ValueError("cfg.is_masked is set, so a mask is required")
         if cfg.num_masked == 0:
             cfg.num_masked = int(mask.size)
-            check(lib.mt_config_validate(ctypes.byref(cfg)), "mt_config_validate")
+            check(lib.mr_config_validate(ctypes.byref(cfg)), "mr_config_validate")
         elif int(mask.size) != int(cfg.num_masked):
             raise ValueError(
                 f"mask has {mask.size} elements but cfg.num_masked is "
@@ -308,14 +308,14 @@ def calc_toep(cfg: MTConfig, phi2, traj, mask=None, out=None):
             )
 
     shape = phi2_toep_shape(cfg)
-    expected = int(lib.mt_phi2_toep_size(ctypes.byref(cfg)))
+    expected = int(lib.mr_phi2_toep_size(ctypes.byref(cfg)))
     if out is None:
         out = cupy.empty(shape, dtype=cupy.complex64)
     else:
         _check_size(out, expected, "out")
 
     check(
-        lib.mt_calc_toep(
+        lib.mr_calc_toep(
             ctypes.byref(cfg),
             _ptr(phi2, "phi2", "complex64"),
             _ptr(traj, "traj", "float32"),
@@ -324,7 +324,7 @@ def calc_toep(cfg: MTConfig, phi2, traj, mask=None, out=None):
             _ptr(mask, "mask", "int64", allow_none=True),
             _ptr(out, "out", "complex64"),
         ),
-        "mt_calc_toep",
+        "mr_calc_toep",
     )
     return out
 
@@ -340,19 +340,19 @@ class AhAPlan:
         cfg: Configuration from :func:`make_config`.
 
     Raises:
-        MTError: If the plan cannot be created.
+        MRError: If the plan cannot be created.
     """
 
-    def __init__(self, cfg: MTConfig):
+    def __init__(self, cfg: MRConfig):
         self._cfg = cfg
         self._handle = ctypes.c_void_p()
         check(
-            lib.mt_aha_plan_create(ctypes.byref(cfg), ctypes.byref(self._handle)),
-            "mt_aha_plan_create",
+            lib.mr_aha_plan_create(ctypes.byref(cfg), ctypes.byref(self._handle)),
+            "mr_aha_plan_create",
         )
 
     @property
-    def config(self) -> MTConfig:
+    def config(self) -> MRConfig:
         """The configuration this plan was built from."""
         return self._cfg
 
@@ -376,17 +376,17 @@ class AhAPlan:
         Raises:
             RuntimeError: If the plan has already been closed.
             ValueError: If an array has the wrong size or a mask is missing.
-            MTError: If the library reports a failure.
+            MRError: If the library reports a failure.
         """
         if not self._handle:
             raise RuntimeError("this AhAPlan has already been closed")
         cupy = _cupy()
         cfg = self._cfg
 
-        _check_size(x, int(lib.mt_x_size(ctypes.byref(cfg))), "x")
-        _check_size(SEs, int(lib.mt_se_size(ctypes.byref(cfg))), "SEs")
+        _check_size(x, int(lib.mr_x_size(ctypes.byref(cfg))), "x")
+        _check_size(SEs, int(lib.mr_se_size(ctypes.byref(cfg))), "SEs")
         _check_size(
-            phi2_toep, int(lib.mt_phi2_toep_size(ctypes.byref(cfg))), "phi2_toep"
+            phi2_toep, int(lib.mr_phi2_toep_size(ctypes.byref(cfg))), "phi2_toep"
         )
         if cfg.is_masked and mask is None:
             raise ValueError("cfg.is_masked is set, so a mask is required")
@@ -397,7 +397,7 @@ class AhAPlan:
             _check_size(out, x.size, "out")
 
         check(
-            lib.mt_aha_plan_execute(
+            lib.mr_aha_plan_execute(
                 self._handle,
                 _ptr(x, "x", "complex64"),
                 _ptr(SEs, "SEs", "complex64"),
@@ -405,14 +405,14 @@ class AhAPlan:
                 _ptr(mask, "mask", "int64", allow_none=True),
                 _ptr(out, "out", "complex64"),
             ),
-            "mt_aha_plan_execute",
+            "mr_aha_plan_execute",
         )
         return out
 
     def close(self) -> None:
         """Release the plan's cuFFT plan and device buffers. Idempotent."""
         if self._handle:
-            lib.mt_aha_plan_destroy(self._handle)
+            lib.mr_aha_plan_destroy(self._handle)
             self._handle = ctypes.c_void_p()
 
     def __enter__(self) -> "AhAPlan":
@@ -428,7 +428,7 @@ class AhAPlan:
             pass
 
 
-def aha_toeplitz(cfg: MTConfig, x, SEs, phi2_toep, mask=None, out=None):
+def aha_toeplitz(cfg: MRConfig, x, SEs, phi2_toep, mask=None, out=None):
     """One-shot :math:`A^H A` application.
 
     Convenience wrapper that creates an :class:`AhAPlan`, applies it once and

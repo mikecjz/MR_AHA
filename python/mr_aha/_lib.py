@@ -1,9 +1,9 @@
-"""Low-level ``ctypes`` binding to the MT_CUDA shared library.
+"""Low-level ``ctypes`` binding to the MR_AHA shared library.
 
-This module is an almost literal transcription of ``include/mt_cuda/mt_cuda.h``.
-It deliberately contains no array handling: it only locates ``libmt_cuda_c``,
-mirrors the C ``mt_config`` struct, and declares the prototypes. The friendly,
-array-aware layer lives in :mod:`mt_cuda.api`.
+This module is an almost literal transcription of ``include/mr_aha/mr_aha.h``.
+It deliberately contains no array handling: it only locates ``libmr_aha_c``,
+mirrors the C ``mr_config`` struct, and declares the prototypes. The friendly,
+array-aware layer lives in :mod:`mr_aha.api`.
 """
 
 from __future__ import annotations
@@ -15,10 +15,10 @@ from ctypes.util import find_library
 from pathlib import Path
 
 __all__ = [
-    "MTConfig",
+    "MRConfig",
     "TrajType",
     "Triangulation",
-    "MTError",
+    "MRError",
     "lib",
     "check",
 ]
@@ -30,7 +30,7 @@ __all__ = [
 
 
 class TrajType:
-    """Trajectory families accepted by :class:`MTConfig`."""
+    """Trajectory families accepted by :class:`MRConfig`."""
 
     TWO_D = 0
     """Planar 2D trajectory; the image is ``[Nx, Ny, L]`` (column-major)."""
@@ -101,11 +101,11 @@ class Triangulation:
             ) from None
 
 
-class MTConfig(ctypes.Structure):
-    """``ctypes`` mirror of the C ``mt_config`` struct.
+class MRConfig(ctypes.Structure):
+    """``ctypes`` mirror of the C ``mr_config`` struct.
 
     Field order, types and therefore the natural alignment match the C
-    declaration exactly. Use :func:`mt_cuda.api.make_config` rather than
+    declaration exactly. Use :func:`mr_aha.api.make_config` rather than
     populating this by hand.
     """
 
@@ -127,11 +127,11 @@ class MTConfig(ctypes.Structure):
     ]
 
 
-class MTError(RuntimeError):
-    """Raised when an MT_CUDA entry point returns a non-zero status.
+class MRError(RuntimeError):
+    """Raised when an MR_AHA entry point returns a non-zero status.
 
     Attributes:
-        status: The numeric :c:enum:`mt_status` value.
+        status: The numeric :c:enum:`mr_status` value.
     """
 
     def __init__(self, status: int, message: str):
@@ -144,22 +144,22 @@ class MTError(RuntimeError):
 # --------------------------------------------------------------------------
 
 _LIB_BASENAMES = {
-    "win32": ["mt_cuda_c.dll"],
-    "darwin": ["libmt_cuda_c.dylib"],
-}.get(sys.platform, ["libmt_cuda_c.so"])
+    "win32": ["mr_aha_c.dll"],
+    "darwin": ["libmr_aha_c.dylib"],
+}.get(sys.platform, ["libmr_aha_c.so"])
 
 
 def _candidate_paths():
-    """Yield plausible locations of the MT_CUDA shared library.
+    """Yield plausible locations of the MR_AHA shared library.
 
-    The search order is: ``$MT_CUDA_LIBRARY``, the installed package
+    The search order is: ``$MR_AHA_LIBRARY``, the installed package
     directory, the in-tree CMake build directories, and finally the platform
     loader's own search path.
 
     Yields:
         ``str`` or :class:`pathlib.Path` candidates, most specific first.
     """
-    override = os.environ.get("MT_CUDA_LIBRARY")
+    override = os.environ.get("MR_AHA_LIBRARY")
     if override:
         yield override
 
@@ -176,13 +176,13 @@ def _candidate_paths():
 
     for name in _LIB_BASENAMES:
         yield name
-    found = find_library("mt_cuda_c")
+    found = find_library("mr_aha_c")
     if found:
         yield found
 
 
 def _load_library() -> ctypes.CDLL:
-    """Load ``libmt_cuda_c`` from the first candidate that works.
+    """Load ``libmr_aha_c`` from the first candidate that works.
 
     Returns:
         The loaded :class:`ctypes.CDLL`.
@@ -199,9 +199,9 @@ def _load_library() -> ctypes.CDLL:
         except OSError:
             continue
     raise OSError(
-        "Could not load the MT_CUDA shared library. Build it with\n"
-        "    cmake -S . -B build -DMT_CUDA_BUILD_PYTHON=ON && cmake --build build\n"
-        "and point $MT_CUDA_LIBRARY at the result if it lives elsewhere.\n"
+        "Could not load the MR_AHA shared library. Build it with\n"
+        "    cmake -S . -B build -DMR_AHA_BUILD_PYTHON=ON && cmake --build build\n"
+        "and point $MR_AHA_LIBRARY at the result if it lives elsewhere.\n"
         "Tried:\n  " + "\n  ".join(tried)
     )
 
@@ -213,59 +213,59 @@ lib = _load_library()
 # --------------------------------------------------------------------------
 
 _c_ptr = ctypes.c_void_p
-_cfg_p = ctypes.POINTER(MTConfig)
+_cfg_p = ctypes.POINTER(MRConfig)
 
-lib.mt_status_string.restype = ctypes.c_char_p
-lib.mt_status_string.argtypes = [ctypes.c_int]
+lib.mr_status_string.restype = ctypes.c_char_p
+lib.mr_status_string.argtypes = [ctypes.c_int]
 
-lib.mt_last_error.restype = ctypes.c_char_p
-lib.mt_last_error.argtypes = []
+lib.mr_last_error.restype = ctypes.c_char_p
+lib.mr_last_error.argtypes = []
 
-lib.mt_config_defaults.restype = ctypes.c_int
-lib.mt_config_defaults.argtypes = [_cfg_p, ctypes.c_int]
+lib.mr_config_defaults.restype = ctypes.c_int
+lib.mr_config_defaults.argtypes = [_cfg_p, ctypes.c_int]
 
-lib.mt_config_validate.restype = ctypes.c_int
-lib.mt_config_validate.argtypes = [_cfg_p]
+lib.mr_config_validate.restype = ctypes.c_int
+lib.mr_config_validate.argtypes = [_cfg_p]
 
-lib.mt_num_tri.restype = ctypes.c_int64
-lib.mt_num_tri.argtypes = [ctypes.c_int]
+lib.mr_num_tri.restype = ctypes.c_int64
+lib.mr_num_tri.argtypes = [ctypes.c_int]
 
-for _name in ("mt_image_size", "mt_pad_size", "mt_phi2_toep_size", "mt_x_size",
-              "mt_se_size"):
+for _name in ("mr_image_size", "mr_pad_size", "mr_phi2_toep_size", "mr_x_size",
+              "mr_se_size"):
     _fn = getattr(lib, _name)
     _fn.restype = ctypes.c_int64
     _fn.argtypes = [_cfg_p]
 
-lib.mt_aha_plan_create.restype = ctypes.c_int
-lib.mt_aha_plan_create.argtypes = [_cfg_p, ctypes.POINTER(ctypes.c_void_p)]
+lib.mr_aha_plan_create.restype = ctypes.c_int
+lib.mr_aha_plan_create.argtypes = [_cfg_p, ctypes.POINTER(ctypes.c_void_p)]
 
-lib.mt_aha_plan_execute.restype = ctypes.c_int
-lib.mt_aha_plan_execute.argtypes = [
+lib.mr_aha_plan_execute.restype = ctypes.c_int
+lib.mr_aha_plan_execute.argtypes = [
     ctypes.c_void_p, _c_ptr, _c_ptr, _c_ptr, _c_ptr, _c_ptr]
 
-lib.mt_aha_plan_destroy.restype = ctypes.c_int
-lib.mt_aha_plan_destroy.argtypes = [ctypes.c_void_p]
+lib.mr_aha_plan_destroy.restype = ctypes.c_int
+lib.mr_aha_plan_destroy.argtypes = [ctypes.c_void_p]
 
-lib.mt_aha_toeplitz.restype = ctypes.c_int
-lib.mt_aha_toeplitz.argtypes = [_cfg_p, _c_ptr, _c_ptr, _c_ptr, _c_ptr, _c_ptr]
+lib.mr_aha_toeplitz.restype = ctypes.c_int
+lib.mr_aha_toeplitz.argtypes = [_cfg_p, _c_ptr, _c_ptr, _c_ptr, _c_ptr, _c_ptr]
 
-lib.mt_calc_toep.restype = ctypes.c_int
-lib.mt_calc_toep.argtypes = [
+lib.mr_calc_toep.restype = ctypes.c_int
+lib.mr_calc_toep.argtypes = [
     _cfg_p, _c_ptr, _c_ptr, ctypes.c_int64, ctypes.c_int64, _c_ptr, _c_ptr]
 
 
 def check(status: int, what: str) -> None:
-    """Raise :class:`MTError` when ``status`` reports a failure.
+    """Raise :class:`MRError` when ``status`` reports a failure.
 
     Args:
-        status: Value returned by an MT_CUDA entry point.
+        status: Value returned by an MR_AHA entry point.
         what: Short description of the call, used in the message.
 
     Raises:
-        MTError: If ``status`` is non-zero.
+        MRError: If ``status`` is non-zero.
     """
     if status == 0:
         return
-    summary = lib.mt_status_string(status).decode("utf-8", "replace")
-    detail = lib.mt_last_error().decode("utf-8", "replace")
-    raise MTError(status, f"{what}: {summary} ({status}): {detail}")
+    summary = lib.mr_status_string(status).decode("utf-8", "replace")
+    detail = lib.mr_last_error().decode("utf-8", "replace")
+    raise MRError(status, f"{what}: {summary} ({status}): {detail}")

@@ -15,7 +15,7 @@ is **not** built by the top-level `CMakeLists.txt` and it is not maintained.
 
 ## What changed in the rewrite
 
-* The numerics live in a standalone C library (`libmt_cuda`) with a pure C
+* The numerics live in a standalone C library (`libmr_aha`) with a pure C
   (`extern "C"`) surface, so MATLAB, Python and plain C/C++ all call the same
   code. Nothing in the core depends on MATLAB headers any more.
 * The `cufinufftf_deconvolve` shortcut is gone. `calc_toep` now builds the

@@ -1,14 +1,14 @@
 /**
- * @file mt_kernels.cu
- * @brief CUDA kernel implementations for the MT_CUDA operators.
+ * @file mr_kernels.cu
+ * @brief CUDA kernel implementations for the MR_AHA operators.
  *
- * See mt_kernels.cuh for the interface documentation of every kernel; the
+ * See mr_kernels.cuh for the interface documentation of every kernel; the
  * comments here describe the indexing arithmetic.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */
 
-#include "mt_kernels.cuh"
+#include "mr_kernels.cuh"
 
 /* ------------------------------------------------------------------------ */
 /* Device-local index helpers                                               */
@@ -21,7 +21,7 @@
  * @param[in]  d1  Middle extent.
  * @param[out] c   Receives `[i0, i1, i2]`.
  */
-__device__ __forceinline__ void mt_decompose3(long long idx, int d0, int d1,
+__device__ __forceinline__ void mr_decompose3(long long idx, int d0, int d1,
                                               int c[3])
 {
     c[0] = (int)(idx % d0);
@@ -45,16 +45,16 @@ __device__ __forceinline__ void mt_decompose3(long long idx, int d0, int d1,
  * @param[in]  i         Output row to evaluate.
  * @return Row @p i of the matrix-vector product.
  */
-__device__ __forceinline__ mt_complex mt_apply_block_row(const mt_complex *v,
-                                                         const mt_complex *base,
+__device__ __forceinline__ mr_complex mr_apply_block_row(const mr_complex *v,
+                                                         const mr_complex *base,
                                                          long long stride, int L,
                                                          int tri_upper, int i)
 {
-    mt_complex acc = make_cuFloatComplex(0.0f, 0.0f);
+    mr_complex acc = make_cuFloatComplex(0.0f, 0.0f);
     for (int j = 0; j < L; ++j) {
         int do_conj = 0;
-        int t = mt_tri_offset(i, j, L, tri_upper, &do_conj);
-        mt_complex a = base[(long long)t * stride];
+        int t = mr_tri_offset(i, j, L, tri_upper, &do_conj);
+        mr_complex a = base[(long long)t * stride];
         if (do_conj) a = cuConjf(a);
         acc = cuCaddf(acc, cuCmulf(a, v[j]));
     }
@@ -65,14 +65,14 @@ __device__ __forceinline__ mt_complex mt_apply_block_row(const mt_complex *v,
 /* AhA kernels                                                              */
 /* ------------------------------------------------------------------------ */
 
-__global__ void mt_k_pad_mul_se(mt_complex *d_pad, const mt_complex *d_x,
-                                const mt_complex *d_SEs, int coil, mt_dims dims)
+__global__ void mr_k_pad_mul_se(mr_complex *d_pad, const mr_complex *d_x,
+                                const mr_complex *d_SEs, int coil, mr_dims dims)
 {
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= dims.pad_size) return;
 
     int jc[3];
-    mt_decompose3(tid, dims.m[0], dims.m[1], jc);
+    mr_decompose3(tid, dims.m[0], dims.m[1], jc);
 
     /* Invert the scatter j = (x - floor(N/2)) mod M performed by the forward
      * mapping. The candidate lies inside the image exactly when it is < N,
@@ -96,22 +96,22 @@ __global__ void mt_k_pad_mul_se(mt_complex *d_pad, const mt_complex *d_x,
     long long ii = (long long)xc[0] +
                    (long long)dims.n[0] * (xc[1] + (long long)dims.n[1] * xc[2]);
     /* One map per coil, broadcast across every rank. */
-    const mt_complex s = d_SEs[dims.se_coil * coil + ii];
+    const mr_complex s = d_SEs[dims.se_coil * coil + ii];
 
     for (int l = 0; l < dims.L; ++l)
         d_pad[tid + dims.pad_size * l] =
             cuCmulf(s, d_x[ii + dims.image_size * l]);
 }
 
-__global__ void mt_k_crop_mul_conj_se(mt_complex *d_out, const mt_complex *d_pad,
-                                      const mt_complex *d_SEs, int coil,
-                                      int accumulate, mt_dims dims)
+__global__ void mr_k_crop_mul_conj_se(mr_complex *d_out, const mr_complex *d_pad,
+                                      const mr_complex *d_SEs, int coil,
+                                      int accumulate, mr_dims dims)
 {
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= dims.image_size) return;
 
     int xc[3];
-    mt_decompose3(tid, dims.n[0], dims.n[1], xc);
+    mr_decompose3(tid, dims.n[0], dims.n[1], xc);
 
     /* Same remap as the scatter, so this kernel is its exact adjoint. */
     long long jj = 0, stride = 1;
@@ -122,85 +122,85 @@ __global__ void mt_k_crop_mul_conj_se(mt_complex *d_out, const mt_complex *d_pad
         stride *= dims.m[d];
     }
 
-    const mt_complex se_conj = cuConjf(d_SEs[dims.se_coil * coil + tid]);
+    const mr_complex se_conj = cuConjf(d_SEs[dims.se_coil * coil + tid]);
     for (int l = 0; l < dims.L; ++l) {
-        mt_complex v = cuCmulf(se_conj, d_pad[jj + dims.pad_size * l]);
+        mr_complex v = cuCmulf(se_conj, d_pad[jj + dims.pad_size * l]);
         long long o = tid + dims.image_size * l;
         d_out[o] = accumulate ? cuCaddf(d_out[o], v) : v;
     }
 }
 
-__global__ void mt_k_blockdiag_dense(mt_complex *d_pad,
-                                     const mt_complex *d_phi2_toep, mt_dims dims)
+__global__ void mr_k_blockdiag_dense(mr_complex *d_pad,
+                                     const mr_complex *d_phi2_toep, mr_dims dims)
 {
-    extern __shared__ mt_complex mt_shared[];
-    mt_complex *v = mt_shared + (long long)threadIdx.x * dims.L;
+    extern __shared__ mr_complex mr_shared[];
+    mr_complex *v = mr_shared + (long long)threadIdx.x * dims.L;
 
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= dims.pad_size) return;
 
     /* The working buffer is in natural FFT order; phi2_toep is centred. */
     int jc[3];
-    mt_decompose3(tid, dims.m[0], dims.m[1], jc);
+    mr_decompose3(tid, dims.m[0], dims.m[1], jc);
     long long pc = 0, stride = 1;
     for (int d = 0; d < 3; ++d) {
-        int k = mt_nat2cent(jc[d], dims.m[d], dims.c_m[d]);
+        int k = mr_nat2cent(jc[d], dims.m[d], dims.c_m[d]);
         pc += (long long)k * stride;
         stride *= dims.m[d];
     }
 
     for (int l = 0; l < dims.L; ++l) v[l] = d_pad[tid + dims.pad_size * l];
 
-    const mt_complex *base = d_phi2_toep + pc;
+    const mr_complex *base = d_phi2_toep + pc;
     for (int i = 0; i < dims.L; ++i) {
-        mt_complex y = mt_apply_block_row(v, base, dims.pad_size, dims.L,
+        mr_complex y = mr_apply_block_row(v, base, dims.pad_size, dims.L,
                                           dims.tri_upper, i);
         d_pad[tid + dims.pad_size * i] = y;
     }
 }
 
-__global__ void mt_k_blockdiag_masked(mt_complex *d_compact,
-                                      const mt_complex *d_pad,
-                                      const mt_complex *d_phi2_toep,
+__global__ void mr_k_blockdiag_masked(mr_complex *d_compact,
+                                      const mr_complex *d_pad,
+                                      const mr_complex *d_phi2_toep,
                                       const int64_t *d_mask,
-                                      long long num_masked, mt_dims dims)
+                                      long long num_masked, mr_dims dims)
 {
-    extern __shared__ mt_complex mt_shared[];
-    mt_complex *v = mt_shared + (long long)threadIdx.x * dims.L;
+    extern __shared__ mr_complex mr_shared[];
+    mr_complex *v = mr_shared + (long long)threadIdx.x * dims.L;
 
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_masked) return;
 
     /* The mask stores centred linear indices; convert to natural order. */
     int kc[3];
-    mt_decompose3((long long)d_mask[tid], dims.m[0], dims.m[1], kc);
+    mr_decompose3((long long)d_mask[tid], dims.m[0], dims.m[1], kc);
     long long jj = 0, stride = 1;
     for (int d = 0; d < 3; ++d) {
-        int j = mt_cent2nat(kc[d], dims.m[d], dims.c_m[d]);
+        int j = mr_cent2nat(kc[d], dims.m[d], dims.c_m[d]);
         jj += (long long)j * stride;
         stride *= dims.m[d];
     }
 
     for (int l = 0; l < dims.L; ++l) v[l] = d_pad[jj + dims.pad_size * l];
 
-    const mt_complex *base = d_phi2_toep + tid;
+    const mr_complex *base = d_phi2_toep + tid;
     for (int i = 0; i < dims.L; ++i)
         d_compact[tid + num_masked * i] =
-            mt_apply_block_row(v, base, num_masked, dims.L, dims.tri_upper, i);
+            mr_apply_block_row(v, base, num_masked, dims.L, dims.tri_upper, i);
 }
 
-__global__ void mt_k_scatter_masked(mt_complex *d_pad, const mt_complex *d_compact,
+__global__ void mr_k_scatter_masked(mr_complex *d_pad, const mr_complex *d_compact,
                                     const int64_t *d_mask, long long num_masked,
-                                    mt_dims dims)
+                                    mr_dims dims)
 {
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_masked) return;
 
     int kc[3];
-    mt_decompose3((long long)d_mask[tid], dims.m[0], dims.m[1], kc);
+    mr_decompose3((long long)d_mask[tid], dims.m[0], dims.m[1], kc);
     long long jj = 0, stride = 1;
     for (int d = 0; d < 3; ++d) {
-        int j = mt_cent2nat(kc[d], dims.m[d], dims.c_m[d]);
+        int j = mr_cent2nat(kc[d], dims.m[d], dims.c_m[d]);
         jj += (long long)j * stride;
         stride *= dims.m[d];
     }
@@ -213,7 +213,7 @@ __global__ void mt_k_scatter_masked(mt_complex *d_pad, const mt_complex *d_compa
 /* calc_toep kernels                                                        */
 /* ------------------------------------------------------------------------ */
 
-__global__ void mt_k_extract_tri(mt_complex *d_tri, const mt_complex *d_phi2,
+__global__ void mr_k_extract_tri(mr_complex *d_tri, const mr_complex *d_phi2,
                                  long long nbatch, int L, int tri_upper)
 {
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -230,11 +230,11 @@ __global__ void mt_k_extract_tri(mt_complex *d_tri, const mt_complex *d_phi2,
     if (!keep) return;
 
     int do_conj = 0;
-    int t = mt_tri_offset(i, j, L, tri_upper, &do_conj);
+    int t = mr_tri_offset(i, j, L, tri_upper, &do_conj);
     d_tri[b + nbatch * t] = d_phi2[b + nbatch * (i + (long long)L * j)];
 }
 
-__global__ void mt_k_fill_strengths(mt_complex *d_c, const mt_complex *d_tri,
+__global__ void mr_k_fill_strengths(mr_complex *d_c, const mr_complex *d_tri,
                                     long long Ntrajs, long long Nkx,
                                     int Nkz_eff, long long t0, int chunk,
                                     long long ntri)
@@ -258,7 +258,7 @@ __global__ void mt_k_fill_strengths(mt_complex *d_c, const mt_complex *d_tri,
     d_c[tid] = d_tri[itraj + Ntrajs * (kz + Nkz_eff * t)];
 }
 
-__global__ void mt_k_to_natural(mt_complex *dst, const mt_complex *src,
+__global__ void mr_k_to_natural(mr_complex *dst, const mr_complex *src,
                                 int m0, int m1, int m2, int s0, int s1, int s2,
                                 long long batch)
 {
@@ -270,7 +270,7 @@ __global__ void mt_k_to_natural(mt_complex *dst, const mt_complex *src,
     long long idx = tid - b * vol;
 
     int jc[3];
-    mt_decompose3(idx, m0, m1, jc);
+    mr_decompose3(idx, m0, m1, jc);
     const int mm[3] = {m0, m1, m2};
     const int ss[3] = {s0, s1, s2};
 
@@ -284,7 +284,7 @@ __global__ void mt_k_to_natural(mt_complex *dst, const mt_complex *src,
     dst[tid] = src[b * vol + src_idx];
 }
 
-__global__ void mt_k_to_centered_scale(mt_complex *dst, const mt_complex *src,
+__global__ void mr_k_to_centered_scale(mr_complex *dst, const mr_complex *src,
                                        int m0, int m1, int m2,
                                        int s0, int s1, int s2,
                                        long long batch, float scale)
@@ -297,7 +297,7 @@ __global__ void mt_k_to_centered_scale(mt_complex *dst, const mt_complex *src,
     long long idx = tid - b * vol;
 
     int kc[3];
-    mt_decompose3(idx, m0, m1, kc);
+    mr_decompose3(idx, m0, m1, kc);
     const int mm[3] = {m0, m1, m2};
     const int ss[3] = {s0, s1, s2};
 
@@ -308,11 +308,11 @@ __global__ void mt_k_to_centered_scale(mt_complex *dst, const mt_complex *src,
         src_idx += (long long)j * stride;
         stride *= mm[d];
     }
-    mt_complex v = src[b * vol + src_idx];
+    mr_complex v = src[b * vol + src_idx];
     dst[tid] = make_cuFloatComplex(v.x * scale, v.y * scale);
 }
 
-__global__ void mt_k_gather_masked_scale(mt_complex *dst, const mt_complex *src,
+__global__ void mr_k_gather_masked_scale(mr_complex *dst, const mr_complex *src,
                                          const int64_t *d_mask,
                                          long long num_masked,
                                          int m0, int m1, int m2,
@@ -327,7 +327,7 @@ __global__ void mt_k_gather_masked_scale(mt_complex *dst, const mt_complex *src,
     long long b = tid / num_masked;   /* component within this chunk           */
 
     int kc[3];
-    mt_decompose3((long long)d_mask[i], m0, m1, kc);
+    mr_decompose3((long long)d_mask[i], m0, m1, kc);
     const int mm[3] = {m0, m1, m2};
     const int ss[3] = {s0, s1, s2};
 
@@ -339,7 +339,7 @@ __global__ void mt_k_gather_masked_scale(mt_complex *dst, const mt_complex *src,
         src_idx += (long long)j * stride;
         stride *= mm[d];
     }
-    mt_complex v = src[b * vol + src_idx];
+    mr_complex v = src[b * vol + src_idx];
     dst[i + num_masked * (t0 + b)] =
         make_cuFloatComplex(v.x * scale, v.y * scale);
 }

@@ -1,22 +1,22 @@
 /**
  * @file example_aha.cu
- * @brief Minimal standalone C++/CUDA use of the MT_CUDA library.
+ * @brief Minimal standalone C++/CUDA use of the MR_AHA library.
  *
  * Demonstrates the whole pipeline without MATLAB or Python:
  *   1. build a synthetic stack-of-stars trajectory and Gram blocks,
- *   2. pre-compute the Toeplitz operator with ::mt_calc_toep,
- *   3. apply @f$A^H A@f$ with an ::mt_aha_plan reused across iterations.
+ *   2. pre-compute the Toeplitz operator with ::mr_calc_toep,
+ *   3. apply @f$A^H A@f$ with an ::mr_aha_plan reused across iterations.
  *
  * The example also performs the standard Hermitian check
  * @f$\langle y, A^H A x\rangle = \langle A^H A y, x\rangle@f$, which is the
  * cheapest end-to-end sanity test of the operator.
  *
- * Build with `-DMT_CUDA_BUILD_EXAMPLES=ON`.
+ * Build with `-DMR_AHA_BUILD_EXAMPLES=ON`.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */
 
-#include "mt_cuda/mt_cuda.h"
+#include "mr_aha/mr_aha.h"
 
 #include <cuda_runtime.h>
 
@@ -25,13 +25,13 @@
 #include <cstdlib>
 #include <vector>
 
-/** @brief Abort with a message when an MT_CUDA call fails. */
+/** @brief Abort with a message when an MR_AHA call fails. */
 #define CHECK(call)                                                            \
     do {                                                                       \
         int rc_ = (call);                                                      \
-        if (rc_ != MT_SUCCESS) {                                               \
+        if (rc_ != MR_SUCCESS) {                                               \
             std::fprintf(stderr, "%s failed: %s: %s\n", #call,                 \
-                         mt_status_string(rc_), mt_last_error());              \
+                         mr_status_string(rc_), mr_last_error());              \
             return EXIT_FAILURE;                                               \
         }                                                                      \
     } while (0)
@@ -53,19 +53,19 @@ int main(void)
     const int Nx = 32, Ny = 32, Nz = 4, L = 3, Ncoils = 2;
     const int64_t Ntrajs = 24, Nkx = 64;
 
-    mt_config cfg;
-    CHECK(mt_config_defaults(&cfg, MT_TRAJ_STACK));
+    mr_config cfg;
+    CHECK(mr_config_defaults(&cfg, MR_TRAJ_STACK));
     cfg.n_dim[0] = Nx;      cfg.n_dim[1] = Ny;      cfg.n_dim[2] = Nz;
     cfg.phi2_dim[0] = 2*Nx; cfg.phi2_dim[1] = 2*Ny; cfg.phi2_dim[2] = Nz;
     cfg.L = L;
     cfg.n_coils = Ncoils;
-    cfg.triangulation = MT_TRI_LOWER;
+    cfg.triangulation = MR_TRI_LOWER;
     cfg.gpu_device_id = 0;
-    CHECK(mt_config_validate(&cfg));
+    CHECK(mr_config_validate(&cfg));
 
-    const int64_t ntri     = mt_num_tri(L);
-    const int64_t x_elems  = mt_x_size(&cfg);
-    const int64_t se_elems = mt_se_size(&cfg);
+    const int64_t ntri     = mr_num_tri(L);
+    const int64_t x_elems  = mr_x_size(&cfg);
+    const int64_t se_elems = mr_se_size(&cfg);
     const int64_t M_nu     = Ntrajs * Nkx;
 
     /* ---- Host-side synthetic data -------------------------------------- */
@@ -121,7 +121,7 @@ int main(void)
     cudaMalloc(&d_se,   se_elems * sizeof(float2));
     cudaMalloc(&d_phi2, h_phi2.size() * sizeof(float2));
     cudaMalloc(&d_traj, h_traj.size() * sizeof(float));
-    cudaMalloc(&d_toep, (size_t)mt_pad_size(&cfg) * ntri * sizeof(float2));
+    cudaMalloc(&d_toep, (size_t)mr_pad_size(&cfg) * ntri * sizeof(float2));
     cudaMemcpy(d_x, h_x.data(), x_elems * sizeof(float2), cudaMemcpyHostToDevice);
     cudaMemcpy(d_y, h_y.data(), x_elems * sizeof(float2), cudaMemcpyHostToDevice);
     cudaMemcpy(d_se, h_se.data(), se_elems * sizeof(float2), cudaMemcpyHostToDevice);
@@ -131,23 +131,23 @@ int main(void)
                cudaMemcpyHostToDevice);
 
     /* ---- 1. Pre-compute the Toeplitz operator --------------------------- */
-    CHECK(mt_calc_toep(&cfg, (const mt_complex *)d_phi2, d_traj, Ntrajs, Nkx,
-                       NULL, (mt_complex *)d_toep));
+    CHECK(mr_calc_toep(&cfg, (const mr_complex *)d_phi2, d_traj, Ntrajs, Nkx,
+                       NULL, (mr_complex *)d_toep));
     std::printf("calc_toep done: %lld x %lld Toeplitz coefficients\n",
-                (long long)mt_pad_size(&cfg), (long long)ntri);
+                (long long)mr_pad_size(&cfg), (long long)ntri);
 
     /* ---- 2. Apply AhA twice through a reusable plan --------------------- */
-    mt_aha_plan plan = NULL;
-    CHECK(mt_aha_plan_create(&cfg, &plan));
-    CHECK(mt_aha_plan_execute(plan, (const mt_complex *)d_x,
-                              (const mt_complex *)d_se,
-                              (const mt_complex *)d_toep, NULL,
-                              (mt_complex *)d_ax));
-    CHECK(mt_aha_plan_execute(plan, (const mt_complex *)d_y,
-                              (const mt_complex *)d_se,
-                              (const mt_complex *)d_toep, NULL,
-                              (mt_complex *)d_ay));
-    CHECK(mt_aha_plan_destroy(plan));
+    mr_aha_plan plan = NULL;
+    CHECK(mr_aha_plan_create(&cfg, &plan));
+    CHECK(mr_aha_plan_execute(plan, (const mr_complex *)d_x,
+                              (const mr_complex *)d_se,
+                              (const mr_complex *)d_toep, NULL,
+                              (mr_complex *)d_ax));
+    CHECK(mr_aha_plan_execute(plan, (const mr_complex *)d_y,
+                              (const mr_complex *)d_se,
+                              (const mr_complex *)d_toep, NULL,
+                              (mr_complex *)d_ay));
+    CHECK(mr_aha_plan_destroy(plan));
 
     /* ---- 3. Hermitian check: <y, AhA x> == <AhA y, x> ------------------- */
     std::vector<float2> h_ax(x_elems), h_ay(x_elems);

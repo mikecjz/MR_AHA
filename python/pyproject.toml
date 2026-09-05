@@ -3,7 +3,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mt-cuda"
+name = "mr-aha"
 version = "1.0.0"
 description = "GPU forward normal operator for low-rank non-Cartesian MRI (MR-Multitasking)"
 readme = "README.md"
@@ -20,4 +20,4 @@ cuda12 = ["cupy-cuda12x"]
 cuda11 = ["cupy-cuda11x"]
 
 [tool.setuptools]
-packages = ["mt_cuda"]
+packages = ["mr_aha"]

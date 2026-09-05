@@ -2,6 +2,12 @@
     "files.associations": {
         "array": "cpp",
         "string": "cpp",
-        "string_view": "cpp"
-    }
+        "string_view": "cpp",
+        "*.cu": "cuda-cpp",
+        "*.cuh": "cuda-cpp"
+    },
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/build",
+        "--query-driver=/usr/local/cuda*/bin/nvcc,/usr/bin/c++"
+    ]
 }

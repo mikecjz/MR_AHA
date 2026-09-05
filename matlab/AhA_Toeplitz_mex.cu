@@ -19,10 +19,10 @@
  * @author Junzhou Chen (junzhou@chen.engineer)
  */
 
-#include "mt_mex_util.h"
+#include "mr_mex_util.h"
 
 /** @brief MATLAB error identifier used throughout this gateway. */
-#define MT_ID "MT_CUDA:AhA_Toeplitz"
+#define MR_ID "MR_AHA:AhA_Toeplitz"
 
 /**
  * @brief Deduce the coil count from the trailing dimension of `SEs`.
@@ -36,7 +36,7 @@
  *                           caller already supplied it.
  * @param[in]     user_coils Non-zero when the caller set `n_coils`.
  */
-static void mt_mex_infer_n_coils(const mxGPUArray *SEs, mt_config *cfg,
+static void mr_mex_infer_n_coils(const mxGPUArray *SEs, mr_config *cfg,
                                  int user_coils)
 {
     if (user_coils) return;
@@ -60,19 +60,19 @@ static void mt_mex_infer_n_coils(const mxGPUArray *SEs, mt_config *cfg,
 void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
 {
     if (nrhs != 4 && nrhs != 5)
-        mexErrMsgIdAndTxt(MT_ID,
+        mexErrMsgIdAndTxt(MR_ID,
                           "Usage: AhAx = AhA_Toeplitz_mex(x, SEs, phi2_toep, "
                           "config[, mask]).");
     if (nlhs > 1)
-        mexErrMsgIdAndTxt(MT_ID, "Too many output arguments.");
+        mexErrMsgIdAndTxt(MR_ID, "Too many output arguments.");
 
     /* mxInitGPU must run before any other MathWorks GPU API call. */
     mxInitGPU();
 
     /* ---- Configuration ------------------------------------------------- */
-    mt_config cfg;
-    mt_mex_parse_config(prhs[3], &cfg, MT_ID);
-    const int user_coils = (mt_mex_field(prhs[3], "n_coils") != NULL);
+    mr_config cfg;
+    mr_mex_parse_config(prhs[3], &cfg, MR_ID);
+    const int user_coils = (mr_mex_field(prhs[3], "n_coils") != NULL);
 
     /* ---- Inputs --------------------------------------------------------- */
     const mxGPUArray *g_x    = mxGPUCreateFromMxArray(prhs[0]);
@@ -80,42 +80,42 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     const mxGPUArray *g_toep = mxGPUCreateFromMxArray(prhs[2]);
     const mxGPUArray *g_mask = NULL;
 
-    mt_mex_check_complex_single(g_x,    "x",         MT_ID);
-    mt_mex_check_complex_single(g_SEs,  "SEs",       MT_ID);
-    mt_mex_check_complex_single(g_toep, "phi2_toep", MT_ID);
+    mr_mex_check_complex_single(g_x,    "x",         MR_ID);
+    mr_mex_check_complex_single(g_SEs,  "SEs",       MR_ID);
+    mr_mex_check_complex_single(g_toep, "phi2_toep", MR_ID);
 
-    mt_mex_infer_n_coils(g_SEs, &cfg, user_coils);
+    mr_mex_infer_n_coils(g_SEs, &cfg, user_coils);
 
     if (cfg.is_masked) {
         if (nrhs != 5)
-            mexErrMsgIdAndTxt(MT_ID,
+            mexErrMsgIdAndTxt(MR_ID,
                               "config.is_masked is true, so a mask must be "
                               "supplied as the fifth argument.");
         g_mask = mxGPUCreateFromMxArray(prhs[4]);
         if (mxGPUGetClassID(g_mask) != mxINT64_CLASS)
-            mexErrMsgIdAndTxt(MT_ID,
+            mexErrMsgIdAndTxt(MR_ID,
                               "mask must be an int64 gpuArray of 0-based linear "
                               "indices; AhA_Toeplitz.m performs the conversion.");
         if (cfg.num_masked == 0)
             cfg.num_masked = (int64_t)mxGPUGetNumberOfElements(g_mask);
         if ((int64_t)mxGPUGetNumberOfElements(g_mask) != cfg.num_masked)
-            mexErrMsgIdAndTxt(MT_ID,
+            mexErrMsgIdAndTxt(MR_ID,
                               "mask has %lld elements but config.num_masked is "
                               "%lld.",
                               (long long)mxGPUGetNumberOfElements(g_mask),
                               (long long)cfg.num_masked);
     } else if (nrhs == 5 && !mxIsEmpty(prhs[4])) {
-        mexWarnMsgIdAndTxt(MT_ID ":unusedMask",
+        mexWarnMsgIdAndTxt(MR_ID ":unusedMask",
                            "A mask was supplied but config.is_masked is false; "
                            "the mask is ignored.");
     }
 
-    const int status = mt_config_validate(&cfg);
-    if (status != MT_SUCCESS) mt_mex_fail(MT_ID, status);
+    const int status = mr_config_validate(&cfg);
+    if (status != MR_SUCCESS) mr_mex_fail(MR_ID, status);
 
-    mt_mex_check_numel(g_x,    mt_x_size(&cfg),          "x",         MT_ID);
-    mt_mex_check_numel(g_SEs,  mt_se_size(&cfg),         "SEs",       MT_ID);
-    mt_mex_check_numel(g_toep, mt_phi2_toep_size(&cfg),  "phi2_toep", MT_ID);
+    mr_mex_check_numel(g_x,    mr_x_size(&cfg),          "x",         MR_ID);
+    mr_mex_check_numel(g_SEs,  mr_se_size(&cfg),         "SEs",       MR_ID);
+    mr_mex_check_numel(g_toep, mr_phi2_toep_size(&cfg),  "phi2_toep", MR_ID);
 
     /* ---- Output: same shape as x --------------------------------------- */
     const mwSize  nd_x   = mxGPUGetNumberOfDimensions(g_x);
@@ -125,21 +125,21 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     mxFree((void *)dims_x);
 
     /* ---- Run ------------------------------------------------------------ */
-    const int rc = mt_aha_toeplitz(
+    const int rc = mr_aha_toeplitz(
         &cfg,
-        (const mt_complex *)mxGPUGetDataReadOnly(g_x),
-        (const mt_complex *)mxGPUGetDataReadOnly(g_SEs),
-        (const mt_complex *)mxGPUGetDataReadOnly(g_toep),
+        (const mr_complex *)mxGPUGetDataReadOnly(g_x),
+        (const mr_complex *)mxGPUGetDataReadOnly(g_SEs),
+        (const mr_complex *)mxGPUGetDataReadOnly(g_toep),
         g_mask ? (const int64_t *)mxGPUGetDataReadOnly(g_mask) : NULL,
-        (mt_complex *)mxGPUGetData(g_out));
+        (mr_complex *)mxGPUGetData(g_out));
 
-    if (rc != MT_SUCCESS) {
+    if (rc != MR_SUCCESS) {
         mxGPUDestroyGPUArray(g_out);
         mxGPUDestroyGPUArray(g_x);
         mxGPUDestroyGPUArray(g_SEs);
         mxGPUDestroyGPUArray(g_toep);
         if (g_mask) mxGPUDestroyGPUArray(g_mask);
-        mt_mex_fail(MT_ID, rc);
+        mr_mex_fail(MR_ID, rc);
     }
 
     plhs[0] = mxGPUCreateMxArrayOnGPU(g_out);

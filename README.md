@@ -1,4 +1,4 @@
-# MT_CUDA
+# MR_AHA
 
 GPU evaluation of the forward normal operator $A^H A$ for **non-Cartesian MRI with low-rank
 (subspace / MR-Multitasking) modelling**, via a Toeplitz embedding.
@@ -7,12 +7,12 @@ The numerics live in a standalone CUDA/C++ library with a pure C surface. MATLAB
 C/C++ all call the same code:
 
 ```
-include/mt_cuda/mt_cuda.h   public C API  (extern "C")
-src/core/                   the C++/CUDA implementation  ->  libmt_cuda
-matlab/                     MEX gateways + .m wrappers
-python/                     ctypes binding + CuPy-friendly API
-examples/                   standalone C++/CUDA example
-legacy/                     the previous MATLAB-only implementation (reference only)
+include/mr_aha/mr_aha.h   public C API  (extern "C")
+src/core/                 the C++/CUDA implementation  ->  libmr_aha
+matlab/                   MEX gateways + .m wrappers
+python/                   ctypes binding + CuPy-friendly API
+examples/                 standalone C++/CUDA example
+legacy/                   the previous MATLAB-only implementation (reference only)
 ```
 
 Everything runs on the GPU. All array arguments are device pointers (`gpuArray` in MATLAB,
@@ -99,8 +99,8 @@ $[-\pi, \pi)$ range.
 | `phi2_dim` | upsampled Toeplitz size `[Mx My]` or `[Mx My Mz]`, typically `2*n_dim` |
 | `is_masked` | whether `phi2_toep` is stored only at selected upsampled samples |
 
-Optional: `n_coils`, `num_masked`, `eps`, `mem_fraction`, `gpu_device_id`, `verbose`. The MATLAB helper `mt_default_config` and the Python `mt_cuda.make_config` fill in
-sensible defaults.
+Optional: `n_coils`, `num_masked`, `eps`, `mem_fraction`, `gpu_device_id`, `verbose`. The MATLAB
+helper `mr_default_config` and the Python `mr_aha.make_config` fill in sensible defaults.
 
 ### Triangular packing
 
@@ -126,21 +126,21 @@ git submodule update --init --recursive
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CUDA_ARCHITECTURES=75           \
-      -DMT_CUDA_BUILD_PYTHON=ON               \
-      -DMT_CUDA_BUILD_MATLAB=ON               \
-      -DMT_CUDA_BUILD_EXAMPLES=ON
+      -DMR_AHA_BUILD_PYTHON=ON               \
+      -DMR_AHA_BUILD_MATLAB=ON               \
+      -DMR_AHA_BUILD_EXAMPLES=ON
 cmake --build build -j
 ```
 
 | Option | Default | Produces |
 | ------ | ------- | -------- |
-| — | | `build/libmt_cuda.a` — the standalone library |
-| `MT_CUDA_BUILD_PYTHON` | `ON` | `build/lib/libmt_cuda_c.so` — for the ctypes binding |
-| `MT_CUDA_BUILD_MATLAB` | `OFF` | `build/matlab/*.mexa64` — needs `MATLAB_ROOT` and the Parallel Computing Toolbox |
-| `MT_CUDA_BUILD_EXAMPLES` | `OFF` | `build/mt_example_aha` |
+| — | | `build/libmr_aha.a` — the standalone library |
+| `MR_AHA_BUILD_PYTHON` | `ON` | `build/lib/libmr_aha_c.so` — for the ctypes binding |
+| `MR_AHA_BUILD_MATLAB` | `OFF` | `build/matlab/*.mexa64` — needs `MATLAB_ROOT` and the Parallel Computing Toolbox |
+| `MR_AHA_BUILD_EXAMPLES` | `OFF` | `build/mr_example_aha` |
 
 Set `MATLAB_ROOT` (or `-DMatlab_ROOT_DIR=...`) to your `matlabroot` before configuring with
-`MT_CUDA_BUILD_MATLAB=ON`.
+`MR_AHA_BUILD_MATLAB=ON`.
 
 ---
 
@@ -149,7 +149,7 @@ Set `MATLAB_ROOT` (or `-DMatlab_ROOT_DIR=...`) to your `matlabroot` before confi
 Put both `matlab/` and `build/matlab/` on the MATLAB path.
 
 ```matlab
-config = mt_default_config('stack', [320 320 56], 16);
+config = mr_default_config('stack', [320 320 56], 16);
 
 Om = calc_toep(phi2, traj, config);          % once
 for it = 1:n_iter
@@ -160,13 +160,14 @@ end
 Masked operator:
 
 ```matlab
-config = mt_default_config('stack', [320 320 56], 16, 'is_masked', true);
+config = mr_default_config('stack', [320 320 56], 16, 'is_masked', true);
 Om     = calc_toep(phi2, traj, config, mask);   % mask: 1-based linear indices
 AhAx   = AhA_Toeplitz(x, SEs, Om, config, mask);
 ```
 
 The `.m` wrappers move host arrays to the GPU, cast to complex `single`, derive `n_coils` from
-`size(SEs)`, and convert the 1-based mask to the 0-based `int64` mask the gateway expects. Call `AhA_Toeplitz_mex` / `calc_toep_mex` directly only if you want to skip that.
+`size(SEs)`, and convert the 1-based mask to the 0-based `int64` mask the gateway expects. Call
+`AhA_Toeplitz_mex` / `calc_toep_mex` directly only if you want to skip that.
 
 > ⓘ MATLAB must have initialised its GPU before the first MEX call. Running `gpuDevice(1)`, or
 > simply creating any `gpuArray`, is enough; the wrappers do this implicitly by moving their inputs.
@@ -176,18 +177,18 @@ The `.m` wrappers move host arrays to the GPU, cast to complex `single`, derive 
 ## Python
 
 ```bash
-cmake -S . -B build -DMT_CUDA_BUILD_PYTHON=ON && cmake --build build -j
+cmake -S . -B build -DMR_AHA_BUILD_PYTHON=ON && cmake --build build -j
 pip install -e python
 pip install cupy-cuda12x        # match your CUDA toolkit
 ```
 
 ```python
-import mt_cuda
+import mr_aha
 
-cfg = mt_cuda.make_config("stack", (320, 320, 56), L=16, n_coils=12)
+cfg = mr_aha.make_config("stack", (320, 320, 56), L=16, n_coils=12)
 
-Om = mt_cuda.calc_toep(cfg, phi2, traj)
-with mt_cuda.AhAPlan(cfg) as plan:
+Om = mr_aha.calc_toep(cfg, phi2, traj)
+with mr_aha.AhAPlan(cfg) as plan:
     for _ in range(n_iter):
         y = plan.apply(x, SEs, Om)
 ```
@@ -201,27 +202,27 @@ Shapes are the reverse of the table above, because CuPy is row-major: `x` is `(L
 ## C / C++
 
 ```c
-#include "mt_cuda/mt_cuda.h"
+#include "mr_aha/mr_aha.h"
 
-mt_config cfg;
-mt_config_defaults(&cfg, MT_TRAJ_STACK);
+mr_config cfg;
+mr_config_defaults(&cfg, MR_TRAJ_STACK);
 cfg.n_dim[0] = 320; cfg.n_dim[1] = 320; cfg.n_dim[2] = 56;
 cfg.phi2_dim[0] = 640; cfg.phi2_dim[1] = 640; cfg.phi2_dim[2] = 56;
 cfg.L = 16; cfg.n_coils = 12;
 
-mt_calc_toep(&cfg, d_phi2, d_traj, Ntrajs, Nkx, NULL, d_toep);
+mr_calc_toep(&cfg, d_phi2, d_traj, Ntrajs, Nkx, NULL, d_toep);
 
-mt_aha_plan plan;
-mt_aha_plan_create(&cfg, &plan);
+mr_aha_plan plan;
+mr_aha_plan_create(&cfg, &plan);
 for (int it = 0; it < n_iter; ++it)
-    mt_aha_plan_execute(plan, d_x, d_SEs, d_toep, NULL, d_AhAx);
-mt_aha_plan_destroy(plan);
+    mr_aha_plan_execute(plan, d_x, d_SEs, d_toep, NULL, d_AhAx);
+mr_aha_plan_destroy(plan);
 ```
 
-Every entry point returns `MT_SUCCESS` (0) or a negative `mt_status`; `mt_status_string` gives the
-category and `mt_last_error` the detailed, thread-local diagnostic. `mt_aha_toeplitz` is the
-one-shot convenience form. Link against `mt_cuda`, or `target_link_libraries(your_target mt_cuda)`
-after `add_subdirectory(MT_CUDA)`.
+Every entry point returns `MR_SUCCESS` (0) or a negative `mr_status`; `mr_status_string` gives the
+category and `mr_last_error` the detailed, thread-local diagnostic. `mr_aha_toeplitz` is the
+one-shot convenience form. Link against `mr_aha`, or `target_link_libraries(your_target mr_aha)`
+after `add_subdirectory(MR_AHA)`.
 
 [`examples/example_aha.cu`](examples/example_aha.cu) is a complete, self-contained program that
 builds a synthetic stack-of-stars problem and checks the operator's Hermitian symmetry.
@@ -303,11 +304,11 @@ z participates in the image-domain transform. `phi2` therefore carries an extra 
 
 **Memory.** `calc_toep` chunks its work over the $(L^2+L)/2$ triangular components and sizes the
 chunk against `cudaMemGetInfo`, honouring `config.mem_fraction` (default: half the free memory); it
-also bounds cufinufft's internal fine grid through `gpu_maxbatchsize`. An `mt_aha_plan` holds one
+also bounds cufinufft's internal fine grid through `gpu_maxbatchsize`. An `mr_aha_plan` holds one
 `[Mx, My, Mz, L]` working buffer for the lifetime of the plan, so the iteration allocates nothing.
 
 **Re-entrancy.** No `__constant__` or other shared device state: kernel geometry travels by value.
-Several plans, CUDA streams and host threads can be in flight at once, and `mt_last_error` is
+Several plans, CUDA streams and host threads can be in flight at once, and `mr_last_error` is
 thread-local. `config.stream` selects the stream; `config.gpu_device_id = -1` (the default for
 MATLAB and Python) keeps whichever device the caller has selected.
 

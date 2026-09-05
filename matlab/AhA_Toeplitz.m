@@ -31,7 +31,7 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
 %                  .phi2_dim       [Mx My] or [Mx My Mz]
 %                  .is_masked      logical
 %                Optional fields: .n_coils, .gpu_device_id, .verbose.
-%                See MT_DEFAULT_CONFIG.
+%                See MR_DEFAULT_CONFIG.
 %
 %     mask       (optional, required when config.is_masked is true) linear
 %                indices, in MATLAB's 1-based convention, into the centred
@@ -44,21 +44,21 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
 %   are moved there, and inputs that are real or double precision are cast, so
 %   passing data in the exact expected form avoids all copies.
 %
-%   See also CALC_TOEP, MT_DEFAULT_CONFIG.
+%   See also CALC_TOEP, MR_DEFAULT_CONFIG.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
     narginchk(4, 5);
 
-    x         = mt_to_complex_single_gpu(x,         'x');
-    SEs       = mt_to_complex_single_gpu(SEs,       'SEs');
-    phi2_toep = mt_to_complex_single_gpu(phi2_toep, 'phi2_toep');
+    x         = mr_to_complex_single_gpu(x,         'x');
+    SEs       = mr_to_complex_single_gpu(SEs,       'SEs');
+    phi2_toep = mr_to_complex_single_gpu(phi2_toep, 'phi2_toep');
 
-    config = mt_fill_n_coils(config, SEs);
+    config = mr_fill_n_coils(config, SEs);
 
     if nargin < 5 || isempty(mask)
         if isfield(config, 'is_masked') && config.is_masked
-            error('MT_CUDA:AhA_Toeplitz:missingMask', ...
+            error('MR_AHA:AhA_Toeplitz:missingMask', ...
                   'config.is_masked is true, so a mask must be supplied.');
         end
         AhAx = AhA_Toeplitz_mex(x, SEs, phi2_toep, config);
@@ -70,8 +70,8 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
     end
 end
 
-function a = mt_to_complex_single_gpu(a, name)
-%MT_TO_COMPLEX_SINGLE_GPU  Coerce an array to a complex single gpuArray.
+function a = mr_to_complex_single_gpu(a, name)
+%MR_TO_COMPLEX_SINGLE_GPU  Coerce an array to a complex single gpuArray.
 %   Emits no copy when the input already has the required form.
     if ~isa(a, 'gpuArray')
         a = gpuArray(a);
@@ -84,12 +84,12 @@ function a = mt_to_complex_single_gpu(a, name)
         a = complex(a);
     end
     if isempty(a)
-        error('MT_CUDA:AhA_Toeplitz:emptyInput', '%s must not be empty.', name);
+        error('MR_AHA:AhA_Toeplitz:emptyInput', '%s must not be empty.', name);
     end
 end
 
-function config = mt_fill_n_coils(config, SEs)
-%MT_FILL_N_COILS  Derive .n_coils from the trailing dimension of SEs.
+function config = mr_fill_n_coils(config, SEs)
+%MR_FILL_N_COILS  Derive .n_coils from the trailing dimension of SEs.
 %   An explicit value already present in config is never overwritten.
     if isfield(config, 'n_coils') && ~isempty(config.n_coils)
         return
