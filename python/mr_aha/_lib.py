@@ -18,9 +18,12 @@ __all__ = [
     "MRConfig",
     "TrajType",
     "Triangulation",
+    "MaskMethod",
     "MRError",
     "lib",
     "check",
+    "DEFAULT_MASK_THRESHOLD",
+    "DEFAULT_MASK_RADIUS",
 ]
 
 
@@ -101,6 +104,44 @@ class Triangulation:
             ) from None
 
 
+class MaskMethod:
+    """How :func:`mr_aha.calc_mask` chooses the retained k-space locations."""
+
+    NEIGHBOUR = 0
+    """Keep every upsampled-grid location within ``mask_radius`` cells of the
+    grid point nearest to a sample (default; no NUFFT needed)."""
+
+    THRESHOLD = 1
+    """Keep every location where the max-filtered unit-weight Toeplitz kernel
+    exceeds ``mask_threshold`` (better for very sparse trajectories)."""
+
+    _FROM_STR = {"neighbour": NEIGHBOUR, "neighbor": NEIGHBOUR,
+                 "threshold": THRESHOLD}
+
+    @classmethod
+    def parse(cls, value) -> int:
+        """Convert ``'neighbour'``/``'threshold'`` (or an int) to an enum value.
+
+        Args:
+            value: A string naming the method (``'neighbor'`` is accepted
+                too), or an int already in the enum.
+
+        Returns:
+            The integer enum value.
+
+        Raises:
+            ValueError: If ``value`` names no known method.
+        """
+        if isinstance(value, int):
+            return value
+        try:
+            return cls._FROM_STR[str(value).lower()]
+        except KeyError:
+            raise ValueError(
+                f"mask_method must be 'neighbour' or 'threshold'; got {value!r}"
+            ) from None
+
+
 class MRConfig(ctypes.Structure):
     """``ctypes`` mirror of the C ``mr_config`` struct.
 
@@ -124,6 +165,9 @@ class MRConfig(ctypes.Structure):
         ("stream", ctypes.c_void_p),
         ("mem_fraction", ctypes.c_double),
         ("verbose", ctypes.c_int),
+        ("mask_threshold", ctypes.c_double),
+        ("mask_method", ctypes.c_int),
+        ("mask_radius", ctypes.c_int),
     ]
 
 
@@ -231,7 +275,7 @@ lib.mr_num_tri.restype = ctypes.c_int64
 lib.mr_num_tri.argtypes = [ctypes.c_int]
 
 for _name in ("mr_image_size", "mr_pad_size", "mr_phi2_toep_size", "mr_x_size",
-              "mr_se_size"):
+              "mr_se_size", "mr_mask_kernel_size"):
     _fn = getattr(lib, _name)
     _fn.restype = ctypes.c_int64
     _fn.argtypes = [_cfg_p]
@@ -252,6 +296,24 @@ lib.mr_aha_toeplitz.argtypes = [_cfg_p, _c_ptr, _c_ptr, _c_ptr, _c_ptr, _c_ptr]
 lib.mr_calc_toep.restype = ctypes.c_int
 lib.mr_calc_toep.argtypes = [
     _cfg_p, _c_ptr, _c_ptr, ctypes.c_int64, ctypes.c_int64, _c_ptr, _c_ptr]
+
+lib.mr_calc_mask_kernel.restype = ctypes.c_int
+lib.mr_calc_mask_kernel.argtypes = [
+    _cfg_p, _c_ptr, ctypes.c_int64, ctypes.c_int64, _c_ptr]
+
+lib.mr_calc_mask.restype = ctypes.c_int
+lib.mr_calc_mask.argtypes = [
+    _cfg_p, _c_ptr, ctypes.c_int64, ctypes.c_int64, _c_ptr,
+    ctypes.POINTER(ctypes.c_int64)]
+
+#: Default absolute threshold of :func:`mr_aha.calc_mask` with the
+#: ``'threshold'`` method (in samples), mirroring ``MR_DEFAULT_MASK_THRESHOLD``.
+DEFAULT_MASK_THRESHOLD = 0.05
+
+#: Default neighbourhood radius of :func:`mr_aha.calc_mask` with the default
+#: ``'neighbour'`` method (in upsampled grid cells), mirroring
+#: ``MR_DEFAULT_MASK_RADIUS``.
+DEFAULT_MASK_RADIUS = 2
 
 
 def check(status: int, what: str) -> None:

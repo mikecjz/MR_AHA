@@ -82,6 +82,9 @@ extern "C" int mr_config_defaults(mr_config *cfg, mr_traj_type traj_type)
     cfg->stream          = NULL;
     cfg->mem_fraction    = 0.5;
     cfg->verbose         = 0;
+    cfg->mask_threshold  = MR_DEFAULT_MASK_THRESHOLD;
+    cfg->mask_method     = MR_MASK_NEIGHBOUR;
+    cfg->mask_radius     = MR_DEFAULT_MASK_RADIUS;
     return MR_SUCCESS;
 }
 
@@ -129,6 +132,13 @@ extern "C" int mr_config_validate(const mr_config *cfg)
                    "triangulation must be MR_TRI_LOWER or MR_TRI_UPPER");
     MR_REQUIRE_CFG(cfg->eps > 0.0 && cfg->eps < 1.0,
                    "eps = %g must lie in (0, 1)", cfg->eps);
+    MR_REQUIRE_CFG(cfg->mask_threshold >= 0.0,
+                   "mask_threshold = %g must be >= 0", cfg->mask_threshold);
+    MR_REQUIRE_CFG(cfg->mask_method == MR_MASK_NEIGHBOUR ||
+                       cfg->mask_method == MR_MASK_THRESHOLD,
+                   "mask_method must be MR_MASK_NEIGHBOUR or MR_MASK_THRESHOLD");
+    MR_REQUIRE_CFG(cfg->mask_radius >= 0, "mask_radius = %d must be >= 0",
+                   cfg->mask_radius);
 
     if (cfg->is_masked) {
         const int64_t pad = mr_pad_size(cfg);
@@ -170,6 +180,14 @@ extern "C" int64_t mr_phi2_toep_size(const mr_config *cfg)
     if (cfg == NULL) return 0;
     const int64_t ntri = mr_num_tri(cfg->L);
     return (cfg->is_masked ? cfg->num_masked : mr_pad_size(cfg)) * ntri;
+}
+
+extern "C" int64_t mr_mask_kernel_size(const mr_config *cfg)
+{
+    if (cfg == NULL) return 0;
+    /* 2D and stack kernels depend on the in-plane trajectory only. */
+    const int64_t plane = (int64_t)cfg->phi2_dim[0] * cfg->phi2_dim[1];
+    return (cfg->traj_type == MR_TRAJ_3D) ? plane * cfg->phi2_dim[2] : plane;
 }
 
 extern "C" int64_t mr_x_size(const mr_config *cfg)

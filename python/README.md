@@ -34,8 +34,10 @@ and no data is ever moved.
 | `x[Nx, Ny, Nz, L]`           | `x[L, Nz, Ny, Nx]`         |
 | `SEs[Nx, Ny, Nz, Nc]`        | `SEs[Nc, Nz, Ny, Nx]`      |
 | `phi2_toep[Mx, My, Mz, T]`   | `phi2_toep[T, Mz, My, Mx]` |
-| `phi2[Ntrajs, L*L]`          | `phi2[L*L, Ntrajs]`        |
+| `phi2[Ntrajs, L, L]`         | `phi2[L, L, Ntrajs]`       |
+| `phi2[Ntrajs, Nkz, L, L]`    | `phi2[L, L, Nkz, Ntrajs]`  |
 | `traj[Ntrajs, Nkx, ndim]`    | `traj[ndim, Nkx, Ntrajs]`  |
+| `mask_kernel[Mx, My, Mz]`    | `mask_kernel[Mz, My, Mx]`  |
 
 ## Usage
 
@@ -52,13 +54,31 @@ with mr_aha.AhAPlan(cfg) as plan:           # reuse inside the CG loop
         y = plan.apply(x, SEs, Om)
 ```
 
-Masked operators keep `phi2_toep` only at selected upsampled k-space samples:
+Masked operators keep `phi2_toep` only at selected upsampled k-space samples.
+`calc_mask` derives them from the trajectory. By default it keeps every grid location within
+`mask_radius=2` cells of a sample. With `mask_method="threshold"` it thresholds the unit-weight
+Toeplitz kernel at `mask_threshold` (absolute, in samples, default 0.05) instead. Per call,
+`calc_mask(cfg, traj, radius=...)` or `threshold=...` overrides the configured method:
 
 ```python
-cfg = mr_aha.make_config("stack", (256, 256, 64), L=16, n_coils=8,
-                          is_masked=True, num_masked=mask.size)
-Om = mr_aha.calc_toep(cfg, phi2, traj, mask=mask)
-y  = mr_aha.aha_toeplitz(cfg, x, SEs, Om, mask=mask)
+cfg  = mr_aha.make_config("stack", (256, 256, 64), L=16, n_coils=8, is_masked=True)
+mask = mr_aha.calc_mask(cfg, traj)                  # or your own indices
+Om   = mr_aha.calc_toep(cfg, phi2, traj, mask=mask) # fills cfg.num_masked
+y    = mr_aha.aha_toeplitz(cfg, x, SEs, Om, mask=mask)
 ```
 
 `mask` holds **0-based** linear indices into the centred upsampled grid.
+
+## NUFFT reference
+
+`mr_aha.AhANufftPlan` evaluates the same operator with type-2 / type-1
+cufinufft transforms instead of the Toeplitz embedding (pure CuPy + the
+`cufinufft` package, no MR_AHA C code). It needs `pip install cufinufft`, and
+the cufinufft wheel expects `libcudart.so.12` on the library path (load your
+CUDA module or install `nvidia-cuda-runtime-cu12`).
+
+```python
+with mr_aha.AhANufftPlan(cfg, traj, type1_opts={"gpu_method": 1},
+                         type2_opts={"gpu_method": 2}) as ref:
+    y_ref = ref.apply(x, SEs, phi2)    # agrees with aha_toeplitz to ~1e-6
+```

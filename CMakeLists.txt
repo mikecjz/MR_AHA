@@ -6,6 +6,10 @@
 #    mr_aha           - the standalone C/C++/CUDA library (the "C++ base")
 #    AhA_Toeplitz_mex  - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
 #    calc_toep_mex     - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
+#    calc_mask_mex     - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
+#    cufinufft (MEX)   - finufft's own MATLAB GPU interface, used by the
+#                        NUFFT reference AhA_cufinufft.m (optional,
+#                        MR_AHA_BUILD_CUFINUFFT_MATLAB)
 #    libmr_aha_c.so   - shared library consumed by the Python ctypes binding
 #                        (optional, MR_AHA_BUILD_PYTHON)
 #
@@ -37,6 +41,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(MR_AHA_BUILD_MATLAB "Build the MATLAB MEX interface"        OFF)
 option(MR_AHA_BUILD_PYTHON "Build the shared library used by Python" ON)
 option(MR_AHA_BUILD_EXAMPLES "Build the standalone C++ examples"   OFF)
+option(MR_AHA_BUILD_CUFINUFFT_MATLAB
+       "Also build finufft's cufinufft MATLAB MEX (needed by AhA_cufinufft.m)" OFF)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -62,7 +68,16 @@ if(NOT TARGET cufinufft)
     set(FINUFFT_STATIC_LINKING ON  CACHE BOOL "" FORCE)
     set(FINUFFT_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
     set(FINUFFT_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(FINUFFT_BUILD_MATLAB   OFF CACHE BOOL "" FORCE)
+    if(MR_AHA_BUILD_CUFINUFFT_MATLAB)
+        # finufft's own GPU MEX + .m wrappers, built from the same submodule
+        # so that the NUFFT reference uses the very same cufinufft version.
+        if(DEFINED ENV{MATLAB_ROOT} AND NOT DEFINED Matlab_ROOT_DIR)
+            set(Matlab_ROOT_DIR $ENV{MATLAB_ROOT})
+        endif()
+        set(FINUFFT_BUILD_MATLAB ON  CACHE BOOL "" FORCE)
+    else()
+        set(FINUFFT_BUILD_MATLAB OFF CACHE BOOL "" FORCE)
+    endif()
     set(FINUFFT_BUILD_PYTHON   OFF CACHE BOOL "" FORCE)
     set(FINUFFT_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
     add_subdirectory(finufft EXCLUDE_FROM_ALL)
@@ -77,6 +92,7 @@ add_library(mr_aha STATIC
     src/core/mr_kernels.cu
     src/core/mr_aha.cu
     src/core/mr_calc_toep.cu
+    src/core/mr_calc_mask.cu
 )
 
 target_include_directories(mr_aha
@@ -140,7 +156,7 @@ if(MR_AHA_BUILD_MATLAB)
               "${Matlab_ROOT_DIR}/bin/win64"
         REQUIRED)
 
-    foreach(MR_MEX_NAME AhA_Toeplitz_mex calc_toep_mex)
+    foreach(MR_MEX_NAME AhA_Toeplitz_mex calc_toep_mex calc_mask_mex)
         matlab_add_mex(
             NAME ${MR_MEX_NAME}
             SRC matlab/${MR_MEX_NAME}.cu
@@ -157,6 +173,11 @@ if(MR_AHA_BUILD_MATLAB)
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/matlab
             LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/matlab)
     endforeach()
+endif()
+
+# finufft is added EXCLUDE_FROM_ALL, so pull its MEX into the default build.
+if(MR_AHA_BUILD_CUFINUFFT_MATLAB AND TARGET cufinufft_mex)
+    add_custom_target(mr_cufinufft_matlab ALL DEPENDS cufinufft_mex)
 endif()
 
 # ----------------------------------------------------------------------------

@@ -66,6 +66,33 @@ extern "C" {
 /** @brief Single-precision complex scalar used by every MR_AHA array. */
 typedef cuFloatComplex mr_complex;
 
+/**
+ * @brief Default neighbourhood radius of ::mr_calc_mask, in upsampled grid cells.
+ *
+ * Used by the default method ::MR_MASK_NEIGHBOUR. Measured in
+ * `benchmarks/neighbour_mask.md`: with radius 2 the masked operator matches
+ * the unmasked one to within the single-precision NUFFT tolerance on
+ * image-like inputs for the 280-spoke radial (79 % of the grid kept) and 3D
+ * kooshball (54 % kept) test problems. On the 377-spoke 160^2 radial data
+ * the image-input error is 5e-5 (80 % kept), and on sparse trajectories
+ * (64 radial spokes, two-arm spiral) it is 5e-4 to 3e-2; increase
+ * ::mr_config::mask_radius or use ::MR_MASK_THRESHOLD there. Radius 0 or 1
+ * leaves gaps between the spokes near the edge of k-space.
+ */
+#define MR_DEFAULT_MASK_RADIUS 2
+
+/**
+ * @brief Default (absolute) threshold of ::mr_calc_mask, in units of samples.
+ *
+ * Used only by ::MR_MASK_THRESHOLD. Chosen experimentally (see
+ * `benchmarks/README.md`) on the 2D radial, stack-of-stars and 3D kooshball
+ * test problems: at 0.05 the masked operator differs from the exact one by a
+ * few times the single-precision NUFFT tolerance on image-like inputs, while
+ * the empty corners of the upsampled k-space grid (about 16-20 % of it in 2D,
+ * 36 % in 3D) are discarded.
+ */
+#define MR_DEFAULT_MASK_THRESHOLD 0.05
+
 /* ------------------------------------------------------------------------ */
 /* Status codes                                                             */
 /* ------------------------------------------------------------------------ */
@@ -142,6 +169,21 @@ typedef enum mr_triangulation {
 } mr_triangulation;
 
 /**
+ * @brief How ::mr_calc_mask chooses the retained upsampled k-space locations.
+ */
+typedef enum mr_mask_method {
+    /** Keep every location within ::mr_config::mask_radius grid cells
+     *  (Chebyshev distance, i.e. a `(2r+1)^d` box) of the grid point nearest
+     *  to a sample. Cheap (no NUFFT) and the default. */
+    MR_MASK_NEIGHBOUR = 0,
+    /** Keep every location where the max-filtered unit-weight Toeplitz kernel
+     *  exceeds ::mr_config::mask_threshold. Costs one @f$L = 1@f$
+     *  ::mr_calc_toep; follows the kernel's axis-aligned tails, so it is the
+     *  better choice for very sparse trajectories (e.g. few-arm spirals). */
+    MR_MASK_THRESHOLD = 1
+} mr_mask_method;
+
+/**
  * @brief Complete description of one @f$A^H A@f$ operator.
  *
  * Fill with ::mr_config_defaults first, then override the fields you need. Use
@@ -201,14 +243,32 @@ typedef struct mr_config {
 
     /** Non-zero to print per-stage timing to stdout. Default 0. */
     int verbose;
+
+    /** Absolute threshold used by ::mr_calc_mask with ::MR_MASK_THRESHOLD,
+     *  in units of samples: an upsampled k-space location is retained when
+     *  the (locally max-filtered) magnitude of the unit-weight Toeplitz kernel
+     *  there exceeds it. One isolated on-grid sample contributes exactly 1.
+     *  Default ::MR_DEFAULT_MASK_THRESHOLD. Must be >= 0. */
+    double mask_threshold;
+
+    /** Mask construction used by ::mr_calc_mask. See ::mr_mask_method.
+     *  Default ::MR_MASK_NEIGHBOUR. */
+    mr_mask_method mask_method;
+
+    /** Neighbourhood radius, in upsampled grid cells, used by ::mr_calc_mask
+     *  with ::MR_MASK_NEIGHBOUR. Default ::MR_DEFAULT_MASK_RADIUS. Must be
+     *  >= 0; 0 keeps only the grid point nearest to each sample. */
+    int mask_radius;
 } mr_config;
 
 /**
  * @brief Populate @p cfg with library defaults for a given trajectory type.
  *
  * Sets `eps = 1e-6`, `gpu_device_id = 0`, `stream = NULL`, `n_coils = 1`,
- * `mem_fraction = 0.5`, `triangulation = MR_TRI_LOWER`, `is_masked = 0`, all
- * sizes to 1 and ::n_spatial according to @p traj_type.
+ * `mem_fraction = 0.5`, `triangulation = MR_TRI_LOWER`, `is_masked = 0`,
+ * `mask_method = MR_MASK_NEIGHBOUR`, `mask_radius = MR_DEFAULT_MASK_RADIUS`,
+ * `mask_threshold = MR_DEFAULT_MASK_THRESHOLD`, all sizes to 1 and
+ * ::n_spatial according to @p traj_type.
  *
  * @param[out] cfg       Configuration to initialise. Must be non-NULL.
  * @param[in]  traj_type Trajectory family the operator will be used for.
@@ -407,10 +467,11 @@ MR_EXPORT int mr_aha_toeplitz(const mr_config  *cfg,
  * @param[in]  cfg          Validated configuration. ::mr_config::phi2_dim gives
  *                          the upsampled grid the kernel is evaluated on.
  * @param[in]  d_phi2       Device array of Gram blocks,
- *                          `[Ntrajs, L*L]` for ::MR_TRAJ_2D / ::MR_TRAJ_3D or
- *                          `[Ntrajs, Nkz, L*L]` for ::MR_TRAJ_STACK, where the
- *                          `L*L` axis is the column-major @f$L\times L@f$
- *                          matrix and `Nkz == Mz == Nz`.
+ *                          `[Ntrajs, L, L]` for ::MR_TRAJ_2D / ::MR_TRAJ_3D or
+ *                          `[Ntrajs, Nkz, L, L]` for ::MR_TRAJ_STACK, where the
+ *                          trailing `[L, L]` axes hold the (column-major)
+ *                          @f$L\times L@f$ matrix @f$\Phi^H\Phi@f$ of that
+ *                          trajectory and `Nkz == Mz == Nz`.
  * @param[in]  d_traj       Device array of non-Cartesian coordinates,
  *                          `[Ntrajs, Nkx, ndim]`, in **radians per unit of the
  *                          un-padded image grid**, i.e. the usual
@@ -435,6 +496,123 @@ MR_EXPORT int mr_calc_toep(const mr_config  *cfg,
                            int64_t           Nkx,
                            const int64_t    *d_mask,
                            mr_complex       *d_phi2_toep);
+
+/* ------------------------------------------------------------------------ */
+/* Automatic k-space mask                                                   */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * @brief Number of elements of the unit-weight kernel of ::mr_calc_mask_kernel.
+ *
+ * The kernel depends only on the in-plane trajectory for ::MR_TRAJ_2D and
+ * ::MR_TRAJ_STACK, so it is `Mx*My` for those and `Mx*My*Mz` for ::MR_TRAJ_3D.
+ *
+ * @param[in] cfg Configuration.
+ * @return Element count, or 0 when @p cfg is NULL.
+ */
+MR_EXPORT int64_t mr_mask_kernel_size(const mr_config *cfg);
+
+/**
+ * @brief Magnitude of the unit-weight Toeplitz kernel of a trajectory.
+ *
+ * Evaluates exactly what ::mr_calc_toep would return for @f$L = 1@f$ and every
+ * Gram block equal to one, i.e. the Toeplitz multiplier
+ * @f$T(\mathbf{k})@f$ of the plain (non-subspace) normal operator
+ * @f$F^H F@f$ of the trajectory, and stores @f$|T(\mathbf{k})|@f$.
+ * @f$T@f$ is essentially the k-space sampling density blurred by the
+ * Dirichlet kernel of the upsampled grid: it is large where the trajectory
+ * samples and decays towards zero away from it (for instance in the corners
+ * of the grid outside the sampled disc or ball of a radial trajectory). This
+ * is the quantity thresholded by ::mr_calc_mask; it is exposed separately so
+ * that the threshold can be studied.
+ *
+ * @param[in]  cfg      Validated configuration. Only ::mr_config::traj_type,
+ *                      ::mr_config::n_dim, ::mr_config::phi2_dim and the
+ *                      execution fields (eps, device, stream, mem_fraction)
+ *                      are used; ::mr_config::L and ::mr_config::is_masked
+ *                      are ignored.
+ * @param[in]  d_traj   Device trajectory `[Ntrajs, Nkx, ndim]`, exactly as for
+ *                      ::mr_calc_toep.
+ * @param[in]  Ntrajs   Number of trajectories.
+ * @param[in]  Nkx      Samples per trajectory.
+ * @param[out] d_kernel Device array of ::mr_mask_kernel_size floats, centred
+ *                      order: `[Mx, My]` (2D, stack) or `[Mx, My, Mz]` (3D).
+ * @return ::MR_SUCCESS or a negative ::mr_status.
+ */
+MR_EXPORT int mr_calc_mask_kernel(const mr_config *cfg,
+                                  const float     *d_traj,
+                                  int64_t          Ntrajs,
+                                  int64_t          Nkx,
+                                  float           *d_kernel);
+
+/**
+ * @brief Derive the masked-operator sample set directly from the trajectory.
+ *
+ * Two constructions are available, selected by ::mr_config::mask_method:
+ *
+ * - **::MR_MASK_NEIGHBOUR (default).** Every sample @f$\mathbf{k}@f$
+ *   (radians) is mapped to its nearest point on the upsampled grid,
+ *   `rint(k * M / (2*pi)) + M/2` per transformed axis (modulo `M`, the grid
+ *   is periodic), those points are marked, and the marks are dilated by a
+ *   @f$(2r+1)^d@f$ box with @f$r@f$ = ::mr_config::mask_radius. Every
+ *   location within @f$r@f$ cells (Chebyshev distance) of a sample's grid
+ *   point is kept. No NUFFT is needed. Samples lie between grid points and
+ *   each one's Dirichlet kernel spreads over the neighbouring cells, so
+ *   @f$r = 0@f$ is far too small; the default @f$r = 2@f$ reaches the
+ *   unmasked accuracy on densely sampled radial and 3D trajectories while
+ *   keeping roughly the sampled disc / ball of k-space.
+ *
+ * - **::MR_MASK_THRESHOLD.** Computes the unit-weight kernel @f$|T|@f$ of
+ *   ::mr_calc_mask_kernel, max-filters it over the immediate neighbourhood of
+ *   every location (a @f$3\times3@f$ or @f$3\times3\times3@f$ box over the
+ *   transformed axes), giving @f$\tilde{T}@f$, and keeps every location where
+ *   @f$\tilde{T}(\mathbf{k}) > \tau@f$, with @f$\tau@f$ =
+ *   ::mr_config::mask_threshold. The threshold is absolute, in units of
+ *   samples: a single isolated sample on the grid contributes exactly 1 to the
+ *   unit-weight kernel, so @f$\tau = 0.05@f$ drops locations that receive less
+ *   than 5 % of one sample's worth. (A threshold relative to the maximum does
+ *   not transfer between trajectories, because the maximum of a radial kernel
+ *   is the number of spokes crossing the k-space centre.) The dilation matters
+ *   because the unit-weight kernel, a sum of Dirichlet kernels, can cancel to
+ *   almost zero at isolated points inside the sampled region where the kernel
+ *   of the actual Gram blocks does not. Because it follows the kernel's
+ *   slowly decaying, axis-aligned tails, this method is more accurate per
+ *   retained location for very sparse trajectories such as few-arm spirals.
+ *
+ * Locations far from every sample carry little of the Toeplitz kernel, so
+ * dropping them from `phi2_toep` saves memory with an error controlled by the
+ * radius or threshold.
+ *
+ * For ::MR_TRAJ_STACK the in-plane mask is replicated over all `Mz` kz
+ * planes, because every kz encode uses the same 2D trajectory.
+ *
+ * The result is directly usable as the `d_mask` argument of ::mr_calc_toep and
+ * ::mr_aha_plan_execute after setting ::mr_config::is_masked and
+ * ::mr_config::num_masked.
+ *
+ * @param[in]  cfg            Validated configuration (see
+ *                            ::mr_calc_mask_kernel for the fields used, plus
+ *                            ::mr_config::mask_method and
+ *                            ::mr_config::mask_radius or
+ *                            ::mr_config::mask_threshold).
+ * @param[in]  d_traj         Device trajectory `[Ntrajs, Nkx, ndim]`.
+ * @param[in]  Ntrajs         Number of trajectories.
+ * @param[in]  Nkx            Samples per trajectory.
+ * @param[out] d_mask         Device array receiving the retained **0-based**
+ *                            linear indices into the centred upsampled grid
+ *                            `[Mx, My, Mz]`, in ascending order. Must have room
+ *                            for ::mr_pad_size entries (the worst case). May be
+ *                            NULL to only count the retained locations.
+ * @param[out] num_masked_out Host pointer receiving the number of retained
+ *                            locations. Must be non-NULL.
+ * @return ::MR_SUCCESS or a negative ::mr_status.
+ */
+MR_EXPORT int mr_calc_mask(const mr_config *cfg,
+                           const float     *d_traj,
+                           int64_t          Ntrajs,
+                           int64_t          Nkx,
+                           int64_t         *d_mask,
+                           int64_t         *num_masked_out);
 
 #ifdef __cplusplus
 } /* extern "C" */

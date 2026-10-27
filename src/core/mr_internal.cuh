@@ -195,6 +195,42 @@ __host__ __device__ __forceinline__ int mr_tri_offset(int i, int j, int L,
     return c * L - c * (c - 1) / 2 + (r - c);
 }
 
+/* ------------------------------------------------------------------------ */
+/* Internal entry points shared between translation units                   */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * @brief Make @p cfg's device current, remembering the caller's device.
+ *
+ * A ::mr_config::gpu_device_id of -1 means "leave the current device alone",
+ * which is what MATLAB gpuArray and CuPy callers want.
+ *
+ * @param[in]  cfg  Configuration carrying the requested device.
+ * @param[out] prev Receives the previously current device, or -1 if unchanged.
+ * @return ::MR_SUCCESS or ::MR_ERR_CUDA.
+ */
+int mr_toep_push_device(const mr_config *cfg, int *prev);
+
+/**
+ * @brief Body of ::mr_calc_toep without argument checking or device switching.
+ *
+ * Shared with ::mr_calc_mask_kernel, which evaluates the unit-weight kernel by
+ * running the very same pipeline with @f$L = 1@f$. The caller must have
+ * validated @p cfg and made the target device current.
+ *
+ * @param[in]  cfg         Validated configuration.
+ * @param[in]  d_phi2      Gram blocks, see ::mr_calc_toep.
+ * @param[in]  d_traj      Trajectory, see ::mr_calc_toep.
+ * @param[in]  Ntrajs      Number of trajectories.
+ * @param[in]  Nkx         Samples per trajectory.
+ * @param[in]  d_mask      Mask, or NULL when not masked.
+ * @param[out] d_phi2_toep Output, see ::mr_calc_toep.
+ * @return ::MR_SUCCESS or a negative ::mr_status.
+ */
+int mr_calc_toep_impl(const mr_config *cfg, const mr_complex *d_phi2,
+                      const float *d_traj, int64_t Ntrajs, int64_t Nkx,
+                      const int64_t *d_mask, mr_complex *d_phi2_toep);
+
 /** @brief Integer ceiling division for launch-configuration arithmetic. */
 __host__ __forceinline__ long long mr_ceil_div(long long a, long long b)
 {

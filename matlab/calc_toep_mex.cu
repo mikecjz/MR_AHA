@@ -8,8 +8,8 @@
  *   phi2_toep = calc_toep_mex(phi2, traj, config, mask)
  * @endcode
  *
- * `phi2` is a complex single gpuArray of size `[Ntrajs, L*L]` (2D / 3D) or
- * `[Ntrajs, Nkz, L*L]` (stack), `traj` a real single gpuArray of size
+ * `phi2` is a complex single gpuArray of size `[Ntrajs, L, L]` (2D / 3D) or
+ * `[Ntrajs, Nkz, L, L]` (stack), `traj` a real single gpuArray of size
  * `[Ntrajs, Nkx, ndim]` holding radians in @f$[-\pi, \pi)@f$, and `mask` an
  * `int64` gpuArray of 0-based linear indices.
  *

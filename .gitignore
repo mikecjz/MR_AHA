@@ -11,3 +11,6 @@ compile_commands.json
 .claude/
 *.egg-info/
 .venv/
+data/
+benchmarks/
+build_*/

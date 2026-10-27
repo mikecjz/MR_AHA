@@ -148,8 +148,9 @@ static void mr_mex_string(const mxArray *s, const char *name, char *buf,
  *
  * Recognised fields (see the repository documentation for the full contract):
  * `traj_type`, `n_dim`, `L`, `triangulation`, `phi2_dim`, `is_masked`, and the
- * optional `num_masked`, `n_coils`, `eps`, `mem_fraction`, `gpu_device_id`
- * and `verbose`.
+ * optional `num_masked`, `n_coils`, `eps`, `mem_fraction`, `gpu_device_id`,
+ * `verbose`, `mask_method` (`'neighbour'` or `'threshold'`), `mask_radius` and
+ * `mask_threshold`.
  *
  * `gpu_device_id` defaults to -1, i.e. "use whichever device MATLAB has
  * selected", which is what a gpuArray workflow needs.
@@ -199,6 +200,22 @@ static void mr_mex_parse_config(const mxArray *mx_cfg, mr_config *cfg,
     cfg->verbose       = (int)mr_mex_scalar_opt(mx_cfg, "verbose", 0);
     /* -1 keeps MATLAB's currently selected GPU, which gpuArray data lives on. */
     cfg->gpu_device_id = (int)mr_mex_scalar_opt(mx_cfg, "gpu_device_id", -1);
+    cfg->mask_threshold =
+        mr_mex_scalar_opt(mx_cfg, "mask_threshold", MR_DEFAULT_MASK_THRESHOLD);
+    cfg->mask_radius =
+        (int)mr_mex_scalar_opt(mx_cfg, "mask_radius", MR_DEFAULT_MASK_RADIUS);
+    cfg->mask_method = MR_MASK_NEIGHBOUR;
+    if (mr_mex_field(mx_cfg, "mask_method") != NULL) {
+        char method[32];
+        mr_mex_string(mx_cfg, "mask_method", method, sizeof(method), id);
+        if (strcmp(method, "neighbour") == 0 || strcmp(method, "neighbor") == 0)
+            cfg->mask_method = MR_MASK_NEIGHBOUR;
+        else if (strcmp(method, "threshold") == 0)
+            cfg->mask_method = MR_MASK_THRESHOLD;
+        else
+            mexErrMsgIdAndTxt(id, "config.mask_method must be 'neighbour' or "
+                                  "'threshold'.");
+    }
     cfg->stream        = NULL;
 }
 

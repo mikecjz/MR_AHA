@@ -57,13 +57,7 @@ static void mr_toep_workspace_free(mr_toep_workspace *w)
     if (w->d_work) { cudaFree(w->d_work); w->d_work = NULL; }
 }
 
-/**
- * @brief Make @p cfg's device current, remembering the caller's device.
- * @param[in]  cfg  Configuration carrying the requested device.
- * @param[out] prev Receives the previously current device, or -1 if unchanged.
- * @return ::MR_SUCCESS or ::MR_ERR_CUDA.
- */
-static int mr_toep_push_device(const mr_config *cfg, int *prev)
+int mr_toep_push_device(const mr_config *cfg, int *prev)
 {
     *prev = -1;
     if (cfg->gpu_device_id < 0) return MR_SUCCESS;
@@ -124,10 +118,11 @@ static int mr_toep_pick_chunk(const mr_config *cfg, int64_t pad_size,
     return MR_SUCCESS;
 }
 
-/** @brief Body of ::mr_calc_toep, run with the target device current. */
-static int mr_calc_toep_impl(const mr_config *cfg, const mr_complex *d_phi2,
-                             const float *d_traj, int64_t Ntrajs, int64_t Nkx,
-                             const int64_t *d_mask, mr_complex *d_phi2_toep)
+/* Body of ::mr_calc_toep, run with the target device current. Documented in
+ * mr_internal.cuh because ::mr_calc_mask_kernel reuses it. */
+int mr_calc_toep_impl(const mr_config *cfg, const mr_complex *d_phi2,
+                      const float *d_traj, int64_t Ntrajs, int64_t Nkx,
+                      const int64_t *d_mask, mr_complex *d_phi2_toep)
 {
     const int      is_stack  = (cfg->traj_type == MR_TRAJ_STACK);
     const int      nufft_dim = (cfg->traj_type == MR_TRAJ_3D) ? 3 : 2;

@@ -12,6 +12,7 @@ src/core/                 the C++/CUDA implementation  ->  libmr_aha
 matlab/                   MEX gateways + .m wrappers
 python/                   ctypes binding + CuPy-friendly API
 examples/                 standalone C++/CUDA example
+benchmarks/               Toeplitz vs. NUFFT speed / CG benchmarks and results
 legacy/                   the previous MATLAB-only implementation (reference only)
 ```
 
@@ -22,7 +23,7 @@ Everything runs on the GPU. All array arguments are device pointers (`gpuArray` 
 
 ## Contents
 
-1. [The two operations](#the-two-operations)
+1. [The operations](#the-operations)
 2. [Conventions](#conventions)
 3. [Building](#building)
 4. [MATLAB](#matlab)
@@ -30,10 +31,11 @@ Everything runs on the GPU. All array arguments are device pointers (`gpuArray` 
 6. [C / C++](#c--c)
 7. [Why Toeplitz and how does it work?](#why-toeplitz-and-how-does-it-work)
 8. [Implementation notes](#implementation-notes)
+9. [Benchmarks](#benchmarks)
 
 ---
 
-## The two operations
+## The operations
 
 ### `calc_toep` — one-off pre-computation
 
@@ -57,6 +59,29 @@ the Hermitian $L \times L$ block at each k-space location, inverse FFT, crop, mu
 adjoint sensitivity map, accumulate. No NUFFT is evaluated here, which is the whole point of the
 Toeplitz embedding.
 
+### `calc_mask` — automatic mask for the masked operator
+
+```
+mask = calc_mask(traj, config)
+```
+
+Derives the upsampled k-space locations worth keeping from the trajectory alone. By default it keeps
+every grid location within `config.mask_radius` (default 2) cells of a sample. The alternative
+`config.mask_method = 'threshold'` thresholds the trajectory's unit-weight Toeplitz kernel at
+`config.mask_threshold`. See [Masking](#masking).
+
+### `AhA_cufinufft` / `mr_aha.AhANufftPlan` — reference without Toeplitz
+
+```
+AhAx = AhA_cufinufft(x, SEs, phi2, traj, config[, plan])     % MATLAB
+y    = mr_aha.AhANufftPlan(cfg, traj).apply(x, SEs, phi2)    # Python
+```
+
+The same operator evaluated the "vanilla" way, coil by coil: type-2 cufinufft, one $L\times L$ block
+per readout, type-1 cufinufft. Pure MATLAB / CuPy on top of cufinufft (no MR_AHA C code), used to
+validate the Toeplitz operator and as the benchmark baseline. Both agree with `AhA_Toeplitz` to
+$\sim 10^{-6}$.
+
 ---
 
 ## Conventions
@@ -79,7 +104,7 @@ the convention is exact for even and odd matrix sizes alike.
 | `SEs` | `[Nx, Ny, Ncoils]` | `[Nx, Ny, Nz, Ncoils]` |
 | `phi2_toep` (unmasked) | `[Mx, My, (L²+L)/2]` | `[Mx, My, Mz, (L²+L)/2]` |
 | `phi2_toep` (masked) | `[num_masked, (L²+L)/2]` | `[num_masked, (L²+L)/2]` |
-| `phi2` | `[Ntrajs, L*L]` | `[Ntrajs, L*L]`, or `[Ntrajs, Nkz, L*L]` for stack |
+| `phi2` | `[Ntrajs, L, L]` | `[Ntrajs, L, L]`, or `[Ntrajs, Nkz, L, L]` for stack (centred kz order) |
 | `traj` | `[Ntrajs, Nkx, 2]` | `[Ntrajs, Nkx, 3]`, or `[Ntrajs, Nkx, 2]` for stack |
 | `AhAx` | same as `x` | same as `x` |
 
@@ -99,7 +124,8 @@ $[-\pi, \pi)$ range.
 | `phi2_dim` | upsampled Toeplitz size `[Mx My]` or `[Mx My Mz]`, typically `2*n_dim` |
 | `is_masked` | whether `phi2_toep` is stored only at selected upsampled samples |
 
-Optional: `n_coils`, `num_masked`, `eps`, `mem_fraction`, `gpu_device_id`, `verbose`. The MATLAB
+Optional: `n_coils`, `num_masked`, `eps`, `mem_fraction`, `gpu_device_id`, `verbose`,
+`mask_method` (`'neighbour'` or `'threshold'`), `mask_radius`, `mask_threshold`. The MATLAB
 helper `mr_default_config` and the Python `mr_aha.make_config` fill in sensible defaults.
 
 ### Triangular packing
@@ -113,6 +139,47 @@ triangle, i.e. exactly `A(tril(true(L)))` / `A(triu(true(L)))`.
 `mask` holds linear indices into the *centred* upsampled grid `phi2_dim`, 1-based in MATLAB and
 0-based in Python and C. Samples outside the mask contribute nothing. This is what makes a large 3D
 operator fit in GPU memory when the upsampled k-space support is sparse.
+
+`calc_mask` derives the mask from the trajectory, using one of two methods (`mask_method`).
+
+**`'neighbour'` (default).**
+
+1. Map every sample to its nearest point on the upsampled grid: `round(k·M/2π) + M/2` per axis,
+   modulo `M`.
+2. Keep every location within `mask_radius` cells of such a point (a $(2r+1)^d$ box). The default
+   radius is 2.
+
+This needs no NUFFT, and the same trajectory always gives the same mask. On the densely sampled
+test problems radius 2 is as accurate as the unmasked operator:
+
+* 280-spoke stack-of-stars: 79 % of the grid kept, operator error 3·10⁻⁶;
+* 3D kooshball: 54 % kept, operator error 4·10⁻⁶.
+
+It is less accurate on the 377-spoke 160² radial data (80 % kept, error 5·10⁻⁵) and on sparse
+trajectories (64 spokes: 5·10⁻⁴; two-arm spiral: 3·10⁻²). There, raise `mask_radius` or use the
+threshold method.
+
+**`'threshold'`.**
+
+1. Evaluate the Toeplitz kernel $T(\mathbf{k})$ of the trajectory with every weight set to one
+   (exactly `calc_toep` with $L = 1$ and $\Phi^H\Phi = 1$).
+2. Max-filter $|T|$ over the $3\times3$ ($3\times3\times3$ in 3D) neighbourhood of every location.
+3. Keep the locations where the result exceeds `mask_threshold`.
+
+The threshold is **absolute, in samples**: one isolated sample lying on the upsampled grid
+contributes exactly 1 to $T$, so the default 0.05 drops locations that receive less than 5 % of one
+sample's worth. A threshold relative to $\max|T|$ does not transfer between trajectories, because
+the radial maximum sits at the k-space centre and equals the number of spokes (378, 280 and 15680
+for the three test trajectories). Step 2 fills isolated near-zeros where the unit-weight Dirichlet
+sum cancels inside the sampled region but the kernel of the real Gram blocks does not; it lowers the
+masking error about tenfold at equal kept fraction.
+
+This method follows the kernel's slowly decaying tails along the kx and ky axes, so it is more
+accurate per kept location on sparse trajectories. At 0.05 it keeps 81–83 % of the grid in 2D and
+stack, with an operator error of a few $10^{-6}$; it keeps 64 % for the kooshball.
+
+[`benchmarks/neighbour_mask.md`](benchmarks/neighbour_mask.md) compares the two methods, and
+[`benchmarks/README.md`](benchmarks/README.md) documents the threshold study.
 
 ---
 
@@ -138,6 +205,7 @@ cmake --build build -j
 | `MR_AHA_BUILD_PYTHON` | `ON` | `build/lib/libmr_aha_c.so` — for the ctypes binding |
 | `MR_AHA_BUILD_MATLAB` | `OFF` | `build/matlab/*.mexa64` — needs `MATLAB_ROOT` and the Parallel Computing Toolbox |
 | `MR_AHA_BUILD_EXAMPLES` | `OFF` | `build/mr_example_aha` |
+| `MR_AHA_BUILD_CUFINUFFT_MATLAB` | `OFF` | `build/finufft/matlab/cufinufft.mexa64` + `.m` wrappers — finufft's own GPU MATLAB interface, needed by `AhA_cufinufft.m` |
 
 Set `MATLAB_ROOT` (or `-DMatlab_ROOT_DIR=...`) to your `matlabroot` before configuring with
 `MR_AHA_BUILD_MATLAB=ON`.
@@ -157,12 +225,22 @@ for it = 1:n_iter
 end
 ```
 
-Masked operator:
+Masked operator, with the mask derived from the trajectory:
 
 ```matlab
 config = mr_default_config('stack', [320 320 56], 16, 'is_masked', true);
-Om     = calc_toep(phi2, traj, config, mask);   % mask: 1-based linear indices
+[Om, mask] = calc_toep(phi2, traj, config);     % calls calc_mask when no mask is given
 AhAx   = AhA_Toeplitz(x, SEs, Om, config, mask);
+
+mask   = calc_mask(traj, config, 0.05);         % or explicitly, 1-based int64 gpuArray
+```
+
+NUFFT reference (needs `-DMR_AHA_BUILD_CUFINUFFT_MATLAB=ON`, and `build/finufft/matlab` on the
+path, or any other cufinufft MATLAB installation):
+
+```matlab
+plan = mr_nufft_plan(traj, config);             % once: plans + point sorting
+AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan);
 ```
 
 The `.m` wrappers move host arrays to the GPU, cast to complex `single`, derive `n_coils` from
@@ -196,6 +274,18 @@ with mr_aha.AhAPlan(cfg) as plan:
 Shapes are the reverse of the table above, because CuPy is row-major: `x` is `(L, Nz, Ny, Nx)`,
 `SEs` is `(Ncoils, Nz, Ny, Nx)`, `traj` is `(ndim, Nkx, Ntrajs)`, and so on. See
 [`python/README.md`](python/README.md).
+
+Masked operator and NUFFT reference (`pip install cufinufft`):
+
+```python
+cfg  = mr_aha.make_config("3D", (160, 160, 160), L=12, n_coils=12, is_masked=True)
+mask = mr_aha.calc_mask(cfg, traj)
+Om   = mr_aha.calc_toep(cfg, phi2, traj, mask=mask)      # also sets cfg.num_masked
+y    = mr_aha.aha_toeplitz(cfg, x, SEs, Om, mask=mask)
+
+with mr_aha.AhANufftPlan(cfg, traj) as ref:
+    y_ref = ref.apply(x, SEs, phi2)
+```
 
 ---
 
@@ -324,6 +414,15 @@ To debug the MEX gateways: build with `-DCMAKE_BUILD_TYPE=Debug`, point `program
 `matlab/*.cu` or `src/core/*.cu`. The [MATLAB GPU CUDA and MEX Programming
 Manual](https://www.mathworks.com/help/parallel-computing/gpu-cuda-and-mex-programming.html) is the
 reference for the MathWorks side.
+
+## Benchmarks
+
+[`benchmarks/`](benchmarks/) compares the Toeplitz operator (Python) with the NUFFT reference
+(Python and MATLAB) on 2D radial, stack-of-stars and synthetic 3D kooshball problems, including
+20-iteration CG reconstructions, on a local TITAN RTX and an HPC L40S. Findings and how to
+reproduce them are in [`benchmarks/README.md`](benchmarks/README.md).
+
+---
 
 ## License
 

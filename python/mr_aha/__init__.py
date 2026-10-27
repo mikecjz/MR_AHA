@@ -6,8 +6,15 @@ The package exposes two operations, mirroring the MATLAB interface:
     Pre-computes the block-diagonal Toeplitz operator from the non-Cartesian
     Gram blocks and the trajectory.
 
+``calc_mask`` / ``calc_mask_kernel``
+    Derive the masked-operator sample set from the trajectory alone.
+
 ``aha_toeplitz`` / ``AhAPlan``
     Applies :math:`A^H A` to a set of spatial coefficients using that operator.
+
+``aha_nufft`` / ``AhANufftPlan``
+    Reference :math:`A^H A` evaluated directly with type-2 / type-1 cufinufft
+    transforms (no Toeplitz embedding), for validation and benchmarking.
 
 Every array is a CuPy array resident on the GPU. Because the project documents
 arrays in column-major (MATLAB) order while NumPy and CuPy are row-major, all
@@ -22,27 +29,42 @@ Example:
 """
 
 from .api import (
+    DEFAULT_MASK_RADIUS,
+    DEFAULT_MASK_THRESHOLD,
     AhAPlan,
+    MaskMethod,
     MRConfig,
     MRError,
     TrajType,
     Triangulation,
     aha_toeplitz,
+    calc_mask,
+    calc_mask_kernel,
     calc_toep,
     make_config,
+    mask_kernel_shape,
     num_tri,
     phi2_toep_shape,
 )
+from .nufft import AhANufftPlan, aha_nufft
 
 __all__ = [
+    "DEFAULT_MASK_RADIUS",
+    "DEFAULT_MASK_THRESHOLD",
+    "AhANufftPlan",
     "AhAPlan",
+    "MaskMethod",
     "MRConfig",
     "MRError",
     "TrajType",
     "Triangulation",
+    "aha_nufft",
     "aha_toeplitz",
+    "calc_mask",
+    "calc_mask_kernel",
     "calc_toep",
     "make_config",
+    "mask_kernel_shape",
     "num_tri",
     "phi2_toep_shape",
 ]
