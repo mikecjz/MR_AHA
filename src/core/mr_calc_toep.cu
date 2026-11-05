@@ -197,6 +197,16 @@ int mr_calc_toep_impl(const mr_config *cfg, const mr_complex *d_phi2,
         const int64_t fine = (nufft_dim == 3) ? pad_size : (int64_t)Mx * My;
         const size_t per_tr = (size_t)(sigma_d * (double)fine) * sizeof(mr_complex);
         int64_t mb = (per_tr > 0) ? (int64_t)(nufft_budget / per_tr) : ntr;
+        /* cufinufft addresses one batch of fine grids with 32-bit integers
+         * (maxbatchsize * nf1 * nf2 [* nf3]), so a batch must hold fewer than
+         * 2^31 fine-grid points whatever the memory budget. Exceeding it fails
+         * in cufinufftf_execute with FINUFFT_ERR_CUDA_FAILURE; on an 80 GB GPU
+         * this happens for the 640^2 x 56 stack, whose leftover budget allows
+         * ~1400 transforms of 1280^2 points. The 1.25 factor covers cufinufft
+         * rounding each fine dimension up to a 2-3-5-smooth size. */
+        const double fine_pts = 1.25 * sigma_d * (double)fine;
+        const int64_t mb_int32 = (int64_t)(2147483647.0 / fine_pts);
+        if (mb > mb_int32) mb = mb_int32;
         if (mb < 1) mb = 1;
         if (mb > ntr) mb = ntr;
         opts.gpu_maxbatchsize = (int)mb;

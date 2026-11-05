@@ -34,7 +34,14 @@ void mr_set_error(const char *fmt, ...)
     va_end(args);
 }
 
-void mr_clear_error(void) { mr_error_buffer[0] = '\0'; }
+void mr_clear_error(void)
+{
+    mr_error_buffer[0] = '\0';
+    /* Drop a stale, already-handled CUDA error of the caller; see the
+     * declaration. Sticky (context-corrupting) errors are unaffected: they are
+     * reported again by the next runtime call. */
+    (void)cudaGetLastError();
+}
 
 extern "C" const char *mr_last_error(void) { return mr_error_buffer; }
 

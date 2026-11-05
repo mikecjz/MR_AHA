@@ -35,7 +35,17 @@
  */
 void mr_set_error(const char *fmt, ...);
 
-/** @brief Clear this thread's error buffer. Called on entry to public API. */
+/**
+ * @brief Clear this thread's error state. Called on entry to public API.
+ *
+ * Empties the diagnostic buffer and also resets the CUDA runtime's per-thread
+ * "last error". The library checks kernel launches with `cudaGetLastError`,
+ * which returns the most recent error of *any* runtime call on the thread. A
+ * non-sticky error that the caller already handled (for example an
+ * out-of-memory `cudaMalloc` that CuPy's or MATLAB's allocator recovered from
+ * by freeing its cache and retrying) would otherwise be reported as a launch
+ * failure of the next library kernel.
+ */
 void mr_clear_error(void);
 
 /**
