@@ -181,7 +181,9 @@ struct mr_metal_fft;
  * their product, in both directions without normalisation, exactly like the
  * `cufftPlanMany` plans of the CUDA backend. VkFFT generates and compiles its
  * kernels here, which takes 0.2-0.3 s for a new size (cached by macOS for
- * later processes).
+ * later processes). Batches of 16 GiB or more are split into sub-batches
+ * launched at offsets (VkFFT's 64-bit addressing mode does not compile on
+ * Metal); a split batch is limited to 2^32 complex values.
  *
  * @param[in]  ctx   Metal context.
  * @param[in]  rank  Number of transformed axes, 1-3.
