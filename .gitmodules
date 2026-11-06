@@ -1,5 +1,5 @@
 [submodule "finufft"]
-	path = finufft
+	path = third_party/finufft
 	url = https://github.com/mikecjz/finufft.git
 [submodule "third_party/VkFFT"]
 	path = third_party/VkFFT

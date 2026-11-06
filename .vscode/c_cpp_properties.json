@@ -6,7 +6,7 @@
                 "${workspaceFolder}/include",
                 "${workspaceFolder}/src/common",
                 "${workspaceFolder}/src/cuda",
-                "${workspaceFolder}/finufft/include",
+                "${workspaceFolder}/third_party/finufft/include",
                 "${workspaceFolder}/**",
                 "/usr/local/cuda/include",
                 "${env:MATLAB_ROOT}/extern/include",

@@ -195,7 +195,7 @@ stack, with an operator error of a few $10^{-6}$; it keeps 64 % for the kooshbal
 ## Building
 
 Requirements (CUDA backend): CUDA toolkit (11.x or 12.x), CMake ≥ 3.24, a C++17 compiler, and the
-bundled FINUFFT submodule. Unlike the previous version, **stock upstream FINUFFT is enough** — no
+bundled FINUFFT submodule (`third_party/finufft`). Unlike the previous version, **stock upstream FINUFFT is enough** — no
 fork is needed. For Apple silicon see [Apple silicon](#apple-silicon-metal-backend).
 
 ```bash
@@ -425,7 +425,7 @@ MATLAB and Python) keeps whichever device the caller has selected.
 ## Development and debugging in Visual Studio Code
 
 Set `includePath` in [.vscode/c_cpp_properties.json](.vscode/c_cpp_properties.json) to include
-`include/`, `src/common/`, `src/cuda/`, `finufft/include/` and the CUDA and MATLAB headers for IntelliSense.
+`include/`, `src/common/`, `src/cuda/`, `third_party/finufft/include/` and the CUDA and MATLAB headers for IntelliSense.
 
 To debug the MEX gateways: build with `-DCMAKE_BUILD_TYPE=Debug`, point `program` in
 [.vscode/launch.json](.vscode/launch.json) at your MATLAB executable, and set breakpoints in

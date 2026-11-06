@@ -21,7 +21,7 @@
 #  Sources:
 #    src/common/  backend-independent configuration and error handling
 #    src/cuda/    CUDA backend (depends on the CUDA toolkit and on cufinufft
-#                 from the bundled `finufft/` submodule)
+#                 from the bundled `third_party/finufft` submodule)
 #    src/metal/   Metal backend (depends on the Metal framework and on VkFFT /
 #                 metal-cpp from the `third_party/VkFFT` submodule)
 # ============================================================================
@@ -104,12 +104,14 @@ if(MR_AHA_BACKEND STREQUAL "CUDA")
 
 find_package(CUDAToolkit REQUIRED)
 
-# cufinufft, from the bundled submodule. Only the CUDA half is needed.
+# cufinufft, from the bundled `third_party/finufft` submodule. Only the CUDA
+# half is needed. Its build tree stays at `<build>/finufft` (explicit binary
+# directory below), so the MATLAB wrappers remain in `<build>/finufft/matlab`.
 if(NOT TARGET cufinufft)
-    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/finufft/CMakeLists.txt")
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/finufft/CMakeLists.txt")
         message(FATAL_ERROR
             "The finufft submodule is missing. Run:\n"
-            "  git submodule update --init --recursive")
+            "  git submodule update --init third_party/finufft")
     endif()
     set(FINUFFT_USE_CPU        OFF CACHE BOOL "" FORCE)
     set(FINUFFT_USE_CUDA       ON  CACHE BOOL "" FORCE)
@@ -128,7 +130,7 @@ if(NOT TARGET cufinufft)
     endif()
     set(FINUFFT_BUILD_PYTHON   OFF CACHE BOOL "" FORCE)
     set(FINUFFT_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
-    add_subdirectory(finufft EXCLUDE_FROM_ALL)
+    add_subdirectory(third_party/finufft finufft EXCLUDE_FROM_ALL)
 endif()
 
 add_library(mr_aha STATIC

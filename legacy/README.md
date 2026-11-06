@@ -11,7 +11,7 @@ is **not** built by the top-level `CMakeLists.txt` and it is not maintained.
 | `cufinufftf2d1.cu`, `cufinufftfspread2d1.cu`, `finufftf2d1.c` | Thin MEX wrappers used while benchmarking FINUFFT. |
 | `AhA_ps3D_toep.m`, `compile_mex.m`, `build_mex_static.sh` | MATLAB-side driver and the old ad-hoc build scripts. |
 | `cu_finufft_test.m`, `spread_test.m`, `toeplitz_test.m` | MATLAB scratch tests for the above. |
-| `CPM.cmake` | CMake package manager used to fetch a FINUFFT fork; the submodule in `finufft/` replaces it. |
+| `CPM.cmake` | CMake package manager used to fetch a FINUFFT fork; the submodule in `third_party/finufft/` replaces it. |
 
 ## What changed in the rewrite
 
