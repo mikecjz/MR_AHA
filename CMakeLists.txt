@@ -364,6 +364,15 @@ if(MR_AHA_BUILD_MATLAB)
         set_target_properties(${MR_MEX_NAME} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/matlab
             LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/matlab)
+        if(APPLE)
+            # FindMatlab exports the C++ MEX API's entry points from every MEX
+            # file on macOS (cppMexFunction.map + -Wl,-U). The linker of
+            # Xcode 26+ rejects exported symbols that are undefined, and these
+            # gateways use the C API, so export exactly what `mex` exports for
+            # a C MEX file.
+            set_target_properties(${MR_MEX_NAME} PROPERTIES LINK_FLAGS
+                "-Wl,-exported_symbols_list,${Matlab_EXTERN_LIBRARY_DIR}/c_exportsmexfileversion.map")
+        endif()
     endforeach()
 endif()
 
