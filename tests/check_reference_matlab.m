@@ -30,6 +30,9 @@ function check_reference_matlab(ref_dir)
         error('MR_AHA:test', 'No reference files in %s.', ref_dir);
     end
     fprintf('backend: %s\n', mr_backend());
+    if ~strcmp(mr_backend(), 'metal') && exist('cufinufft_plan', 'file') ~= 2
+        fprintf('cufinufft MATLAB interface not on the path: AhA_cufinufft is skipped\n');
+    end
     tol_aha = 1e-5; tol_toep_ext = 5e-5;
     metal = strcmp(mr_backend(), 'metal');
     nfail = 0;
@@ -69,8 +72,9 @@ function check_reference_matlab(ref_dir)
         mn = gather(calc_mask(z.traj, cn)); mt = gather(calc_mask(z.traj, ct));
         rows(end+1, :) = {'mask_neighbour', setdiff_frac(mn, z.mask_neighbour + 1), 0}; %#ok<AGROW>
         rows(end+1, :) = {'mask_threshold', setdiff_frac(mt, z.mask_threshold + 1), 1e-3}; %#ok<AGROW>
-        % NUFFT reference operator.
-        if isfield(z, 'AhAx_nufft')
+        % NUFFT reference operator (CUDA: needs cufinufft's MATLAB interface).
+        has_nufft = metal || exist('cufinufft_plan', 'file') == 2;
+        if isfield(z, 'AhAx_nufft') && has_nufft
             rows(end+1, :) = {'AhAx_nufft', rel(AhA_cufinufft(z.x, z.SEs, z.phi2, ...
                 z.traj, base), z.AhAx_nufft), tol_aha}; %#ok<AGROW>
         end
