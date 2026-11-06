@@ -12,6 +12,8 @@
 #    AhA_Toeplitz_mex  - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
 #    calc_toep_mex     - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
 #    calc_mask_mex     - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
+#    mr_aha_op_mex     - MATLAB MEX gateway of the multi-GPU operator class
+#                        mr_aha_op (optional, MR_AHA_BUILD_MATLAB, CUDA only)
 #    cufinufft (MEX)   - finufft's own MATLAB GPU interface, used by the
 #                        NUFFT reference AhA_cufinufft.m (optional,
 #                        MR_AHA_BUILD_CUFINUFFT_MATLAB, CUDA only)
@@ -137,7 +139,9 @@ add_library(mr_aha STATIC
     ${MR_COMMON_SOURCES}
     src/cuda/mr_backend_cuda.cu
     src/cuda/mr_kernels.cu
+    src/cuda/mr_kernels_bd.cu
     src/cuda/mr_aha.cu
+    src/cuda/mr_mgpu.cu
     src/cuda/mr_calc_toep.cu
     src/cuda/mr_calc_mask.cu
 )
@@ -155,17 +159,24 @@ target_include_directories(mr_aha
 # that mr_complex is cuFloatComplex; see the typedef in the header.
 target_compile_definitions(mr_aha PUBLIC MR_AHA_CUDA_COMPLEX)
 
+# CUDA::cuda_driver: the multi-GPU plan checks whether a device's primary
+# context still exists (cuDevicePrimaryCtxGetState) before releasing it.
 target_link_libraries(mr_aha
-    PUBLIC  CUDA::cudart CUDA::cufft
+    PUBLIC  CUDA::cudart CUDA::cufft CUDA::cuda_driver
     PRIVATE cufinufft
 )
+
+# mr_kernels_bd.cu instantiates the block-diagonal kernels for every rank up
+# to 32 (about 1.5 min of ptxas per architecture); let nvcc compile the
+# architectures of CMAKE_CUDA_ARCHITECTURES in parallel.
+target_compile_options(mr_aha PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--threads=0>)
 
 set_target_properties(mr_aha PROPERTIES
     CUDA_SEPARABLE_COMPILATION OFF
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 
-set(MR_BACKEND_LINK_LIBRARIES CUDA::cudart CUDA::cufft)
+set(MR_BACKEND_LINK_LIBRARIES CUDA::cudart CUDA::cufft CUDA::cuda_driver)
 
 else()
 
@@ -334,7 +345,10 @@ if(MR_AHA_BUILD_MATLAB)
                   "${Matlab_ROOT_DIR}/bin/win64"
             REQUIRED)
 
-        foreach(MR_MEX_NAME AhA_Toeplitz_mex calc_toep_mex calc_mask_mex)
+        # mr_aha_op_mex: plan-based multi-GPU A^H A behind the mr_aha_op
+        # handle class (matlab/mr_aha_op.m); CUDA only.
+        foreach(MR_MEX_NAME AhA_Toeplitz_mex calc_toep_mex calc_mask_mex
+                            mr_aha_op_mex)
             matlab_add_mex(
                 NAME ${MR_MEX_NAME}
                 SRC matlab/${MR_MEX_NAME}.cu

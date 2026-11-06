@@ -286,7 +286,8 @@ typedef struct mr_config {
     void *stream;
 
     /** Fraction of the *free* device memory ::mr_calc_toep may use for its
-     *  working buffers. Default 0.5. Clamped to (0, 0.95]. */
+     *  working buffers, and that ::mr_aha_plan_create may use for its coil
+     *  groups (CUDA). Default 0.5. Clamped to (0, 0.95]. */
     double mem_fraction;
 
     /** Non-zero to print per-stage timing to stdout. Default 0. */
@@ -399,10 +400,25 @@ typedef struct mr_aha_plan_s *mr_aha_plan;
 /**
  * @brief Create a reusable @f$A^H A@f$ plan.
  *
- * The plan owns the cuFFT plan and the padded working buffers, so that an
+ * The plan owns the cuFFT plans and the padded working buffers, so that an
  * iterative reconstruction can call ::mr_aha_plan_execute many times without
- * re-planning or re-allocating. Device memory held by the plan is
- * `Mx*My*Mz*L` ::mr_complex (plus `num_masked*L` when masked).
+ * re-planning or re-allocating.
+ *
+ * CUDA backend: for @f$L \le 30@f$ the block-diagonal stage uses kernels
+ * specialised on @f$L@f$, and coils are processed in groups whose padded
+ * grids are transformed by one batched cuFFT and multiplied by one kernel
+ * pass, which reads `phi2_toep` once per group instead of once per coil. The
+ * plan holds `group * Mx*My*Mz*L` ::mr_complex of padded grids, the cuFFT work
+ * area and, when masked, an `Mx*My*Mz` int32 index map (with the generic
+ * kernels: a `num_masked*L` ::mr_complex buffer instead). The group size is 4
+ * (environment variable `MR_AHA_CUDA_COIL_GROUP` overrides it), at most
+ * ::mr_config::n_coils, and is reduced until these buffers fit in
+ * ::mr_config::mem_fraction of the free device memory at plan creation; a
+ * group of 1 (`Mx*My*Mz*L` values, the minimum) is always attempted. Raise
+ * `mem_fraction` to allow larger groups on a GPU with little memory to spare.
+ * `MR_AHA_CUDA_GENERIC_BD=1` selects the generic block-diagonal kernels (one
+ * coil at a time; also used for @f$L > 30@f$) and `MR_AHA_CUDA_PROFILE=1`
+ * prints the GPU time of each stage at every execution.
  *
  * @param[in]  cfg      Validated configuration. Copied into the plan; the
  *                      caller's struct need not outlive the plan.
@@ -481,6 +497,163 @@ MR_EXPORT int mr_aha_toeplitz(const mr_config  *cfg,
                               const mr_complex *d_phi2_toep,
                               const int64_t    *d_mask,
                               mr_complex       *d_AhAx);
+
+/* ------------------------------------------------------------------------ */
+/* Multi-GPU A^H A (CUDA backend only)                                      */
+/* ------------------------------------------------------------------------ */
+
+/** @brief Most devices a multi-GPU plan can use. */
+#define MR_MGPU_MAX_DEVICES 16
+
+/**
+ * @brief Flag of ::mr_mgpu_plan_create: on the primary device, use the
+ *        caller's `d_SEs`, `d_phi2_toep` and `d_mask` in place instead of
+ *        copying them.
+ *
+ * Saves one copy of the Toeplitz kernel on the primary device (where the
+ * caller's copy already lives). The caller must then keep these arrays alive
+ * and unchanged until ::mr_mgpu_plan_destroy.
+ */
+#define MR_MGPU_SHARE_PRIMARY 1
+
+/** @brief Opaque multi-GPU @f$A^H A@f$ plan. Create with
+ *         ::mr_mgpu_plan_create. */
+typedef struct mr_mgpu_plan_s *mr_mgpu_plan;
+
+/**
+ * @brief How a multi-GPU plan distributes the work (::mr_mgpu_plan_info).
+ *
+ * Device 0 is the primary device: the caller's device, which holds the input
+ * and output arrays and reduces the partial results.
+ */
+typedef struct mr_mgpu_info {
+    /** Number of devices actually used (<= the number requested, see
+     *  ::mr_mgpu_plan_create). */
+    int n_devices;
+    /** CUDA ordinals of the devices used; `devices[0]` is the primary. */
+    int devices[MR_MGPU_MAX_DEVICES];
+    /** First whole coil processed by each device. */
+    int coil_begin[MR_MGPU_MAX_DEVICES];
+    /** Number of whole coils processed by each device. */
+    int coil_count[MR_MGPU_MAX_DEVICES];
+    /** Coils per group of each device's single-GPU plan (see
+     *  ::mr_aha_plan_create). */
+    int group[MR_MGPU_MAX_DEVICES];
+    /** Number of remainder coils split by rank across all devices (0 when the
+     *  remainder split is off). */
+    int n_split_coils;
+    /** Non-zero when direct peer access is enabled between the primary and
+     *  every other device used (otherwise copies are staged through the
+     *  host by the CUDA runtime). */
+    int peer_access;
+    /** Slowest measured primary <-> device copy bandwidth in GB/s, or 0 when
+     *  it was not measured. */
+    double peer_bandwidth_gbs;
+} mr_mgpu_info;
+
+/**
+ * @brief Create a multi-GPU @f$A^H A@f$ plan on several GPUs of one node.
+ *
+ * @f$A^H A x = \sum_c (\ldots)@f$ is a sum over coils, and every coil's
+ * pipeline (pad, FFT, block-diagonal, inverse FFT, crop) is independent. The
+ * plan therefore gives each device a subset of the coils and sums the partial
+ * results on the primary device. The constants are uploaded once, here:
+ * every device receives a copy of `phi2_toep` (and the mask) and the
+ * sensitivity maps of its own coils. Each application then only broadcasts
+ * `x` and gathers the partial outputs. Multi-GPU therefore speeds up the
+ * operator but does not raise the largest problem size: the whole kernel must
+ * fit on every device.
+ *
+ * Device choice. With @f$C@f$ coils and @f$G@f$ usable devices, the time of
+ * one application is set by @f$\lceil C/G \rceil@f$ coils; the plan uses the
+ * smallest @f$G' \le G@f$ with the same @f$\lceil C/G' \rceil@f$ (e.g. 12
+ * coils on 5 GPUs use 4) and leaves the others idle. Problems too small to
+ * benefit (fewer than `MR_AHA_MGPU_MIN_WORK` upsampled values per coil,
+ * default @f$2^{22}@f$; the environment variable overrides it, 0 disables
+ * the check) use the primary device only. When @f$C@f$ is not a multiple of
+ * @f$G'@f$, the remaining coils may additionally be split across all devices
+ * by rank (`MR_AHA_MGPU_SPLIT=auto|on|off`, default `auto`: only when a cost
+ * model fed with the measured peer bandwidth predicts a gain, which in
+ * practice means NVLink). The cost model times the single-GPU operator on
+ * the primary device at plan creation (a few applications).
+ *
+ * All arrays are device pointers on the primary device, which is
+ * ::mr_config::gpu_device_id, or the current device when that is -1 (MATLAB
+ * gpuArray / CuPy callers). The primary device always takes part, even when
+ * it is not listed in @p devices. On return the current device is the same as
+ * on entry.
+ *
+ * @param[in]  cfg         Validated configuration (as for
+ *                         ::mr_aha_plan_create). ::mr_config::stream is the
+ *                         primary device's stream on which
+ *                         ::mr_mgpu_plan_execute is ordered.
+ * @param[in]  devices     CUDA ordinals to use, or NULL for every visible
+ *                         device. Duplicates are ignored.
+ * @param[in]  n_devices   Length of @p devices (0 with NULL), at most
+ *                         ::MR_MGPU_MAX_DEVICES.
+ * @param[in]  d_SEs       Sensitivity maps, see ::mr_aha_plan_execute.
+ * @param[in]  d_phi2_toep Packed Toeplitz kernel, see ::mr_aha_plan_execute.
+ * @param[in]  d_mask      Mask (masked mode) or NULL.
+ * @param[in]  flags       0 or ::MR_MGPU_SHARE_PRIMARY.
+ * @param[out] plan_out    Receives the plan; NULL on failure.
+ * @return ::MR_SUCCESS or a negative ::mr_status. Errors on another device
+ *         name its ordinal in ::mr_last_error.
+ */
+MR_EXPORT int mr_mgpu_plan_create(const mr_config  *cfg,
+                                  const int        *devices,
+                                  int               n_devices,
+                                  const mr_complex *d_SEs,
+                                  const mr_complex *d_phi2_toep,
+                                  const int64_t    *d_mask,
+                                  int               flags,
+                                  mr_mgpu_plan     *plan_out);
+
+/**
+ * @brief Apply @f$A^H A@f$ with a multi-GPU plan.
+ *
+ * Asynchronous with respect to the host, like ::mr_aha_plan_execute: the work
+ * is ordered after everything previously issued on ::mr_config::stream (of the
+ * primary device) and the result is complete once that stream reaches the
+ * point of return.
+ *
+ * @param[in]  plan   Plan from ::mr_mgpu_plan_create.
+ * @param[in]  d_x    Spatial coefficients on the primary device.
+ * @param[out] d_AhAx Output on the primary device, same size as @p d_x; must
+ *                    not alias it.
+ * @return ::MR_SUCCESS or a negative ::mr_status.
+ */
+MR_EXPORT int mr_mgpu_plan_execute(mr_mgpu_plan      plan,
+                                   const mr_complex *d_x,
+                                   mr_complex       *d_AhAx);
+
+/**
+ * @brief Describe how a multi-GPU plan distributes the work.
+ * @param[in]  plan Plan from ::mr_mgpu_plan_create.
+ * @param[out] info Receives the description.
+ * @return ::MR_SUCCESS or ::MR_ERR_INVALID_ARG.
+ */
+MR_EXPORT int mr_mgpu_plan_info(mr_mgpu_plan plan, mr_mgpu_info *info);
+
+/**
+ * @brief Release a multi-GPU plan and everything it allocated on every device.
+ * @param[in] plan Plan from ::mr_mgpu_plan_create, or NULL (no-op).
+ * @return ::MR_SUCCESS or a negative ::mr_status.
+ */
+MR_EXPORT int mr_mgpu_plan_destroy(mr_mgpu_plan plan);
+
+/**
+ * @brief Release a multi-GPU plan whose primary device was reset.
+ *
+ * After `cudaDeviceReset` on the primary device (e.g. MATLAB's
+ * `reset(gpuDevice)`), the plan's streams, events and buffers there no longer
+ * exist and ::mr_mgpu_plan_destroy would use dead handles. This variant frees
+ * everything the plan holds on the *other* devices and skips the primary
+ * device, whose resources the reset has already released.
+ *
+ * @param[in] plan Plan from ::mr_mgpu_plan_create, or NULL (no-op).
+ * @return ::MR_SUCCESS.
+ */
+MR_EXPORT int mr_mgpu_plan_abandon(mr_mgpu_plan plan);
 
 /* ------------------------------------------------------------------------ */
 /* Toeplitz kernel pre-computation                                          */

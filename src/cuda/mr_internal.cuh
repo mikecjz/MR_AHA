@@ -163,4 +163,20 @@ int mr_calc_toep_impl(const mr_config *cfg, const mr_complex *d_phi2,
                       const float *d_traj, int64_t Ntrajs, int64_t Nkx,
                       const int64_t *d_mask, mr_complex *d_phi2_toep);
 
+/**
+ * @brief Coils per group chosen by a single-GPU plan (see
+ *        ::mr_aha_plan_create); used by the multi-GPU plan's report.
+ * @param[in] plan A valid plan.
+ * @return The group size (>= 1).
+ */
+int mr_aha_plan_group(mr_aha_plan plan);
+
+/**
+ * @brief Free only the host structure of a single-GPU plan whose device
+ *        context was destroyed (its cuFFT plans and buffers went with the
+ *        context and must not be touched); used by the multi-GPU plan.
+ * @param[in] plan A plan, or NULL.
+ */
+void mr_aha_plan_forget(mr_aha_plan plan);
+
 #endif /* MR_AHA_MR_INTERNAL_CUH */
