@@ -175,16 +175,20 @@ def check_toep(z, bk: Backend, c: dict, tol: float, nufft=None,
     return rows
 
 
-def check_mask(z, bk: Backend, c: dict, tol: float) -> list:
-    """Stage ``mask``: kernel (relative error) and masks (fraction differing)."""
+def check_mask(z, bk: Backend, c: dict, tol: float, nufft=None) -> list:
+    """Stage ``mask``: kernel (relative error) and masks (fraction differing).
+
+    ``nufft`` selects the engine of the unit-weight kernel, as for ``toep``.
+    """
     rows = []
     traj = bk.put(z["traj"])
     base = make_cfg(c)
-    kern = bk.get(mr_aha.calc_mask_kernel(base, traj))
+    kern = bk.get(mr_aha.calc_mask_kernel(base, traj, nufft=nufft))
     rows.append(("mask_kernel", rel(kern, z["mask_kernel"]), tol))
     got = {
         "neighbour": mr_aha.calc_mask(base, traj, radius=c["mask_radius"]),
-        "threshold": mr_aha.calc_mask(base, traj, threshold=c["mask_threshold"]),
+        "threshold": mr_aha.calc_mask(base, traj, threshold=c["mask_threshold"],
+                                      nufft=nufft),
     }
     for m in MASKS:
         a, b = bk.get(got[m]), z[f"mask_{m}"]
@@ -232,7 +236,9 @@ def main() -> int:
             tol_toep = args.tol_toep or (5e-5 if ext else 1e-5)
             rows += check_toep(z, bk, c, tol_toep, args.nufft, args.tol_aha)
         if "mask" in args.stages and "mask_kernel" in z.files:
-            rows += check_mask(z, bk, c, args.tol_kernel)
+            ext = args.nufft not in (None, "library") or bk.name != "cuda"
+            rows += check_mask(z, bk, c, 5e-5 if ext else args.tol_kernel,
+                               args.nufft)
         bad = [r for r in rows if not r[1] <= r[2]]
         failed += len(bad)
         worst = max(rows, key=lambda r: r[1] / r[2] if r[2] else r[1])

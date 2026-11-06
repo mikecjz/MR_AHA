@@ -358,7 +358,7 @@ def mask_kernel_shape(cfg: MRConfig) -> tuple:
     return (int(cfg.phi2_dim[1]), int(cfg.phi2_dim[0]))
 
 
-def calc_mask_kernel(cfg: MRConfig, traj):
+def calc_mask_kernel(cfg: MRConfig, traj, nufft: Optional[str] = None):
     """Magnitude of the unit-weight Toeplitz kernel of a trajectory.
 
     This is what :func:`calc_toep` would return for ``L = 1`` with every Gram
@@ -370,11 +370,15 @@ def calc_mask_kernel(cfg: MRConfig, traj):
     Args:
         cfg: Configuration from :func:`make_config`. ``L`` and the masking
             fields are ignored.
-        traj: ``float32`` CuPy trajectory shaped ``(ndim, Nkx, Ntrajs)``.
+        traj: ``float32`` trajectory shaped ``(ndim, Nkx, Ntrajs)``.
+        nufft: As for :func:`calc_toep`: ``None`` uses the library's own
+            cufinufft on CUDA and mlx-nufft (two-stage :func:`calc_toep` with
+            ``L = 1`` and unit Gram blocks) on Metal; ``'finufft'`` selects
+            CPU FINUFFT for the two-stage path.
 
     Returns:
-        A ``float32`` CuPy array shaped as :func:`mask_kernel_shape`, in
-        centred order.
+        A ``float32`` array (CuPy on CUDA, NumPy on Metal) shaped as
+        :func:`mask_kernel_shape`, in centred order.
 
     Raises:
         ValueError: If ``traj`` is malformed.
@@ -382,6 +386,10 @@ def calc_mask_kernel(cfg: MRConfig, traj):
     """
     xp = _xp()
     Ntrajs, Nkx = _check_traj(cfg, traj)
+    if nufft is None:
+        nufft = "library" if backend() == "cuda" else "mlx"
+    if nufft != "library":
+        return _unit_kernel(cfg, traj, Ntrajs, nufft, xp)
     out = xp.empty(mask_kernel_shape(cfg), dtype=xp.float32)
     check(
         lib.mr_calc_mask_kernel(
@@ -396,8 +404,28 @@ def calc_mask_kernel(cfg: MRConfig, traj):
     return out
 
 
+def _unit_kernel(cfg: MRConfig, traj, Ntrajs: int, nufft: str, xp):
+    """Unit-weight kernel through the two-stage :func:`calc_toep`.
+
+    Mirrors ``mr_unit_config`` in ``src/cuda/mr_calc_mask.cu``: rank one,
+    unmasked, every Gram block equal to one, and a stack trajectory reduced to
+    its in-plane 2D problem.
+    """
+    stack = cfg.traj_type == TrajType.STACK
+    ns = 2 if (stack or cfg.traj_type == TrajType.TWO_D) else 3
+    ucfg = make_config(
+        TrajType.TWO_D if stack else cfg.traj_type,
+        [cfg.n_dim[i] for i in range(ns)], 1,
+        phi2_dim=[cfg.phi2_dim[i] for i in range(ns)],
+        eps=cfg.eps, gpu_device_id=cfg.gpu_device_id,
+        mem_fraction=cfg.mem_fraction, verbose=bool(cfg.verbose))
+    ones = xp.ones((1, 1, Ntrajs), dtype=xp.complex64)
+    T = calc_toep(ucfg, ones, traj, nufft=nufft)
+    return xp.abs(T).astype(xp.float32).reshape(mask_kernel_shape(cfg))
+
+
 def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
-              radius: Optional[int] = None):
+              radius: Optional[int] = None, nufft: Optional[str] = None):
     """Derive the masked-operator sample set from the trajectory alone.
 
     Two methods are available (``cfg.mask_method``):
@@ -439,10 +467,17 @@ def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
             ``cfg.mask_method``.
         radius: If given, use the ``'neighbour'`` method with this radius
             (>= 0, in grid cells) regardless of ``cfg.mask_method``.
+        nufft: NUFFT of the ``'threshold'`` method's kernel, see
+            :func:`calc_mask_kernel`. On Metal (or with an external engine)
+            the kernel is computed in Python and the library's
+            ``mr_calc_mask_from_kernel`` finishes the mask; the
+            ``'neighbour'`` method needs no NUFFT and always runs in the
+            library.
 
     Returns:
-        An ``int64`` CuPy array of sorted, 0-based linear indices into the
-        centred upsampled grid ``[Mx, My, Mz]`` (column-major).
+        An ``int64`` array (CuPy on CUDA, NumPy on Metal) of sorted, 0-based
+        linear indices into the centred upsampled grid ``[Mx, My, Mz]``
+        (column-major).
 
     Raises:
         ValueError: If ``traj`` is malformed or both ``threshold`` and
@@ -463,6 +498,22 @@ def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
 
     buf = xp.empty(int(lib.mr_pad_size(ctypes.byref(c))), dtype=xp.int64)
     n = ctypes.c_int64(0)
+    if nufft is None:
+        nufft = "library" if backend() == "cuda" else "mlx"
+    if c.mask_method == MaskMethod.THRESHOLD and nufft != "library":
+        kernel = calc_mask_kernel(c, traj, nufft=nufft)
+        check(
+            lib.mr_calc_mask_from_kernel(
+                ctypes.byref(c),
+                _ptr(kernel, "kernel", "float32"),
+                _ptr(buf, "mask", "int64"),
+                ctypes.byref(n),
+            ),
+            "mr_calc_mask_from_kernel",
+        )
+        mask = buf[: n.value].copy()
+        del buf, kernel
+        return mask
     check(
         lib.mr_calc_mask(
             ctypes.byref(c),

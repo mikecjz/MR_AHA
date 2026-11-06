@@ -14,6 +14,9 @@
  *     the CUDA ::mr_calc_toep (`src/cuda/mr_calc_toep.cu`), with the same
  *     kernels ported to `mr_kernels.metal`.
  *
+ * ::mr_calc_toep itself (which would need the NUFFT inside the library) returns
+ * ::MR_ERR_UNSUPPORTED with directions.
+ *
  * See `src/cuda/mr_calc_toep.cu` for why a sign -1 type-1 followed by a
  * normalised inverse FFT is exactly the multiplier ::mr_aha_plan_execute
  * needs between its unnormalised FFTs.
@@ -148,4 +151,21 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
                "(Metal)\n", (long long)t0, (long long)(t0 + n_comp - 1),
                (long long)ntri);
     return rc;
+}
+
+extern "C" int mr_calc_toep(const mr_config *cfg, const mr_complex *d_phi2,
+                            const float *d_traj, int64_t Ntrajs, int64_t Nkx,
+                            const int64_t *d_mask, mr_complex *d_phi2_toep)
+{
+    (void)d_phi2; (void)d_traj; (void)Ntrajs; (void)Nkx; (void)d_mask;
+    (void)d_phi2_toep;
+    mr_clear_error();
+    const int status = mr_config_validate(cfg);
+    if (status != MR_SUCCESS) return status;
+    /* There is no C/C++ NUFFT for Apple GPUs to call here: the type-1 NUFFT
+     * runs in Python (mlx-nufft) and mr_calc_toep_from_psf does the rest. */
+    MR_FAIL(MR_ERR_UNSUPPORTED, "mr_calc_toep is not available on the Metal "
+            "backend: compute the type-1 NUFFT outside the library (Python's "
+            "mr_aha.calc_toep does it with mlx-nufft) and finish with "
+            "mr_calc_toep_from_psf");
 }

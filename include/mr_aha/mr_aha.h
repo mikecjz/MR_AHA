@@ -710,6 +710,33 @@ MR_EXPORT int mr_calc_mask(const mr_config *cfg,
                            int64_t         *d_mask,
                            int64_t         *num_masked_out);
 
+/**
+ * @brief Threshold mask from an externally computed unit-weight kernel.
+ *
+ * The second half of ::mr_calc_mask with ::MR_MASK_THRESHOLD: max-filter
+ * @p d_kernel over the immediate neighbourhood, keep the locations above
+ * ::mr_config::mask_threshold, emit their sorted indices and, for
+ * ::MR_TRAJ_STACK, replicate them over the kz planes. The kernel is what
+ * ::mr_calc_mask_kernel returns; on the Metal backend that needs a NUFFT, so
+ * Python's `mr_aha.calc_mask_kernel` computes it with mlx-nufft and
+ * `mr_aha.calc_mask` then calls this function. The neighbourhood method
+ * needs no NUFFT and is fully available through ::mr_calc_mask on both
+ * backends. Both backends implement this function.
+ *
+ * @param[in]  cfg            Validated configuration (masking fields ignored;
+ *                            ::mr_config::mask_method is not consulted).
+ * @param[in]  d_kernel       ::mr_mask_kernel_size floats, centred order, as
+ *                            from ::mr_calc_mask_kernel. Not modified.
+ * @param[out] d_mask         Output indices with room for ::mr_pad_size
+ *                            entries, or NULL to only count.
+ * @param[out] num_masked_out Host pointer receiving the number of locations.
+ * @return ::MR_SUCCESS or a negative ::mr_status.
+ */
+MR_EXPORT int mr_calc_mask_from_kernel(const mr_config *cfg,
+                                       const float     *d_kernel,
+                                       int64_t         *d_mask,
+                                       int64_t         *num_masked_out);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

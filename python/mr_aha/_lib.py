@@ -307,6 +307,11 @@ if hasattr(lib, "mr_calc_toep_from_psf"):
     lib.mr_calc_toep_from_psf.argtypes = [
         _cfg_p, _c_ptr, ctypes.c_int64, ctypes.c_int64, _c_ptr, _c_ptr]
 
+if hasattr(lib, "mr_calc_mask_from_kernel"):
+    lib.mr_calc_mask_from_kernel.restype = ctypes.c_int
+    lib.mr_calc_mask_from_kernel.argtypes = [
+        _cfg_p, _c_ptr, _c_ptr, ctypes.POINTER(ctypes.c_int64)]
+
 lib.mr_calc_mask_kernel.restype = ctypes.c_int
 lib.mr_calc_mask_kernel.argtypes = [
     _cfg_p, _c_ptr, ctypes.c_int64, ctypes.c_int64, _c_ptr]

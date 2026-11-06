@@ -393,3 +393,70 @@ kernel void mr_k_gather_masked_scale(device float2       *dst        [[buffer(0)
     dst[(ulong)gid.x + (ulong)num_masked * ((ulong)t0 + gid.y)] =
         src[(ulong)gid.y * vol + src_idx] * scale;
 }
+
+/* ------------------------------------------------------------------------ */
+/* calc_mask kernels                                                        */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * @brief Parameters of ::mr_k_mark_samples.
+ */
+struct mr_mark_params {
+    long  n_samples; /**< `Ntrajs * Nkx`.                               */
+    int   ndim;      /**< Trajectory coordinates (2 or 3).              */
+    int   m[3];      /**< Grid extents (unused axes are 1).             */
+    float sc[3];     /**< Per-axis scale `M_a / (2*pi)`.                */
+};
+
+/**
+ * @brief Mark the upsampled grid point nearest to every sample.
+ *
+ * Sample @f$\mathbf{k}@f$ lands on `rint(k_a * M_a / (2*pi)) + M_a/2` along
+ * axis `a`, wrapped periodically; that location is set to 1 (concurrent
+ * writes of the same value are benign). Same arithmetic as the CUDA
+ * `mr_k_mark_samples` (`rint` rounds half to even, like `rintf`), so the
+ * neighbourhood mask is bit-identical across backends.
+ */
+kernel void mr_k_mark_samples(device float             *marks [[buffer(0)]],
+                              device const float       *traj  [[buffer(1)]],
+                              constant mr_mark_params  &p     [[buffer(2)]],
+                              uint tid [[thread_position_in_grid]])
+{
+    if ((long)tid >= p.n_samples) return;
+    long idx = 0, stride = 1;
+    for (int a = 0; a < p.ndim; ++a) {
+        long i = (long)rint(traj[(ulong)tid + (ulong)p.n_samples * a] * p.sc[a]) +
+                 p.m[a] / 2;
+        i %= p.m[a];
+        if (i < 0) i += p.m[a];
+        idx += i * stride;
+        stride *= p.m[a];
+    }
+    marks[idx] = 1.0f;
+}
+
+/**
+ * @brief One axis of a separable, periodic max-filter (grey-scale dilation).
+ *
+ * Port of `mr_k_dilate_axis`: each location receives the maximum of the
+ * input up to @p r cells away along one axis, wrapping periodically.
+ */
+kernel void mr_k_dilate_axis(device float       *out    [[buffer(0)]],
+                             device const float *in     [[buffer(1)]],
+                             constant long      &n      [[buffer(2)]],
+                             constant int       &m      [[buffer(3)]],
+                             constant long      &stride [[buffer(4)]],
+                             constant int       &r      [[buffer(5)]],
+                             uint tid [[thread_position_in_grid]])
+{
+    if ((long)tid >= n) return;
+    const int  i    = (int)(((long)tid / stride) % m);
+    const long base = (long)tid - (long)i * stride;
+    float v = in[tid];
+    for (int d = -r; d <= r; ++d) {
+        int j = (i + d) % m;
+        if (j < 0) j += m;
+        v = fmax(v, in[base + (long)j * stride]);
+    }
+    out[tid] = v;
+}

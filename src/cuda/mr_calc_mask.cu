@@ -335,15 +335,21 @@ static int mr_dilate_box(float **d_a, float **d_b, const int m[3], int r,
  * ::MR_MASK_NEIGHBOUR.
  *
  * @param[in]  cfg    Validated caller configuration.
- * @param[in]  d_traj Trajectory `[Ntrajs, Nkx, ndim]`.
+ * @param[in]  d_traj Trajectory `[Ntrajs, Nkx, ndim]` (unused when
+ *                    @p d_kernel_in is given).
  * @param[in]  Ntrajs Number of trajectories.
  * @param[in]  Nkx    Samples per trajectory.
+ * @param[in]  d_kernel_in Optional precomputed unit-weight kernel
+ *                    (::mr_calc_mask_from_kernel); when non-NULL the
+ *                    threshold method is used with it instead of evaluating
+ *                    the kernel here.
  * @param[out] d_sel  Receives the selection grid.
  * @param[out] thr    Receives the selection threshold.
  * @return ::MR_SUCCESS or a negative ::mr_status.
  */
 static int mr_mask_selection(const mr_config *cfg, const float *d_traj,
-                             int64_t Ntrajs, int64_t Nkx, float **d_sel,
+                             int64_t Ntrajs, int64_t Nkx,
+                             const float *d_kernel_in, float **d_sel,
                              float *thr)
 {
     const int64_t n     = mr_mask_kernel_size(cfg);
@@ -360,7 +366,15 @@ static int mr_mask_selection(const mr_config *cfg, const float *d_traj,
 
     int rc = MR_SUCCESS;
     int radius;
-    if (cfg->mask_method == MR_MASK_THRESHOLD) {
+    if (d_kernel_in != NULL) {
+        if (cudaMemcpyAsync(d_a, d_kernel_in, (size_t)n * sizeof(float),
+                            cudaMemcpyDeviceToDevice, s) != cudaSuccess) {
+            mr_set_error("copying the unit-weight kernel failed");
+            rc = MR_ERR_CUDA;
+        }
+        radius = 1;
+        *thr   = (float)cfg->mask_threshold;
+    } else if (cfg->mask_method == MR_MASK_THRESHOLD) {
         rc     = mr_calc_mask_kernel_impl(cfg, d_traj, Ntrajs, Nkx, d_a);
         radius = 1;
         /* Absolute threshold: the unit-weight kernel is measured in samples
@@ -419,18 +433,22 @@ static int mr_mask_selection(const mr_config *cfg, const float *d_traj,
  * @param[in]  d_traj         Trajectory `[Ntrajs, Nkx, ndim]`.
  * @param[in]  Ntrajs         Number of trajectories.
  * @param[in]  Nkx            Samples per trajectory.
+ * @param[in]  d_kernel_in    Optional precomputed unit-weight kernel, see
+ *                            ::mr_mask_selection.
  * @param[out] d_mask         Output indices, capacity ::mr_pad_size, or NULL.
  * @param[out] num_masked_out Number of retained locations.
  * @return ::MR_SUCCESS or a negative ::mr_status.
  */
 static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
-                             int64_t Ntrajs, int64_t Nkx, int64_t *d_mask,
+                             int64_t Ntrajs, int64_t Nkx,
+                             const float *d_kernel_in, int64_t *d_mask,
                              int64_t *num_masked_out)
 {
     const int64_t n = mr_mask_kernel_size(cfg);
     float *d_kernel = NULL;
     float  thr      = 0.0f;
-    int rc = mr_mask_selection(cfg, d_traj, Ntrajs, Nkx, &d_kernel, &thr);
+    int rc = mr_mask_selection(cfg, d_traj, Ntrajs, Nkx, d_kernel_in, &d_kernel,
+                               &thr);
     if (rc != MR_SUCCESS) return rc;
 
     cudaStream_t s = (cudaStream_t)cfg->stream;
@@ -482,7 +500,7 @@ static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
     }
 
     if (cfg->verbose) {
-        if (cfg->mask_method == MR_MASK_THRESHOLD)
+        if (cfg->mask_method == MR_MASK_THRESHOLD || d_kernel_in != NULL)
             printf("[mr_aha] calc_mask: kept %lld of %lld upsampled locations "
                    "(%.1f%%) at threshold %g\n",
                    (long long)n_kept, (long long)mr_pad_size(cfg),
@@ -555,7 +573,32 @@ extern "C" int mr_calc_mask(const mr_config *cfg, const float *d_traj,
     int prev = -1;
     rc = mr_toep_push_device(cfg, &prev);
     if (rc == MR_SUCCESS)
-        rc = mr_calc_mask_impl(cfg, d_traj, Ntrajs, Nkx, d_mask, num_masked_out);
+        rc = mr_calc_mask_impl(cfg, d_traj, Ntrajs, Nkx, NULL, d_mask,
+                               num_masked_out);
+    if (prev >= 0) cudaSetDevice(prev);
+    return rc;
+}
+
+extern "C" int mr_calc_mask_from_kernel(const mr_config *cfg,
+                                        const float *d_kernel, int64_t *d_mask,
+                                        int64_t *num_masked_out)
+{
+    mr_clear_error();
+    MR_REQUIRE(num_masked_out != NULL,
+               "mr_calc_mask_from_kernel: num_masked_out is NULL");
+    *num_masked_out = 0;
+    MR_REQUIRE(cfg != NULL, "mr_calc_mask_from_kernel: cfg is NULL");
+    MR_REQUIRE(d_kernel != NULL, "mr_calc_mask_from_kernel: d_kernel is NULL");
+    mr_config c = *cfg;
+    c.is_masked  = 0;
+    c.num_masked = 0;
+    int rc = mr_config_validate(&c);
+    if (rc != MR_SUCCESS) return rc;
+
+    int prev = -1;
+    rc = mr_toep_push_device(cfg, &prev);
+    if (rc == MR_SUCCESS)
+        rc = mr_calc_mask_impl(cfg, NULL, 0, 0, d_kernel, d_mask, num_masked_out);
     if (prev >= 0) cudaSetDevice(prev);
     return rc;
 }
