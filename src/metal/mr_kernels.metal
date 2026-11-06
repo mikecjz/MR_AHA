@@ -136,17 +136,15 @@ static inline ulong mr_mask_to_natural(long kidx, constant mr_dims &d)
 /**
  * @brief Zero-pad `S_c x` onto the upsampled grid in natural FFT order.
  *
- * One thread per upsampled voxel; writes all `L` ranks and, when
- * @p zero_fill is set, zero-fills voxels outside the image, so the padded
- * buffer needs no separate clear. Without zero fill the outside is left
- * untouched, for an FFT that is told it is zero. Port of `mr_k_pad_mul_se`.
+ * One thread per upsampled voxel; writes all `L` ranks and zero-fills voxels
+ * outside the image, so the padded buffer needs no separate clear. Port of
+ * `mr_k_pad_mul_se`.
  */
-kernel void mr_k_pad_mul_se(device float2       *pad       [[buffer(0)]],
-                            device const float2 *x         [[buffer(1)]],
-                            device const float2 *SEs       [[buffer(2)]],
-                            constant mr_dims    &d         [[buffer(3)]],
-                            constant int        &coil      [[buffer(4)]],
-                            constant int        &zero_fill [[buffer(5)]],
+kernel void mr_k_pad_mul_se(device float2       *pad  [[buffer(0)]],
+                            device const float2 *x    [[buffer(1)]],
+                            device const float2 *SEs  [[buffer(2)]],
+                            constant mr_dims    &d    [[buffer(3)]],
+                            constant int        &coil [[buffer(4)]],
                             uint tid [[thread_position_in_grid]])
 {
     if ((long)tid >= d.pad_size) return;
@@ -164,10 +162,7 @@ kernel void mr_k_pad_mul_se(device float2       *pad       [[buffer(0)]],
 
     const ulong padn = (ulong)d.pad_size;
     if (!inside) {
-        /* Skipped when the forward FFT is told the block is zero (VkFFT zero
-         * padding never reads it). */
-        if (zero_fill)
-            for (int l = 0; l < d.L; ++l) pad[(ulong)tid + padn * l] = float2(0.0f);
+        for (int l = 0; l < d.L; ++l) pad[(ulong)tid + padn * l] = float2(0.0f);
         return;
     }
 

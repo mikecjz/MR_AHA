@@ -51,8 +51,7 @@ struct mr_metal_fft {
 };
 
 int mr_metal_fft_create(const mr_metal_ctx *ctx, int rank, const int dims[3],
-                        int batch, mr_metal_fft **out,
-                        const mr_metal_zeropad *zeropad)
+                        int batch, mr_metal_fft **out)
 {
     *out = nullptr;
     MR_REQUIRE(rank >= 1 && rank <= 3, "mr_metal_fft_create: rank %d", rank);
@@ -80,18 +79,6 @@ int mr_metal_fft_create(const mr_metal_ctx *ctx, int rank, const int dims[3],
     cfg.bufferSize = &f->bytes;     /* VkFFT keeps this pointer. */
     cfg.normalize = 0;              /* unnormalised inverse, like cuFFT */
     cfg.coalescedMemory = 32;
-    if (zeropad) {
-        /* Spatial zero padding: skipped on the forward input and the inverse
-         * output. VkFFT's block is [left, right). */
-        for (int d = 0; d < rank; ++d) {
-            if (zeropad->left[d] < zeropad->right[d]) {
-                cfg.performZeropadding[d] = 1;
-                cfg.fft_zeropad_left[d] = (pfUINT)zeropad->left[d];
-                cfg.fft_zeropad_right[d] = (pfUINT)zeropad->right[d];
-            }
-        }
-        cfg.frequencyZeroPadding = 0;
-    }
 
     const VkFFTResult r = initializeVkFFT(&f->app, cfg);
     if (r != VKFFT_SUCCESS) {

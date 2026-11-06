@@ -69,9 +69,6 @@ struct mr_aha_plan_s {
     MTL::ComputePipelineState *k_bd;      /**< Dense or masked block-diagonal. */
     MTL::ComputePipelineState *k_scatter; /**< mr_k_scatter_masked (masked).  */
     MTL::ComputePipelineState *k_zero;    /**< mr_k_zero (masked).            */
-    bool                zeropad;    /**< FFTs skip the padding (VkFFT zero
-                                             padding); the pad kernel then
-                                             does not zero-fill it.            */
     NS::UInteger        bd_threads; /**< Threads per threadgroup, block-diag.  */
     NS::UInteger        bd_tgmem;   /**< Threadgroup bytes, block-diag.        */
 };
@@ -219,26 +216,12 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
 
     /* Batched FFTs over the upsampled grid: one volume per rank and coil of a
      * group, plus one for a smaller last group. */
-    /* VkFFT zero padding: along each upsampled axis the image occupies
-     * [0, N - c) and [M - c, M) of the natural-order grid, so [N - c, M - c)
-     * is zero before the forward FFT and unused after the inverse one.
-     * MR_AHA_METAL_NO_ZEROPAD=1 disables it (zero-filled grids, full FFTs). */
-    mr_metal_zeropad zp = {{0, 0, 0}, {0, 0, 0}};
-    const char *nz = std::getenv("MR_AHA_METAL_NO_ZEROPAD");
-    p->zeropad = !(nz && nz[0] && nz[0] != '0');
-    for (int a = 0; a < cfg->n_spatial && p->zeropad; ++a) {
-        if (p->dims.m[a] > p->dims.n[a]) {
-            zp.left[a] = p->dims.n[a] - p->dims.c_n[a];
-            zp.right[a] = p->dims.m[a] - p->dims.c_n[a];
-        }
-    }
-    const mr_metal_zeropad *zpp = p->zeropad ? &zp : nullptr;
     rc = mr_metal_fft_create(ctx, cfg->n_spatial, cfg->phi2_dim, cfg->L * group,
-                             &p->fft, zpp);
+                             &p->fft);
     const int rem = cfg->n_coils % group;
     if (rc == MR_SUCCESS && rem)
         rc = mr_metal_fft_create(ctx, cfg->n_spatial, cfg->phi2_dim, cfg->L * rem,
-                                 &p->fft_rem, zpp);
+                                 &p->fft_rem);
     if (rc != MR_SUCCESS) {
         mr_plan_free(p);
         return rc;
@@ -318,7 +301,6 @@ static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
     mr_metal_fft *fft = (nc == p->group) ? p->fft : p->fft_rem;
 
     /* 1. Zero-pad and apply each coil's sensitivity (also clears the grid). */
-    const int zero_fill = p->zeropad ? 0 : 1;
     for (int s = 0; s < nc; ++s) {
         const int coil = coil0 + s;
         enc->setComputePipelineState(p->k_pad);
@@ -327,7 +309,6 @@ static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
         mr_metal_bind(enc, se, 2);
         enc->setBytes(&d, sizeof(d), 3);
         enc->setBytes(&coil, sizeof(coil), 4);
-        enc->setBytes(&zero_fill, sizeof(zero_fill), 5);
         mr_metal_dispatch_1d(enc, p->k_pad, (uint64_t)d.pad_size);
     }
     int rc = mr_stage_end(prof, 0, cb, enc);
