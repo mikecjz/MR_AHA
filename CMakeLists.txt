@@ -188,11 +188,79 @@ find_library(MR_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
 set(MR_BACKEND_LINK_LIBRARIES
     ${MR_METAL_FRAMEWORK} ${MR_FOUNDATION_FRAMEWORK} ${MR_QUARTZCORE_FRAMEWORK})
 
+# Metal kernels: always embedded as source (compiled by the system's Metal
+# compiler on first use); additionally precompiled to a .metallib and embedded
+# when the Metal toolchain is installed (`xcrun metal`, part of Xcode's Metal
+# Toolchain component), which moves shader errors to build time and skips the
+# first-use compile. See src/metal/mr_metal_runtime.cpp.
+option(MR_AHA_METAL_PRECOMPILE
+       "Precompile the Metal kernels when the Metal toolchain is available" ON)
+set(MR_METAL_KERNELS "${CMAKE_CURRENT_SOURCE_DIR}/src/metal/mr_kernels.metal")
+set(MR_METAL_GEN "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(MR_EMBED "${CMAKE_CURRENT_SOURCE_DIR}/cmake/mr_embed.cmake")
+file(MAKE_DIRECTORY "${MR_METAL_GEN}")
+
+add_custom_command(
+    OUTPUT  "${MR_METAL_GEN}/mr_metal_source.cpp"
+    COMMAND ${CMAKE_COMMAND} -DINPUT=${MR_METAL_KERNELS}
+            -DOUTPUT=${MR_METAL_GEN}/mr_metal_source.cpp
+            -DSYMBOL=mr_metal_source -P ${MR_EMBED}
+    DEPENDS "${MR_METAL_KERNELS}" "${MR_EMBED}"
+    COMMENT "Embedding the Metal kernel source")
+
+set(MR_METAL_TOOLCHAIN OFF)
+if(MR_AHA_METAL_PRECOMPILE)
+    execute_process(COMMAND xcrun -sdk macosx metal --version
+                    RESULT_VARIABLE MR_METAL_RC OUTPUT_QUIET ERROR_QUIET)
+    if(MR_METAL_RC EQUAL 0)
+        set(MR_METAL_TOOLCHAIN ON)
+    else()
+        message(STATUS "Metal toolchain not found (xcrun metal); the kernels "
+                       "will be compiled from source at run time")
+    endif()
+endif()
+
+if(MR_METAL_TOOLCHAIN)
+    # Metal 3.0 (macOS 13+) with fast math off, matching the run-time path.
+    add_custom_command(
+        OUTPUT  "${MR_METAL_GEN}/mr_kernels.air"
+        COMMAND xcrun -sdk macosx metal -std=metal3.0 -fno-fast-math
+                -mmacosx-version-min=13.0 -c ${MR_METAL_KERNELS}
+                -o ${MR_METAL_GEN}/mr_kernels.air
+        DEPENDS "${MR_METAL_KERNELS}"
+        COMMENT "Compiling the Metal kernels")
+    add_custom_command(
+        OUTPUT  "${MR_METAL_GEN}/mr_kernels.metallib"
+        COMMAND xcrun -sdk macosx metallib ${MR_METAL_GEN}/mr_kernels.air
+                -o ${MR_METAL_GEN}/mr_kernels.metallib
+        DEPENDS "${MR_METAL_GEN}/mr_kernels.air"
+        COMMENT "Linking the Metal kernel library")
+    set(MR_METALLIB_INPUT "${MR_METAL_GEN}/mr_kernels.metallib")
+    set(MR_METALLIB_DEPENDS "${MR_METAL_GEN}/mr_kernels.metallib")
+    message(STATUS "Metal kernels: precompiled metallib (+ source fallback)")
+else()
+    set(MR_METALLIB_INPUT "")
+    set(MR_METALLIB_DEPENDS "")
+    message(STATUS "Metal kernels: compiled from embedded source at run time")
+endif()
+add_custom_command(
+    OUTPUT  "${MR_METAL_GEN}/mr_metal_metallib.cpp"
+    COMMAND ${CMAKE_COMMAND} -DINPUT=${MR_METALLIB_INPUT}
+            -DOUTPUT=${MR_METAL_GEN}/mr_metal_metallib.cpp
+            -DSYMBOL=mr_metal_metallib -P ${MR_EMBED}
+    DEPENDS ${MR_METALLIB_DEPENDS} "${MR_EMBED}"
+    COMMENT "Embedding the Metal kernel library")
+
 add_library(mr_aha STATIC
     ${MR_COMMON_SOURCES}
     src/metal/mr_metal_cpp_impl.cpp
     src/metal/mr_backend_metal.cpp
+    src/metal/mr_metal_runtime.cpp
+    src/metal/mr_metal_fft.cpp
+    src/metal/mr_aha_metal.cpp
     src/metal/mr_metal_stubs.cpp
+    "${MR_METAL_GEN}/mr_metal_source.cpp"
+    "${MR_METAL_GEN}/mr_metal_metallib.cpp"
 )
 
 target_include_directories(mr_aha

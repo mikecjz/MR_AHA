@@ -41,6 +41,7 @@ from ._lib import (
     MRError,
     TrajType,
     Triangulation,
+    backend,
     check,
     lib,
 )
@@ -85,37 +86,60 @@ def _cupy():
     return cupy
 
 
+def _xp():
+    """Array module matching the loaded backend.
+
+    Returns:
+        :mod:`cupy` for the CUDA backend (arrays live in GPU memory) or
+        :mod:`numpy` for the Metal backend (Apple silicon: arrays are ordinary
+        host arrays in unified memory, which the GPU reads in place).
+    """
+    if backend() == "cuda":
+        return _cupy()
+    import numpy  # noqa: PLC0415
+    return numpy
+
+
 def _ptr(array, name: str, dtype, allow_none: bool = False):
-    """Validate a CuPy array and return its raw device pointer.
+    """Validate an array and return the raw pointer the C API expects.
+
+    For the CUDA backend the array must be a CuPy array and the pointer is a
+    device pointer; for the Metal backend it must be a NumPy array and the
+    pointer is its host address (unified memory).
 
     Args:
-        array: The CuPy array, or ``None`` when ``allow_none``.
+        array: The array, or ``None`` when ``allow_none``.
         name: Argument name, used in error messages.
         dtype: Required dtype, as a NumPy dtype specifier.
         allow_none: Whether ``None`` is acceptable.
 
     Returns:
-        The device pointer as an ``int``, or ``None``.
+        The pointer as an ``int``, or ``None``.
 
     Raises:
-        TypeError: If the array is not a CuPy array of the required dtype.
+        TypeError: If the array is not of the backend's array type or does not
+            have the required dtype.
         ValueError: If the array is not C-contiguous.
     """
     if array is None:
         if allow_none:
             return None
         raise TypeError(f"{name} must not be None")
-    cupy = _cupy()
-    if not isinstance(array, cupy.ndarray):
-        raise TypeError(f"{name} must be a cupy.ndarray, got {type(array).__name__}")
-    if array.dtype != cupy.dtype(dtype):
-        raise TypeError(f"{name} must have dtype {cupy.dtype(dtype)}, got {array.dtype}")
+    xp = _xp()
+    if not isinstance(array, xp.ndarray):
+        raise TypeError(
+            f"{name} must be a {xp.__name__}.ndarray for the {backend()} "
+            f"backend, got {type(array).__name__}"
+        )
+    if array.dtype != xp.dtype(dtype):
+        raise TypeError(f"{name} must have dtype {xp.dtype(dtype)}, got {array.dtype}")
     if not array.flags.c_contiguous:
         raise ValueError(
-            f"{name} must be C-contiguous; call cupy.ascontiguousarray first"
+            f"{name} must be C-contiguous; call {xp.__name__}.ascontiguousarray first"
         )
+    if xp.__name__ == "numpy":
+        return array.ctypes.data
     return array.data.ptr
-
 
 def make_config(
     traj_type,
@@ -356,9 +380,9 @@ def calc_mask_kernel(cfg: MRConfig, traj):
         ValueError: If ``traj`` is malformed.
         MRError: If the library reports a failure.
     """
-    cupy = _cupy()
+    xp = _xp()
     Ntrajs, Nkx = _check_traj(cfg, traj)
-    out = cupy.empty(mask_kernel_shape(cfg), dtype=cupy.float32)
+    out = xp.empty(mask_kernel_shape(cfg), dtype=xp.float32)
     check(
         lib.mr_calc_mask_kernel(
             ctypes.byref(cfg),
@@ -425,7 +449,7 @@ def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
             ``radius`` are given.
         MRError: If the library reports a failure.
     """
-    cupy = _cupy()
+    xp = _xp()
     Ntrajs, Nkx = _check_traj(cfg, traj)
     if threshold is not None and radius is not None:
         raise ValueError("pass at most one of threshold and radius")
@@ -437,7 +461,7 @@ def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
         c.mask_method = MaskMethod.NEIGHBOUR
         c.mask_radius = int(radius)
 
-    buf = cupy.empty(int(lib.mr_pad_size(ctypes.byref(c))), dtype=cupy.int64)
+    buf = xp.empty(int(lib.mr_pad_size(ctypes.byref(c))), dtype=xp.int64)
     n = ctypes.c_int64(0)
     check(
         lib.mr_calc_mask(
@@ -485,7 +509,7 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None):
         ValueError: If an array has the wrong size or a mask is missing.
         MRError: If the library reports a failure.
     """
-    cupy = _cupy()
+    xp = _xp()
     Ntrajs, Nkx = _check_traj(cfg, traj)
 
     nkz = cfg.phi2_dim[2] if cfg.traj_type == TrajType.STACK else 1
@@ -506,7 +530,7 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None):
     shape = phi2_toep_shape(cfg)
     expected = int(lib.mr_phi2_toep_size(ctypes.byref(cfg)))
     if out is None:
-        out = cupy.empty(shape, dtype=cupy.complex64)
+        out = xp.empty(shape, dtype=xp.complex64)
     else:
         _check_size(out, expected, "out")
 
@@ -576,7 +600,7 @@ class AhAPlan:
         """
         if not self._handle:
             raise RuntimeError("this AhAPlan has already been closed")
-        cupy = _cupy()
+        xp = _xp()
         cfg = self._cfg
 
         _check_size(x, int(lib.mr_x_size(ctypes.byref(cfg))), "x")
@@ -588,7 +612,7 @@ class AhAPlan:
             raise ValueError("cfg.is_masked is set, so a mask is required")
 
         if out is None:
-            out = cupy.empty(x.shape, dtype=cupy.complex64)
+            out = xp.empty(x.shape, dtype=xp.complex64)
         else:
             _check_size(out, x.size, "out")
 

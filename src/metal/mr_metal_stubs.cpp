@@ -4,9 +4,8 @@
  *
  * Each function validates its arguments like the CUDA backend, confirms that a
  * Metal device is available, and returns ::MR_ERR_UNSUPPORTED. They are
- * replaced one by one as the Metal port progresses (see `docs/mlx_plan.md`):
- * the operator (::mr_aha_plan_create and friends) first, then ::mr_calc_toep
- * and the mask functions.
+ * replaced one by one as the Metal port progresses: the operator is in
+ * `mr_aha_metal.cpp`; ::mr_calc_toep and the mask functions remain here.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */
@@ -31,46 +30,6 @@ int mr_metal_not_yet(const char *what)
 }
 
 }  // namespace
-
-extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
-{
-    mr_clear_error();
-    MR_REQUIRE(plan_out != NULL, "mr_aha_plan_create: plan_out is NULL");
-    *plan_out = NULL;
-    const int status = mr_config_validate(cfg);
-    if (status != MR_SUCCESS) return status;
-    return mr_metal_not_yet("mr_aha_plan_create");
-}
-
-extern "C" int mr_aha_plan_execute(mr_aha_plan plan, const mr_complex *d_x,
-                                   const mr_complex *d_SEs,
-                                   const mr_complex *d_phi2_toep,
-                                   const int64_t *d_mask, mr_complex *d_AhAx)
-{
-    (void)d_x; (void)d_SEs; (void)d_phi2_toep; (void)d_mask; (void)d_AhAx;
-    mr_clear_error();
-    MR_REQUIRE(plan != NULL, "mr_aha_plan_execute: plan is NULL");
-    return mr_metal_not_yet("mr_aha_plan_execute");
-}
-
-extern "C" int mr_aha_plan_destroy(mr_aha_plan plan)
-{
-    mr_clear_error();
-    /* No plan can exist yet, so only NULL can arrive here. */
-    return plan == NULL ? MR_SUCCESS : mr_metal_not_yet("mr_aha_plan_destroy");
-}
-
-extern "C" int mr_aha_toeplitz(const mr_config *cfg, const mr_complex *d_x,
-                               const mr_complex *d_SEs,
-                               const mr_complex *d_phi2_toep,
-                               const int64_t *d_mask, mr_complex *d_AhAx)
-{
-    (void)d_x; (void)d_SEs; (void)d_phi2_toep; (void)d_mask; (void)d_AhAx;
-    mr_clear_error();
-    const int status = mr_config_validate(cfg);
-    if (status != MR_SUCCESS) return status;
-    return mr_metal_not_yet("mr_aha_toeplitz");
-}
 
 extern "C" int mr_calc_toep(const mr_config *cfg, const mr_complex *d_phi2,
                             const float *d_traj, int64_t Ntrajs, int64_t Nkx,
