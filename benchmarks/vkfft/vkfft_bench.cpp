@@ -21,10 +21,16 @@
  * writes the forward transform to another one, so that `check_vkfft.py` can
  * compare it against NumPy / SciPy and against MLX's `mx.fft`.
  *
+ * With `--replan N` it additionally creates, runs and destroys N plans, each
+ * inside its own autorelease pool that is drained afterwards. This is the
+ * life cycle of a plan inside MATLAB or Python, and it double-freed with
+ * upstream VkFFT v1.3.4 (DTolm/VkFFT#226); the `third_party/VkFFT` submodule
+ * points to the `mikecjz/VkFFT` fork (branch `mr_aha`) that carries the fix.
+ *
  * Usage:
  * @code
  *   vkfft_bench --dims Mx My [Mz] --batch L [--iters N] [--coalesced B]
- *               [--in input.c64 --out forward.c64]
+ *               [--in input.c64 --out forward.c64] [--replan N]
  * @endcode
  *
  * Built by `build.sh` next to this file (header-only VkFFT and metal-cpp from
@@ -60,6 +66,7 @@ struct Options {
     uint64_t coalesced = 0;       /**< VkFFT coalescedMemory (0 = default). */
     std::string in_path;          /**< Optional raw complex64 input.        */
     std::string out_path;         /**< Optional raw complex64 forward output. */
+    int replan = 0;               /**< Plan create/run/destroy cycles to test. */
 };
 
 /** @brief Print usage and exit with an error. */
@@ -67,7 +74,7 @@ struct Options {
 {
     std::fprintf(stderr,
                  "usage: %s --dims Mx My [Mz] --batch L [--iters N] "
-                 "[--coalesced B] [--in in.c64 --out out.c64]\n",
+                 "[--coalesced B] [--in in.c64 --out out.c64] [--replan N]\n",
                  argv0);
     std::exit(2);
 }
@@ -91,6 +98,8 @@ Options parse(int argc, char **argv)
             o.in_path = argv[++i];
         } else if (a == "--out" && i + 1 < argc) {
             o.out_path = argv[++i];
+        } else if (a == "--replan" && i + 1 < argc) {
+            o.replan = std::atoi(argv[++i]);
         } else {
             usage(argv[0]);
         }
@@ -256,15 +265,26 @@ int main(int argc, char **argv)
                 median(tf), median(ti), median(tfi));
 
     deleteVkFFT(&app);
+
+    /* ---- Plan life-cycle stress test: create, run, destroy and drain. -- */
+    for (int k = 0; k < opt.replan; ++k) {
+        NS::AutoreleasePool *cycle = NS::AutoreleasePool::alloc()->init();
+        VkFFTApplication tmp = {};
+        if (initializeVkFFT(&tmp, cfg) != VKFFT_SUCCESS ||
+            run(&tmp, queue, buf, {-1, 1}) < 0) {
+            std::fprintf(stderr, "replan cycle %d failed\n", k);
+            return 1;
+        }
+        deleteVkFFT(&tmp);
+        cycle->release();
+    }
+    if (opt.replan)
+        std::printf("replan: %d create/run/destroy cycles with drained "
+                    "autorelease pools OK\n", opt.replan);
+
     buf->release();
     queue->release();
     dev->release();
-    /* The outer pool is deliberately NOT drained. VkFFT v1.3.4's Metal
-     * backend calls release() on autoreleased objects it creates in
-     * initializeVkFFT (NS::String::string, commandBuffer(), encoders), so
-     * draining the pool that was active during initialisation double-frees
-     * them (upstream issue DTolm/VkFFT#226, unmerged fix PR #227). The
-     * process exits right after, so leaking the pool is harmless here. */
-    (void)pool;
+    pool->release();
     return 0;
 }

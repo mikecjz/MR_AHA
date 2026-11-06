@@ -14,7 +14,9 @@ on the Mac Studio, at the sizes of the three benchmark problems in [`../README.m
 | `results_AW650523HJY.json` | Mac Studio results (VkFFT default `coalescedMemory`) |
 | `../results/pact400-recon3/cufft_bench.json` | TITAN RTX cuFFT results |
 
-VkFFT and metal-cpp come from the `third_party/VkFFT` submodule (v1.3.4).
+VkFFT and metal-cpp come from the `third_party/VkFFT` submodule (the `mikecjz/VkFFT` fork, see
+[below](#known-vkfft-issue-double-free-with-autorelease-pools)). The results table was measured
+with upstream v1.3.4.
 
 ```bash
 # on the Mac, from the repository root
@@ -64,6 +66,14 @@ VkFFT v1.3.4's Metal backend calls `release()` on objects it obtained autoreleas
 `initializeVkFFT`. Draining the autorelease pool that was active during plan creation therefore
 double-frees them and segfaults. This is upstream issue
 [DTolm/VkFFT#226](https://github.com/DTolm/VkFFT/issues/226), with an unmerged fix in PR
-[#227](https://github.com/DTolm/VkFFT/pull/227). `vkfft_bench` works around it by never draining
-its outer pool; the library needs a proper fix (patched VkFFT) because MATLAB and Python drain
-their pools.
+[#227](https://github.com/DTolm/VkFFT/pull/227). MATLAB and Python drain their pools, so the
+library cannot live with it.
+
+**Fix in use.** The `third_party/VkFFT` submodule points to the fork
+[mikecjz/VkFFT](https://github.com/mikecjz/VkFFT), branch `mr_aha`: upstream `develop`
+(`e687182`, two bug-fix releases after v1.3.4) plus only the Metal commit of PR #227
+(`bd406e8`, authored by nweston). The PR's second commit (an unrelated NVRTC change) is left out.
+With the fix, VkFFT no longer releases autoreleased objects, so every call into VkFFT must run
+inside an autorelease pool, which the library provides around each API entry point.
+`vkfft_bench --replan N` exercises exactly that life cycle (create, run, destroy, drain) N times.
+Drop the fork once upstream merges the fix.

@@ -3,7 +3,8 @@
 	url = https://github.com/mikecjz/finufft.git
 [submodule "third_party/VkFFT"]
 	path = third_party/VkFFT
-	url = https://github.com/DTolm/VkFFT.git
+	url = https://github.com/mikecjz/VkFFT.git
+	branch = mr_aha
 [submodule "third_party/mlx-nufft"]
 	path = third_party/mlx-nufft
 	url = https://github.com/martinlachaine/mlx-nufft.git
