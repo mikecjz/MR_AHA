@@ -40,19 +40,23 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
 %   OUTPUT
 %     AhAx       complex single gpuArray, the same size as x.
 %
-%   All computation happens on the GPU; inputs that are not already gpuArrays
-%   are moved there, and inputs that are real or double precision are cast, so
-%   passing data in the exact expected form avoids all copies.
+%   All computation happens on the GPU. With the CUDA backend inputs that are
+%   not already gpuArrays are moved there; with the Metal backend (Apple
+%   silicon, see MR_BACKEND) arrays stay ordinary MATLAB arrays, which the GPU
+%   reads in place through unified memory, and gpuArrays are gathered. Inputs
+%   that are real or double precision are cast, so passing data in the exact
+%   expected form (complex single) avoids all copies.
 %
 %   See also CALC_TOEP, MR_DEFAULT_CONFIG.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
     narginchk(4, 5);
+    metal = strcmp(mr_backend(), 'metal');
 
-    x         = mr_to_complex_single_gpu(x,         'x');
-    SEs       = mr_to_complex_single_gpu(SEs,       'SEs');
-    phi2_toep = mr_to_complex_single_gpu(phi2_toep, 'phi2_toep');
+    x         = mr_to_complex_single(x,         'x',         metal);
+    SEs       = mr_to_complex_single(SEs,       'SEs',       metal);
+    phi2_toep = mr_to_complex_single(phi2_toep, 'phi2_toep', metal);
 
     config = mr_fill_n_coils(config, SEs);
 
@@ -64,19 +68,26 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
         AhAx = AhA_Toeplitz_mex(x, SEs, phi2_toep, config);
     else
         % The library indexes from 0; MATLAB indexes from 1.
-        mask = int64(gpuArray(mask(:))) - 1;
+        if metal
+            mask = int64(gather(mask(:))) - 1;
+        else
+            mask = int64(gpuArray(mask(:))) - 1;
+        end
         config.num_masked = numel(mask);
         AhAx = AhA_Toeplitz_mex(x, SEs, phi2_toep, config, mask);
     end
 end
 
-function a = mr_to_complex_single_gpu(a, name)
-%MR_TO_COMPLEX_SINGLE_GPU  Coerce an array to a complex single gpuArray.
-%   Emits no copy when the input already has the required form.
-    if ~isa(a, 'gpuArray')
+function a = mr_to_complex_single(a, name, metal)
+%MR_TO_COMPLEX_SINGLE  Coerce an array to complex single on the backend's side:
+%   a gpuArray for CUDA, an ordinary array for Metal. Emits no copy when the
+%   input already has the required form.
+    if metal
+        if isa(a, 'gpuArray'), a = gather(a); end
+    elseif ~isa(a, 'gpuArray')
         a = gpuArray(a);
     end
-    if ~strcmp(classUnderlying(a), 'single')
+    if ~strcmp(underlyingType(a), 'single')
         a = single(a);
     end
     if isreal(a)

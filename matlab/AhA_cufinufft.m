@@ -23,6 +23,8 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
 %
 %   No custom C/CUDA code is involved: the NUFFTs come from cufinufft's own
 %   MATLAB interface (CUFINUFFT_PLAN) and everything else is gpuArray code.
+%   With the Metal backend (Apple silicon) the same operator runs through
+%   the Python mr_aha.AhANufftPlan (MLX + mlx-nufft) on ordinary arrays.
 %
 %   INPUTS
 %     x       complex single gpuArray, [Nx, Ny, L] ('2D') or [Nx, Ny, Nz, L].
@@ -51,6 +53,17 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
     narginchk(5, 6);
     if nargin < 6 || isempty(plan)
         plan = mr_nufft_plan(traj, config);
+    end
+
+    if isfield(plan, 'backend') && strcmp(plan.backend, 'metal')
+        % Apple silicon: Python reference operator, ordinary arrays.
+        cs = @(a) complex(single(gather(a)));
+        stack = strcmp(plan.traj_type, 'stack');
+        AhAx = mr_from_numpy(plan.py.apply(mr_to_numpy(cs(x)), ...
+                                           mr_to_numpy(cs(SEs)), ...
+                                           mr_to_numpy(cs(phi2), 3 + stack)));
+        AhAx = reshape(AhAx, size(x));
+        return
     end
 
     L       = plan.L;

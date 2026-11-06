@@ -79,8 +79,7 @@ option(MR_AHA_BUILD_CUFINUFFT_MATLAB
        "Also build finufft's cufinufft MATLAB MEX (needed by AhA_cufinufft.m)" OFF)
 
 if(MR_AHA_BACKEND STREQUAL "METAL")
-    foreach(MR_OPT MR_AHA_BUILD_MATLAB MR_AHA_BUILD_EXAMPLES
-                   MR_AHA_BUILD_CUFINUFFT_MATLAB)
+    foreach(MR_OPT MR_AHA_BUILD_EXAMPLES MR_AHA_BUILD_CUFINUFFT_MATLAB)
         if(${MR_OPT})
             message(FATAL_ERROR "${MR_OPT} is not available for the Metal "
                     "backend yet (CUDA only).")
@@ -301,7 +300,11 @@ if(MR_AHA_BUILD_PYTHON)
 endif()
 
 # ----------------------------------------------------------------------------
-# MATLAB MEX interface (CUDA backend; the Metal gateways come later)
+# MATLAB MEX interface
+#   CUDA : gpuArray gateways (matlab/*.cu), need the Parallel Computing Toolbox
+#   METAL: host-array gateways (matlab/metal/*.cpp); calc_toep and the
+#          threshold mask go through MATLAB's Python interface (pyenv)
+#   both : mr_backend_mex, which the .m wrappers use to pick the data path
 # ----------------------------------------------------------------------------
 
 if(MR_AHA_BUILD_MATLAB)
@@ -310,34 +313,54 @@ if(MR_AHA_BUILD_MATLAB)
     endif()
     find_package(Matlab REQUIRED COMPONENTS MX_LIBRARY MEX_COMPILER)
 
-    # The MathWorks GPU Computing SDK (mxGPUArray) lives outside the default
-    # MATLAB include path.
-    set(MR_MATLAB_GPU_INCLUDE
-        "${Matlab_ROOT_DIR}/toolbox/parallel/gpu/extern/include")
-    if(NOT EXISTS "${MR_MATLAB_GPU_INCLUDE}/gpu/mxGPUArray.h")
-        message(FATAL_ERROR
-            "mxGPUArray.h not found under ${MR_MATLAB_GPU_INCLUDE}. "
-            "Parallel Computing Toolbox is required for the MATLAB interface.")
-    endif()
-    find_library(MR_MWGPU_LIBRARY mwgpu
-        HINTS "${Matlab_ROOT_DIR}/bin/glnxa64"
-              "${Matlab_ROOT_DIR}/bin/maci64"
-              "${Matlab_ROOT_DIR}/bin/win64"
-        REQUIRED)
+    set(MR_MEX_TARGETS mr_backend_mex)
+    matlab_add_mex(NAME mr_backend_mex SRC matlab/mr_backend_mex.c R2018a)
 
-    foreach(MR_MEX_NAME AhA_Toeplitz_mex calc_toep_mex calc_mask_mex)
-        matlab_add_mex(
-            NAME ${MR_MEX_NAME}
-            SRC matlab/${MR_MEX_NAME}.cu
-            R2018a
-        )
+    if(MR_AHA_BACKEND STREQUAL "CUDA")
+        # The MathWorks GPU Computing SDK (mxGPUArray) lives outside the
+        # default MATLAB include path.
+        set(MR_MATLAB_GPU_INCLUDE
+            "${Matlab_ROOT_DIR}/toolbox/parallel/gpu/extern/include")
+        if(NOT EXISTS "${MR_MATLAB_GPU_INCLUDE}/gpu/mxGPUArray.h")
+            message(FATAL_ERROR
+                "mxGPUArray.h not found under ${MR_MATLAB_GPU_INCLUDE}. "
+                "Parallel Computing Toolbox is required for the MATLAB interface.")
+        endif()
+        find_library(MR_MWGPU_LIBRARY mwgpu
+            HINTS "${Matlab_ROOT_DIR}/bin/glnxa64"
+                  "${Matlab_ROOT_DIR}/bin/maci64"
+                  "${Matlab_ROOT_DIR}/bin/win64"
+            REQUIRED)
+
+        foreach(MR_MEX_NAME AhA_Toeplitz_mex calc_toep_mex calc_mask_mex)
+            matlab_add_mex(
+                NAME ${MR_MEX_NAME}
+                SRC matlab/${MR_MEX_NAME}.cu
+                R2018a
+            )
+            target_include_directories(${MR_MEX_NAME} PRIVATE
+                ${MR_MATLAB_GPU_INCLUDE})
+            list(APPEND MR_MEX_TARGETS ${MR_MEX_NAME})
+        endforeach()
+        set(MR_MEX_EXTRA_LIBS ${MR_MWGPU_LIBRARY} CUDA::cudart)
+    else()
+        foreach(MR_MEX_NAME AhA_Toeplitz_mex calc_mask_mex)
+            matlab_add_mex(
+                NAME ${MR_MEX_NAME}
+                SRC matlab/metal/${MR_MEX_NAME}.cpp
+                R2018a
+            )
+            list(APPEND MR_MEX_TARGETS ${MR_MEX_NAME})
+        endforeach()
+        set(MR_MEX_EXTRA_LIBS "")
+    endif()
+
+    foreach(MR_MEX_NAME ${MR_MEX_TARGETS})
         target_include_directories(${MR_MEX_NAME} PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${MR_MATLAB_GPU_INCLUDE})
+            ${CMAKE_CURRENT_SOURCE_DIR}/include)
         # FindMatlab's matlab_add_mex uses the plain target_link_libraries
         # signature, so this call must stay plain too.
-        target_link_libraries(${MR_MEX_NAME}
-            mr_aha ${MR_MWGPU_LIBRARY} CUDA::cudart)
+        target_link_libraries(${MR_MEX_NAME} mr_aha ${MR_MEX_EXTRA_LIBS})
         set_target_properties(${MR_MEX_NAME} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/matlab
             LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/matlab)

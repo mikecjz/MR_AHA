@@ -31,9 +31,24 @@ function plan = mr_nufft_plan(traj, config, varargin)
 %     plan    struct with the two cufinufft_plan handles (.t1, .t2) and the
 %             geometry AHA_CUFINUFFT needs.
 %
+%   With the Metal backend (Apple silicon, see MR_BACKEND) the plan wraps the
+%   Python reference operator mr_aha.AhANufftPlan (MLX + mlx-nufft) instead,
+%   and the cufinufft options are ignored.
+%
 %   See also AHA_CUFINUFFT, CUFINUFFT_PLAN.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
+
+    if strcmp(mr_backend(), 'metal')
+        % Apple silicon: the Python reference operator (MLX + mlx-nufft).
+        if isa(traj, 'gpuArray'), traj = gather(traj); end
+        mr = mr_python();
+        plan = struct('backend', 'metal', ...
+                      'traj_type', lower(config.traj_type), ...
+                      'py', mr.AhANufftPlan(mr_py_config(config), ...
+                                            mr_to_numpy(single(traj), 3)));
+        return
+    end
 
     if exist('cufinufft_plan', 'file') ~= 2
         error('MR_AHA:nufft:noCufinufft', ...

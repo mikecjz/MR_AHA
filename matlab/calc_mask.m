@@ -62,21 +62,49 @@ function [mask, kernel] = calc_mask(traj, config, threshold)
 %     Om     = calc_toep(phi2, traj, config, mask);
 %     AhAx   = AhA_Toeplitz(x, SEs, Om, config, mask);
 %
+%   BACKENDS
+%     CUDA   gpuArrays; both methods run in the MEX file.
+%     Metal  (Apple silicon, see MR_BACKEND) ordinary arrays. 'neighbour' runs
+%            in the MEX file; 'threshold' (and the kernel output) needs a
+%            NUFFT, which runs in Python with mlx-nufft (see MR_PYTHON).
+%
 %   See also CALC_TOEP, AHA_TOEPLITZ, MR_DEFAULT_CONFIG.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
     narginchk(2, 3);
 
-    if ~isa(traj, 'gpuArray'), traj = gpuArray(traj); end
-    if ~strcmp(classUnderlying(traj), 'single'), traj = single(traj); end
-    if ~isreal(traj)
-        error('MR_AHA:calc_mask:complexTraj', 'traj must be real-valued.');
-    end
-
     if nargin >= 3 && ~isempty(threshold)
         config.mask_method    = 'threshold';
         config.mask_threshold = double(threshold);
+    end
+
+    if strcmp(mr_backend(), 'metal')
+        if isa(traj, 'gpuArray'), traj = gather(traj); end
+        traj = single(traj);
+        if ~isreal(traj)
+            error('MR_AHA:calc_mask:complexTraj', 'traj must be real-valued.');
+        end
+        threshold_method = isfield(config, 'mask_method') && ...
+                           strcmpi(config.mask_method, 'threshold');
+        if threshold_method || nargout > 1
+            % Unit-weight kernel through Python (mlx-nufft).
+            mr = mr_python();
+            kernel = mr_from_numpy(mr.calc_mask_kernel( ...
+                mr_py_config(config), mr_to_numpy(traj, 3)));
+        end
+        if threshold_method
+            mask = calc_mask_mex(kernel, config, 'kernel') + 1;
+        else
+            mask = calc_mask_mex(traj, config) + 1;
+        end
+        return
+    end
+
+    if ~isa(traj, 'gpuArray'), traj = gpuArray(traj); end
+    if ~strcmp(underlyingType(traj), 'single'), traj = single(traj); end
+    if ~isreal(traj)
+        error('MR_AHA:calc_mask:complexTraj', 'traj must be real-valued.');
     end
 
     mask = calc_mask_mex(traj, config) + 1;   % the library indexes from 0

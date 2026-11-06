@@ -51,18 +51,30 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, mask)
 %   The result already absorbs the 1/prod(config.phi2_dim) normalisation of the
 %   FFT pair used by AHA_TOEPLITZ, so no further scaling is required anywhere.
 %
+%   BACKENDS
+%     CUDA   gpuArrays; the type-1 NUFFT is cufinufft inside the MEX file.
+%     Metal  (Apple silicon, see MR_BACKEND) ordinary arrays; the type-1 NUFFT
+%            runs in Python with mlx-nufft through MATLAB's Python interface
+%            (see MR_PYTHON), and the library finishes the operator on the
+%            Apple GPU. The outputs are ordinary arrays (mask: int64 column).
+%
 %   See also AHA_TOEPLITZ, CALC_MASK, MR_DEFAULT_CONFIG, AHA_CUFINUFFT.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
     narginchk(3, 4);
+    if nargin < 4, mask = []; end
+    if strcmp(mr_backend(), 'metal')
+        [phi2_toep, mask] = mr_calc_toep_metal(phi2, traj, config, mask);
+        return
+    end
 
     if ~isa(phi2, 'gpuArray'), phi2 = gpuArray(phi2); end
-    if ~strcmp(classUnderlying(phi2), 'single'), phi2 = single(phi2); end
+    if ~strcmp(underlyingType(phi2), 'single'), phi2 = single(phi2); end
     if isreal(phi2), phi2 = complex(phi2); end
 
     if ~isa(traj, 'gpuArray'), traj = gpuArray(traj); end
-    if ~strcmp(classUnderlying(traj), 'single'), traj = single(traj); end
+    if ~strcmp(underlyingType(traj), 'single'), traj = single(traj); end
     if ~isreal(traj)
         error('MR_AHA:calc_toep:complexTraj', 'traj must be real-valued.');
     end
@@ -74,10 +86,41 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, mask)
         return
     end
 
-    if nargin < 4 || isempty(mask)
+    if isempty(mask)
         mask = calc_mask(traj, config);       % derived from the trajectory
     end
     mask0 = int64(gpuArray(mask(:))) - 1;    % the library indexes from 0
     config.num_masked = numel(mask0);
     phi2_toep = calc_toep_mex(phi2, traj, config, mask0);
+end
+
+function [phi2_toep, mask] = mr_calc_toep_metal(phi2, traj, config, mask)
+%MR_CALC_TOEP_METAL  Metal path: mlx-nufft in Python, then the library.
+    if isa(phi2, 'gpuArray'), phi2 = gather(phi2); end
+    if isa(traj, 'gpuArray'), traj = gather(traj); end
+    phi2 = complex(single(phi2));
+    traj = single(traj);
+    if ~isreal(traj)
+        error('MR_AHA:calc_toep:complexTraj', 'traj must be real-valued.');
+    end
+
+    stack = strcmpi(config.traj_type, 'stack');
+    mr = mr_python();
+    phi2_py = mr_to_numpy(phi2, 3 + stack);    % [Ntrajs,(Nkz),L,L] -> (L,L,(Nkz),Ntrajs)
+    traj_py = mr_to_numpy(traj, 3);            % [Ntrajs,Nkx,ndim]  -> (ndim,Nkx,Ntrajs)
+
+    is_masked = isfield(config, 'is_masked') && config.is_masked;
+    mask_py = py.None;
+    if is_masked
+        if isempty(mask)
+            mask = calc_mask(traj, config);
+        end
+        mask = int64(gather(mask(:)));
+        config.num_masked = numel(mask);
+        mask_py = mr_to_numpy(mask - 1).ravel();   % 0-based, 1-D
+    else
+        mask = [];
+    end
+    out = mr.calc_toep(mr_py_config(config), phi2_py, traj_py, pyargs('mask', mask_py));
+    phi2_toep = mr_from_numpy(out);
 end
