@@ -37,10 +37,11 @@ place through unified memory.
 4. [MATLAB](#matlab)
 5. [Python](#python)
 6. [C / C++](#c--c)
-7. [Why Toeplitz and how does it work?](#why-toeplitz-and-how-does-it-work)
-8. [Implementation notes](#implementation-notes)
-9. [Apple silicon (Metal backend)](#apple-silicon-metal-backend)
-10. [Benchmarks](#benchmarks)
+7. [Multi-GPU (CUDA)](#multi-gpu-cuda)
+8. [Why Toeplitz and how does it work?](#why-toeplitz-and-how-does-it-work)
+9. [Implementation notes](#implementation-notes)
+10. [Apple silicon (Metal backend)](#apple-silicon-metal-backend)
+11. [Benchmarks](#benchmarks)
 
 ---
 
@@ -337,6 +338,61 @@ builds a synthetic stack-of-stars problem and checks the operator's Hermitian sy
 
 ---
 
+## Multi-GPU (CUDA)
+
+$A^H A$ is a sum over coils, so one application can be spread over several GPUs of a node: each
+GPU applies the operator for a share of the coils and the partial results are summed on the
+caller's GPU (the *primary*). `phi2_toep` and the mask are copied to every GPU once, when the
+operator is created, together with each GPU's own sensitivity maps; an application then only
+broadcasts `x` and gathers the partial outputs. Multi-GPU makes the operator faster but does not
+raise the largest problem size: the whole kernel must fit on every GPU.
+
+```matlab
+op   = mr_aha_op(SEs, Om, config, 'devices', 1:4);   % 1-based gpuDevice indices
+AhAx = op.apply(x);                                  % or op * x
+info = op.info();                                    % devices and coils used
+delete(op);
+```
+
+```python
+with mr_aha.MultiGPUPlan(cfg, SEs, Om, devices=[0, 1, 2, 3]) as op:
+    y = op.apply(x)
+    print(op.info)
+```
+
+```c
+mr_mgpu_plan op;
+mr_mgpu_plan_create(&cfg, devices, n_devices, d_SEs, d_toep, NULL, 0, &op);
+mr_mgpu_plan_execute(op, d_x, d_AhAx);
+mr_mgpu_plan_destroy(op);
+```
+
+* **Primary GPU.** Inputs and outputs live on the current GPU (MATLAB's `gpuDevice`, CuPy's
+  current device, or `config.gpu_device_id`), which always takes part. The current device is
+  unchanged on return. MATLAB uses the other GPUs only inside the library, so its "one GPU per
+  session" rule is not violated.
+* **How many GPUs.** With $C$ coils on $G$ GPUs the time is set by $\lceil C/G \rceil$ coils, so
+  the smallest number of GPUs with the same $\lceil C/G \rceil$ is used (12 coils on 5 GPUs use
+  4). Small problems (fewer than $2^{22}$ upsampled values per coil, e.g. the 2D benchmark) stay
+  on the primary GPU; `MR_AHA_MGPU_MIN_WORK` changes the threshold.
+* **Remainder split.** When the coils do not divide over the GPUs, the remaining coils can be split
+  across all GPUs *by rank*, with an all-to-all exchange of k-space slabs around the block-diagonal
+  stage. `MR_AHA_MGPU_SPLIT=auto` (default) enables it only when a cost model, fed with a one-coil
+  timing and the measured GPU-to-GPU bandwidth, predicts a gain of at least 5 %, which in practice
+  needs NVLink; `on` / `off` force it.
+* **Memory.** Every GPU holds a copy of `phi2_toep`. `share_primary` (MATLAB, Python) /
+  `MR_MGPU_SHARE_PRIMARY` (C) lets the primary GPU use the caller's arrays in place instead of a
+  second copy; they must then stay unchanged while the operator exists. The primary also holds
+  one `x`-sized staging buffer per other GPU.
+* **MATLAB lifetime.** The MEX file stays locked while an operator exists, so `clear mex` cannot
+  unload it under a live operator. After `reset(gpuDevice)` or selecting another GPU, `apply`
+  raises an error instead of computing; delete the operator and create a new one.
+
+`tests/check_mgpu.py` and `tests/check_mgpu_matlab.m` compare the multi-GPU and single-GPU
+operators; `benchmarks/bench_mgpu.py` measures the scaling.
+
+---
+
 ## Why Toeplitz and How Does It Work?
 
 The AhA operator for MRI is [Toeplitz](https://en.wikipedia.org/wiki/Toeplitz_matrix) under
@@ -412,8 +468,25 @@ z participates in the image-domain transform. `phi2` therefore carries an extra 
 
 **Memory.** `calc_toep` chunks its work over the $(L^2+L)/2$ triangular components and sizes the
 chunk against `cudaMemGetInfo`, honouring `config.mem_fraction` (default: half the free memory); it
-also bounds cufinufft's internal fine grid through `gpu_maxbatchsize`. An `mr_aha_plan` holds one
-`[Mx, My, Mz, L]` working buffer for the lifetime of the plan, so the iteration allocates nothing.
+also bounds cufinufft's internal fine grid through `gpu_maxbatchsize`. An `mr_aha_plan` holds its
+working buffers for the lifetime of the plan, so the iteration allocates nothing: the padded grids
+of one coil group (`[Mx, My, Mz, L]` per coil, see below), the cuFFT work area and, when masked, an
+`[Mx, My, Mz]` int32 index map.
+
+**Block-diagonal stage (CUDA).** This stage, the per-location $L \times L$ Hermitian multiply, is
+memory-bound on reading `phi2_toep`, the largest array of the operator. For $L \le 30$ it uses
+kernels specialised on $L$: the rank vectors stay in registers, the stored triangle is walked once
+so that each element is read once (not once per row), and the masked variant works in place on the
+padded grid through a grid-to-mask index map instead of gathering into a compact buffer. Coils are
+processed in **groups** (default 4): their padded grids sit side by side, one batched cuFFT
+transforms them all, and one kernel pass reads `phi2_toep` once for the whole group instead of once
+per coil. The group shrinks until its buffers fit `config.mem_fraction` of the free GPU memory
+(a group of 1 is always tried). Environment variables, read when a plan is created:
+`MR_AHA_CUDA_COIL_GROUP=n` (requested group size), `MR_AHA_CUDA_GENERIC_BD=1` (generic
+shared-memory kernels, one coil at a time; always used for $L > 30$, where they are as fast); and at every application
+`MR_AHA_CUDA_PROFILE=1` prints the GPU time of each stage. The results are bitwise identical to the
+generic kernels (`tests/check_bd_kernels.py`). [`PERFORMANCE.md`](PERFORMANCE.md) explains these
+mechanisms, and those of the multi-GPU operator, in detail.
 
 **Re-entrancy.** No `__constant__` or other shared device state: kernel geometry travels by value.
 Several plans, CUDA streams and host threads can be in flight at once, and `mr_last_error` is
