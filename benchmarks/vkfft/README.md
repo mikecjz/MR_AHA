@@ -77,3 +77,7 @@ With the fix, VkFFT no longer releases autoreleased objects, so every call into 
 inside an autorelease pool, which the library provides around each API entry point.
 `vkfft_bench --replan N` exercises exactly that life cycle (create, run, destroy, drain) N times.
 Drop the fork once upstream merges the fix.
+
+Re-checked with the fork (`coalescedMemory=32`): `--replan 50` (2d) and `--replan 3` (stack, 3d)
+pass; forward error vs SciPy 2.5e-7 / 2.9e-7 / 3.2e-7 and fwd+inv 0.12 / 38.1 / 54.1 ms
+(2d / stack / 3d), the same as v1.3.4.
