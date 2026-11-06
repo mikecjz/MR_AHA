@@ -3,16 +3,21 @@
 GPU evaluation of the forward normal operator $A^H A$ for **non-Cartesian MRI with low-rank
 (subspace / MR-Multitasking) modelling**, via a Toeplitz embedding.
 
-The numerics live in a standalone CUDA/C++ library with a pure C surface. MATLAB, Python and plain
-C/C++ all call the same code:
+The numerics live in a standalone C++ library with a pure C surface. MATLAB, Python and plain
+C/C++ all call the same code. The library is built for one GPU backend, CUDA (NVIDIA) or Metal
+(Apple silicon, in progress on the `mlx` branch), selected with the CMake option `MR_AHA_BACKEND`:
 
 ```
 include/mr_aha/mr_aha.h   public C API  (extern "C")
-src/core/                 the C++/CUDA implementation  ->  libmr_aha
+src/common/               backend-independent configuration and error handling
+src/cuda/                 the CUDA backend  ->  libmr_aha
+src/metal/                the Metal backend (Apple silicon)  ->  libmr_aha
 matlab/                   MEX gateways + .m wrappers
 python/                   ctypes binding + CuPy-friendly API
 examples/                 standalone C++/CUDA example
 benchmarks/               Toeplitz vs. NUFFT speed / CG benchmarks and results
+tests/                    reference checks of a build against stored CUDA results
+third_party/              VkFFT (Metal FFTs, fork with a Metal fix) and mlx-nufft
 legacy/                   the previous MATLAB-only implementation (reference only)
 ```
 
@@ -201,6 +206,7 @@ cmake --build build -j
 
 | Option | Default | Produces |
 | ------ | ------- | -------- |
+| `MR_AHA_BACKEND` | `METAL` on macOS, else `CUDA` | which GPU backend the library is built for |
 | — | | `build/libmr_aha.a` — the standalone library |
 | `MR_AHA_BUILD_PYTHON` | `ON` | `build/lib/libmr_aha_c.so` — for the ctypes binding |
 | `MR_AHA_BUILD_MATLAB` | `OFF` | `build/matlab/*.mexa64` — needs `MATLAB_ROOT` and the Parallel Computing Toolbox |
@@ -407,11 +413,11 @@ MATLAB and Python) keeps whichever device the caller has selected.
 ## Development and debugging in Visual Studio Code
 
 Set `includePath` in [.vscode/c_cpp_properties.json](.vscode/c_cpp_properties.json) to include
-`include/`, `src/core/`, `finufft/include/` and the CUDA and MATLAB headers for IntelliSense.
+`include/`, `src/common/`, `src/cuda/`, `finufft/include/` and the CUDA and MATLAB headers for IntelliSense.
 
 To debug the MEX gateways: build with `-DCMAKE_BUILD_TYPE=Debug`, point `program` in
 [.vscode/launch.json](.vscode/launch.json) at your MATLAB executable, and set breakpoints in
-`matlab/*.cu` or `src/core/*.cu`. The [MATLAB GPU CUDA and MEX Programming
+`matlab/*.cu` or `src/cuda/*.cu`. The [MATLAB GPU CUDA and MEX Programming
 Manual](https://www.mathworks.com/help/parallel-computing/gpu-cuda-and-mex-programming.html) is the
 reference for the MathWorks side.
 

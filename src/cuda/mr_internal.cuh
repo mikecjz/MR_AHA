@@ -1,11 +1,11 @@
 /**
  * @file mr_internal.cuh
- * @brief Internal helpers shared by the MR_AHA translation units.
+ * @brief Internal helpers of the CUDA backend.
  *
- * Not part of the public API. Provides the error-reporting plumbing behind
- * ::mr_last_error, thin RAII-free guard macros around the CUDA / cuFFT /
- * cufinufft return codes, and the small plain-old-data descriptor
- * (::mr_dims) that is passed by value into every kernel.
+ * Not part of the public API. Builds on the backend-independent
+ * `src/common/mr_common.h` (error reporting, guard macros, ::mr_dims) and adds
+ * thin RAII-free guard macros around the CUDA / cuFFT / cufinufft return codes
+ * plus the `__host__ __device__` index helpers used by the kernels.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */
@@ -13,7 +13,7 @@
 #ifndef MR_AHA_MR_INTERNAL_CUH
 #define MR_AHA_MR_INTERNAL_CUH
 
-#include "mr_aha/mr_aha.h"
+#include "mr_common.h"
 
 #include <cuComplex.h>
 #include <cuda_runtime.h>
@@ -22,54 +22,8 @@
 #include <cstdio>
 
 /* ------------------------------------------------------------------------ */
-/* Error reporting                                                          */
+/* CUDA / cuFFT / cufinufft error checks                                    */
 /* ------------------------------------------------------------------------ */
-
-/**
- * @brief Record a formatted diagnostic in this thread's error buffer.
- *
- * The message is retrievable by the caller through ::mr_last_error until the
- * next failing library call on the same thread.
- *
- * @param[in] fmt `printf`-style format string, followed by its arguments.
- */
-void mr_set_error(const char *fmt, ...);
-
-/**
- * @brief Clear this thread's error state. Called on entry to public API.
- *
- * Empties the diagnostic buffer and also resets the CUDA runtime's per-thread
- * "last error". The library checks kernel launches with `cudaGetLastError`,
- * which returns the most recent error of *any* runtime call on the thread. A
- * non-sticky error that the caller already handled (for example an
- * out-of-memory `cudaMalloc` that CuPy's or MATLAB's allocator recovered from
- * by freeing its cache and retrying) would otherwise be reported as a launch
- * failure of the next library kernel.
- */
-void mr_clear_error(void);
-
-/**
- * @brief Return @p status after recording a location-tagged diagnostic.
- * @param[in] status ::mr_status value to return.
- * @param[in] fmt    `printf`-style format string, followed by its arguments.
- */
-#define MR_FAIL(status, ...)                                                   \
-    do {                                                                       \
-        mr_set_error(__VA_ARGS__);                                             \
-        return (status);                                                       \
-    } while (0)
-
-/** @brief Bail out with ::MR_ERR_INVALID_ARG unless @p cond holds. */
-#define MR_REQUIRE(cond, ...)                                                  \
-    do {                                                                       \
-        if (!(cond)) MR_FAIL(MR_ERR_INVALID_ARG, __VA_ARGS__);                 \
-    } while (0)
-
-/** @brief Bail out with ::MR_ERR_INVALID_CONFIG unless @p cond holds. */
-#define MR_REQUIRE_CFG(cond, ...)                                              \
-    do {                                                                       \
-        if (!(cond)) MR_FAIL(MR_ERR_INVALID_CONFIG, __VA_ARGS__);              \
-    } while (0)
 
 /** @brief Evaluate a CUDA runtime call and bail out with ::MR_ERR_CUDA. */
 #define MR_CUDA_CHECK(call)                                                    \
@@ -107,38 +61,6 @@ void mr_clear_error(void);
             MR_FAIL(MR_ERR_CUDA, "kernel %s failed to launch at %s:%d: %s",    \
                     name, __FILE__, __LINE__, cudaGetErrorString(mr_err_));    \
     } while (0)
-
-/* ------------------------------------------------------------------------ */
-/* Kernel-side geometry descriptor                                          */
-/* ------------------------------------------------------------------------ */
-
-/**
- * @brief Plain-old-data geometry descriptor passed by value into kernels.
- *
- * Passing the geometry as a kernel argument (rather than through
- * `__constant__` memory) keeps the library re-entrant: several plans, streams
- * or host threads can be in flight simultaneously without clobbering shared
- * device state.
- */
-struct mr_dims {
-    int n[3];            /**< Image size `[Nx, Ny, Nz]`, unused entries 1.     */
-    int m[3];            /**< Upsampled size `[Mx, My, Mz]`, unused entries 1. */
-    int c_n[3];          /**< Image centre offsets `floor(N_d/2)`.             */
-    int c_m[3];          /**< Upsampled centre offsets `floor(M_d/2)`.         */
-    int L;               /**< Rank.                                            */
-    int tri_upper;       /**< 1 when the upper triangle is stored, else 0.     */
-    long long image_size;/**< `Nx*Ny*Nz`.                                      */
-    long long pad_size;  /**< `Mx*My*Mz`.                                      */
-    long long se_coil;   /**< Coil stride into `SEs`, i.e. `image_size`. One
-                              map per coil is shared by every rank.            */
-};
-
-/**
- * @brief Fill an ::mr_dims from a validated ::mr_config.
- * @param[in]  cfg Validated configuration.
- * @param[out] d   Descriptor to populate.
- */
-void mr_dims_from_config(const mr_config *cfg, mr_dims *d);
 
 /* ------------------------------------------------------------------------ */
 /* Small device-side utilities                                              */
@@ -240,11 +162,5 @@ int mr_toep_push_device(const mr_config *cfg, int *prev);
 int mr_calc_toep_impl(const mr_config *cfg, const mr_complex *d_phi2,
                       const float *d_traj, int64_t Ntrajs, int64_t Nkx,
                       const int64_t *d_mask, mr_complex *d_phi2_toep);
-
-/** @brief Integer ceiling division for launch-configuration arithmetic. */
-__host__ __forceinline__ long long mr_ceil_div(long long a, long long b)
-{
-    return (a + b - 1) / b;
-}
 
 #endif /* MR_AHA_MR_INTERNAL_CUH */

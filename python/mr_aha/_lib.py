@@ -22,6 +22,7 @@ __all__ = [
     "MRError",
     "lib",
     "check",
+    "backend",
     "DEFAULT_MASK_THRESHOLD",
     "DEFAULT_MASK_RADIUS",
 ]
@@ -265,6 +266,10 @@ lib.mr_status_string.argtypes = [ctypes.c_int]
 lib.mr_last_error.restype = ctypes.c_char_p
 lib.mr_last_error.argtypes = []
 
+if hasattr(lib, "mr_backend"):
+    lib.mr_backend.restype = ctypes.c_char_p
+    lib.mr_backend.argtypes = []
+
 lib.mr_config_defaults.restype = ctypes.c_int
 lib.mr_config_defaults.argtypes = [_cfg_p, ctypes.c_int]
 
@@ -314,6 +319,19 @@ DEFAULT_MASK_THRESHOLD = 0.05
 #: ``'neighbour'`` method (in upsampled grid cells), mirroring
 #: ``MR_DEFAULT_MASK_RADIUS``.
 DEFAULT_MASK_RADIUS = 2
+
+
+def backend() -> str:
+    """Name of the GPU backend the loaded library was built for.
+
+    Returns:
+        ``'cuda'`` (NVIDIA GPUs; arrays are CuPy device arrays) or
+        ``'metal'`` (Apple silicon; arrays are NumPy arrays in unified
+        memory). Libraries built before the backend split report ``'cuda'``.
+    """
+    if not hasattr(lib, "mr_backend"):
+        return "cuda"
+    return lib.mr_backend().decode("ascii")
 
 
 def check(status: int, what: str) -> None:

@@ -1,7 +1,7 @@
 # Legacy (pre-Stage-1) code
 
 Everything in this directory is the original MATLAB-only implementation that
-the C++/CUDA library in `src/core` replaces. It is kept for reference only: it
+the C++/CUDA library in `src/cuda` replaces. It is kept for reference only: it
 is **not** built by the top-level `CMakeLists.txt` and it is not maintained.
 
 | File | What it was |

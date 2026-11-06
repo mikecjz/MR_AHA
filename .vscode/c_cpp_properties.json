@@ -4,7 +4,8 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/include",
-                "${workspaceFolder}/src/core",
+                "${workspaceFolder}/src/common",
+                "${workspaceFolder}/src/cuda",
                 "${workspaceFolder}/finufft/include",
                 "${workspaceFolder}/**",
                 "/usr/local/cuda/include",

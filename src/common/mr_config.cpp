@@ -1,11 +1,13 @@
 /**
- * @file mr_config.cu
+ * @file mr_config.cpp
  * @brief Configuration defaults, validation, derived sizes and error reporting.
+ *
+ * Backend-independent: compiled into both the CUDA and the Metal build.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */
 
-#include "mr_internal.cuh"
+#include "mr_common.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -37,10 +39,7 @@ void mr_set_error(const char *fmt, ...)
 void mr_clear_error(void)
 {
     mr_error_buffer[0] = '\0';
-    /* Drop a stale, already-handled CUDA error of the caller; see the
-     * declaration. Sticky (context-corrupting) errors are unaffected: they are
-     * reported again by the next runtime call. */
-    (void)cudaGetLastError();
+    mr_backend_clear_error();
 }
 
 extern "C" const char *mr_last_error(void) { return mr_error_buffer; }
@@ -51,12 +50,14 @@ extern "C" const char *mr_status_string(int status)
     case MR_SUCCESS:            return "success";
     case MR_ERR_INVALID_ARG:    return "invalid argument";
     case MR_ERR_INVALID_CONFIG: return "invalid configuration";
-    case MR_ERR_ALLOC:          return "device allocation failed";
+    case MR_ERR_ALLOC:          return "GPU memory allocation failed";
     case MR_ERR_CUDA:           return "CUDA runtime error";
     case MR_ERR_CUFFT:          return "cuFFT error";
     case MR_ERR_CUFINUFFT:      return "cufinufft error";
     case MR_ERR_UNSUPPORTED:    return "unsupported configuration";
     case MR_ERR_INTERNAL:       return "internal error";
+    case MR_ERR_METAL:          return "Metal error";
+    case MR_ERR_VKFFT:          return "VkFFT error";
     default:                    return "unknown status";
     }
 }

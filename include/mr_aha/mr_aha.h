@@ -7,9 +7,14 @@
  * Toeplitz embedding so that no non-uniform FFT is required inside the
  * iteration loop.
  *
- * The library is a standalone CUDA/C++ library with a pure C interface
+ * The library is a standalone C++ library with a pure C interface
  * (`extern "C"`), so that it can be linked directly from C, C++, a MATLAB MEX
- * gateway (MATLAB GPU C API) or a Python `ctypes` binding.
+ * gateway or a Python `ctypes` binding. It is built for exactly one GPU
+ * backend, chosen at configure time with the CMake option `MR_AHA_BACKEND`
+ * and reported at run time by ::mr_backend:
+ *
+ * - **CUDA** (NVIDIA GPUs): CUDA kernels, cuFFT and cufinufft.
+ * - **Metal** (Apple silicon): Metal kernels and VkFFT's Metal backend.
  *
  * @section mr_layout Array layout
  *
@@ -27,9 +32,18 @@
  *
  * @section mr_memory Memory ownership
  *
- * **All array arguments are device (GPU) pointers.** The library never
- * allocates or touches host buffers for bulk data; the caller is responsible
- * for allocating and freeing every input and output array on the device. Small
+ * The caller allocates and frees every input and output array; the library
+ * only allocates its own working buffers. What an array pointer is depends on
+ * the backend:
+ *
+ * - **CUDA:** every array argument is a **device (GPU) pointer**. The library
+ *   never touches host buffers for bulk data.
+ * - **Metal:** every array argument is an ordinary **host pointer**. Apple
+ *   silicon has unified memory, so the GPU reads and writes the caller's
+ *   arrays directly (without a copy when they are page-aligned).
+ *
+ * The `d_` prefix of the array parameters below therefore means "device
+ * pointer" for CUDA and "host pointer in unified memory" for Metal. Small
  * scalar configuration values are passed by value on the host through
  * ::mr_config.
  *
@@ -45,7 +59,6 @@
 #ifndef MR_AHA_MR_AHA_H
 #define MR_AHA_MR_AHA_H
 
-#include <cuComplex.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -63,8 +76,33 @@
 extern "C" {
 #endif
 
-/** @brief Single-precision complex scalar used by every MR_AHA array. */
+#if defined(_MSC_VER)
+#  define MR_ALIGN8 __declspec(align(8))
+#else
+#  define MR_ALIGN8 __attribute__((aligned(8)))
+#endif
+
+#if defined(MR_AHA_CUDA_COMPLEX) || defined(__CUDACC__)
+#  include <cuComplex.h>
+/** @brief Single-precision complex scalar used by every MR_AHA array.
+ *
+ *  In the CUDA build (and in any translation unit compiled by `nvcc`) this is
+ *  CUDA's `cuFloatComplex`, so that kernels can use the `cuCmulf` family
+ *  directly. The CUDA backend defines `MR_AHA_CUDA_COMPLEX` for all its
+ *  translation units so that they agree on the type. */
 typedef cuFloatComplex mr_complex;
+#else
+/** @brief Single-precision complex scalar used by every MR_AHA array.
+ *
+ *  Interleaved real and imaginary parts, 8-byte aligned. Layout-identical to
+ *  CUDA's `cuFloatComplex`, C99 `float _Complex`, C++ `std::complex<float>`,
+ *  MATLAB's interleaved `single` complex and NumPy's `complex64`, so arrays of
+ *  any of those can be passed by pointer. */
+typedef struct MR_ALIGN8 mr_complex_s {
+    float x; /**< Real part.      */
+    float y; /**< Imaginary part. */
+} mr_complex;
+#endif
 
 /**
  * @brief Default neighbourhood radius of ::mr_calc_mask, in upsampled grid cells.
@@ -107,12 +145,14 @@ typedef enum mr_status {
     MR_SUCCESS            =  0, /**< Operation completed successfully.        */
     MR_ERR_INVALID_ARG    = -1, /**< A NULL pointer or nonsensical size.      */
     MR_ERR_INVALID_CONFIG = -2, /**< ::mr_config failed validation.           */
-    MR_ERR_ALLOC          = -3, /**< A device allocation failed.              */
+    MR_ERR_ALLOC          = -3, /**< A GPU memory allocation failed.          */
     MR_ERR_CUDA           = -4, /**< A CUDA runtime call failed.              */
     MR_ERR_CUFFT          = -5, /**< A cuFFT call failed.                     */
     MR_ERR_CUFINUFFT      = -6, /**< A cufinufft call failed.                 */
     MR_ERR_UNSUPPORTED    = -7, /**< Valid but not implemented combination.   */
-    MR_ERR_INTERNAL       = -8  /**< Should not happen; please report.        */
+    MR_ERR_INTERNAL       = -8, /**< Should not happen; please report.        */
+    MR_ERR_METAL          = -9, /**< A Metal call failed (Metal backend).     */
+    MR_ERR_VKFFT          = -10 /**< A VkFFT call failed (Metal backend).     */
 } mr_status;
 
 /**
@@ -134,6 +174,12 @@ MR_EXPORT const char *mr_status_string(int status);
  *         if no failure has been recorded on this thread.
  */
 MR_EXPORT const char *mr_last_error(void);
+
+/**
+ * @brief Name of the GPU backend this library was built for.
+ * @return `"cuda"` or `"metal"`; a pointer to a static string, never NULL.
+ */
+MR_EXPORT const char *mr_backend(void);
 
 /* ------------------------------------------------------------------------ */
 /* Configuration                                                            */
@@ -230,11 +276,13 @@ typedef struct mr_config {
 
     /** CUDA device to run on. Default 0. Set to -1 to keep the caller's
      *  current device (recommended when interoperating with MATLAB gpuArray or
-     *  CuPy, which manage the current device themselves). */
+     *  CuPy, which manage the current device themselves). Ignored by the
+     *  Metal backend, which always uses the system's default GPU. */
     int gpu_device_id;
 
     /** CUDA stream (`cudaStream_t`) for all work, or NULL for the default
-     *  stream. Declared `void *` to keep this header free of `cuda_runtime.h`. */
+     *  stream. Declared `void *` to keep this header free of `cuda_runtime.h`.
+     *  Ignored by the Metal backend, whose calls are synchronous. */
     void *stream;
 
     /** Fraction of the *free* device memory ::mr_calc_toep may use for its

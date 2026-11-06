@@ -1,10 +1,11 @@
 /**
- * @file mr_shared_stub.cu
+ * @file mr_shared_stub.cpp
  * @brief Anchor translation unit for the `mr_aha_c` shared library.
  *
  * CMake requires at least one source file per target. The public entry points
  * themselves come from the `mr_aha` static archive, which is linked with
- * whole-archive semantics so that nothing is stripped.
+ * whole-archive semantics so that nothing is stripped. Shared by every
+ * backend.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */

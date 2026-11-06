@@ -46,6 +46,7 @@ from .api import (
     num_tri,
     phi2_toep_shape,
 )
+from ._lib import backend
 from .nufft import AhANufftPlan, aha_nufft
 
 __all__ = [
@@ -60,6 +61,7 @@ __all__ = [
     "Triangulation",
     "aha_nufft",
     "aha_toeplitz",
+    "backend",
     "calc_mask",
     "calc_mask_kernel",
     "calc_toep",

@@ -2,37 +2,71 @@
 #  MR_AHA - GPU forward normal operator for non-Cartesian MRI with low-rank
 #            (subspace / MR-Multitasking) modelling.
 #
+#  The library is built for exactly one GPU backend, chosen with
+#  MR_AHA_BACKEND:
+#    CUDA   - NVIDIA GPUs: CUDA kernels, cuFFT, cufinufft (default off macOS)
+#    METAL  - Apple silicon: Metal kernels, VkFFT-Metal (default on macOS)
+#
 #  Layout produced by this file:
-#    mr_aha           - the standalone C/C++/CUDA library (the "C++ base")
+#    mr_aha           - the standalone C/C++ library (the "C++ base")
 #    AhA_Toeplitz_mex  - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
 #    calc_toep_mex     - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
 #    calc_mask_mex     - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
 #    cufinufft (MEX)   - finufft's own MATLAB GPU interface, used by the
 #                        NUFFT reference AhA_cufinufft.m (optional,
-#                        MR_AHA_BUILD_CUFINUFFT_MATLAB)
-#    libmr_aha_c.so   - shared library consumed by the Python ctypes binding
-#                        (optional, MR_AHA_BUILD_PYTHON)
+#                        MR_AHA_BUILD_CUFINUFFT_MATLAB, CUDA only)
+#    libmr_aha_c       - shared library consumed by the Python ctypes binding
+#                        (optional, MR_AHA_BUILD_PYTHON; .so or .dylib)
 #
-#  The library only depends on the CUDA toolkit (cudart, cuFFT) and on
-#  cufinufft, which is pulled in from the bundled `finufft/` submodule.
+#  Sources:
+#    src/common/  backend-independent configuration and error handling
+#    src/cuda/    CUDA backend (depends on the CUDA toolkit and on cufinufft
+#                 from the bundled `finufft/` submodule)
+#    src/metal/   Metal backend (depends on the Metal framework and on VkFFT /
+#                 metal-cpp from the `third_party/VkFFT` submodule)
 # ============================================================================
 
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.24)
 
-# Must be set before project() so that it applies to the CUDA language check.
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+# ----------------------------------------------------------------------------
+# Backend selection (before project(), so that CUDA is only enabled when used)
+# ----------------------------------------------------------------------------
+
+if(APPLE)
+    set(MR_AHA_DEFAULT_BACKEND METAL)
+else()
+    set(MR_AHA_DEFAULT_BACKEND CUDA)
+endif()
+set(MR_AHA_BACKEND "${MR_AHA_DEFAULT_BACKEND}" CACHE STRING
+    "GPU backend: CUDA (NVIDIA GPUs) or METAL (Apple silicon)")
+set_property(CACHE MR_AHA_BACKEND PROPERTY STRINGS CUDA METAL)
+string(TOUPPER "${MR_AHA_BACKEND}" MR_AHA_BACKEND)
+if(NOT MR_AHA_BACKEND MATCHES "^(CUDA|METAL)$")
+    message(FATAL_ERROR "MR_AHA_BACKEND must be CUDA or METAL, got '${MR_AHA_BACKEND}'")
+endif()
+
+# Must be set before the CUDA language is enabled.
+if(MR_AHA_BACKEND STREQUAL "CUDA" AND NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES 70;75;80;86;89;90 CACHE STRING
         "CUDA architectures to generate code for")
 endif()
 
-project(MR_AHA VERSION 1.0.0 LANGUAGES C CXX CUDA)
+project(MR_AHA VERSION 1.0.0 LANGUAGES C CXX)
+message(STATUS "MR_AHA backend: ${MR_AHA_BACKEND}")
+
+if(MR_AHA_BACKEND STREQUAL "CUDA")
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
+elseif(NOT APPLE)
+    message(FATAL_ERROR "MR_AHA_BACKEND=METAL requires macOS on Apple silicon")
+endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # Position-independent code everywhere: the MEX gateways and the Python shared
 # library both link the core as a static archive into a shared object.
@@ -44,15 +78,30 @@ option(MR_AHA_BUILD_EXAMPLES "Build the standalone C++ examples"   OFF)
 option(MR_AHA_BUILD_CUFINUFFT_MATLAB
        "Also build finufft's cufinufft MATLAB MEX (needed by AhA_cufinufft.m)" OFF)
 
+if(MR_AHA_BACKEND STREQUAL "METAL")
+    foreach(MR_OPT MR_AHA_BUILD_MATLAB MR_AHA_BUILD_EXAMPLES
+                   MR_AHA_BUILD_CUFINUFFT_MATLAB)
+        if(${MR_OPT})
+            message(FATAL_ERROR "${MR_OPT} is not available for the Metal "
+                    "backend yet (CUDA only).")
+        endif()
+    endforeach()
+endif()
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
+# Sources shared by every backend.
+set(MR_COMMON_SOURCES
+    src/common/mr_config.cpp
+)
 
-# ----------------------------------------------------------------------------
-# Dependencies
-# ----------------------------------------------------------------------------
+if(MR_AHA_BACKEND STREQUAL "CUDA")
+
+# ============================================================================
+# CUDA backend
+# ============================================================================
 
 find_package(CUDAToolkit REQUIRED)
 
@@ -83,16 +132,13 @@ if(NOT TARGET cufinufft)
     add_subdirectory(finufft EXCLUDE_FROM_ALL)
 endif()
 
-# ----------------------------------------------------------------------------
-# The core library
-# ----------------------------------------------------------------------------
-
 add_library(mr_aha STATIC
-    src/core/mr_config.cu
-    src/core/mr_kernels.cu
-    src/core/mr_aha.cu
-    src/core/mr_calc_toep.cu
-    src/core/mr_calc_mask.cu
+    ${MR_COMMON_SOURCES}
+    src/cuda/mr_backend_cuda.cu
+    src/cuda/mr_kernels.cu
+    src/cuda/mr_aha.cu
+    src/cuda/mr_calc_toep.cu
+    src/cuda/mr_calc_mask.cu
 )
 
 target_include_directories(mr_aha
@@ -100,8 +146,13 @@ target_include_directories(mr_aha
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/common
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda
 )
+
+# Every translation unit that sees mr_aha.h, nvcc-compiled or not, must agree
+# that mr_complex is cuFloatComplex; see the typedef in the header.
+target_compile_definitions(mr_aha PUBLIC MR_AHA_CUDA_COMPLEX)
 
 target_link_libraries(mr_aha
     PUBLIC  CUDA::cudart CUDA::cufft
@@ -113,18 +164,68 @@ set_target_properties(mr_aha PROPERTIES
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 
+set(MR_BACKEND_LINK_LIBRARIES CUDA::cudart CUDA::cufft)
+
+else()
+
+# ============================================================================
+# Metal backend
+# ============================================================================
+
+# VkFFT (header-only) and metal-cpp (header-only, bundled with VkFFT), from the
+# `third_party/VkFFT` submodule. It points to the mikecjz/VkFFT fork, which
+# carries the Metal autorelease fix (see benchmarks/vkfft/README.md).
+set(MR_VKFFT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/VkFFT")
+if(NOT EXISTS "${MR_VKFFT_DIR}/vkFFT/vkFFT.h")
+    message(FATAL_ERROR
+        "The VkFFT submodule is missing. Run:\n"
+        "  git submodule update --init third_party/VkFFT")
+endif()
+
+find_library(MR_METAL_FRAMEWORK Metal REQUIRED)
+find_library(MR_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+find_library(MR_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+set(MR_BACKEND_LINK_LIBRARIES
+    ${MR_METAL_FRAMEWORK} ${MR_FOUNDATION_FRAMEWORK} ${MR_QUARTZCORE_FRAMEWORK})
+
+add_library(mr_aha STATIC
+    ${MR_COMMON_SOURCES}
+    src/metal/mr_metal_cpp_impl.cpp
+    src/metal/mr_backend_metal.cpp
+    src/metal/mr_metal_stubs.cpp
+)
+
+target_include_directories(mr_aha
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/common
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/metal
+)
+# SYSTEM: metal-cpp and VkFFT emit hundreds of deprecation warnings that are
+# not ours to fix.
+target_include_directories(mr_aha SYSTEM PRIVATE
+    "${MR_VKFFT_DIR}/metal-cpp"
+    "${MR_VKFFT_DIR}/vkFFT"
+)
+target_compile_definitions(mr_aha PRIVATE VKFFT_BACKEND=5)
+target_link_libraries(mr_aha PUBLIC ${MR_BACKEND_LINK_LIBRARIES})
+
+endif()
+
 # ----------------------------------------------------------------------------
 # Shared library for the Python ctypes binding
 # ----------------------------------------------------------------------------
 
 if(MR_AHA_BUILD_PYTHON)
-    add_library(mr_aha_c SHARED src/core/mr_shared_stub.cu)
+    add_library(mr_aha_c SHARED src/common/mr_shared_stub.cpp)
     target_link_libraries(mr_aha_c PRIVATE
         # Whole-archive so that the extern "C" entry points, which nothing
         # inside the shared object references, survive the link.
         $<LINK_LIBRARY:WHOLE_ARCHIVE,mr_aha>
     )
-    target_link_libraries(mr_aha_c PUBLIC CUDA::cudart CUDA::cufft)
+    target_link_libraries(mr_aha_c PUBLIC ${MR_BACKEND_LINK_LIBRARIES})
     set_target_properties(mr_aha_c PROPERTIES
         OUTPUT_NAME mr_aha_c
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
@@ -132,7 +233,7 @@ if(MR_AHA_BUILD_PYTHON)
 endif()
 
 # ----------------------------------------------------------------------------
-# MATLAB MEX interface
+# MATLAB MEX interface (CUDA backend; the Metal gateways come later)
 # ----------------------------------------------------------------------------
 
 if(MR_AHA_BUILD_MATLAB)
@@ -181,7 +282,7 @@ if(MR_AHA_BUILD_CUFINUFFT_MATLAB AND TARGET cufinufft_mex)
 endif()
 
 # ----------------------------------------------------------------------------
-# Standalone C++ examples
+# Standalone C++ examples (CUDA backend)
 # ----------------------------------------------------------------------------
 
 if(MR_AHA_BUILD_EXAMPLES)
