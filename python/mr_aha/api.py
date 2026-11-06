@@ -479,7 +479,8 @@ def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
     return mask
 
 
-def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None):
+def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
+              nufft: Optional[str] = None):
     """Pre-compute the block-diagonal Toeplitz operator ``phi2_toep``.
 
     Args:
@@ -500,10 +501,16 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None):
             upsampled grid, typically from :func:`calc_mask`. Required when
             ``cfg.is_masked``.
         out: Optional pre-allocated ``complex64`` output of the right size.
+        nufft: Where the type-1 NUFFT runs. ``None`` (default) picks
+            ``'library'`` on the CUDA backend (cufinufft inside the C library,
+            one call) and ``'mlx'`` on the Metal backend (mlx-nufft in Python,
+            then the C library finishes; see :mod:`mr_aha._psf`).
+            ``'finufft'`` uses CPU FINUFFT for the same two-stage path, for
+            validation.
 
     Returns:
-        The ``complex64`` CuPy array ``phi2_toep``, shaped as described by
-        :func:`phi2_toep_shape`.
+        The ``complex64`` array ``phi2_toep`` (CuPy on CUDA, NumPy on Metal),
+        shaped as described by :func:`phi2_toep_shape`.
 
     Raises:
         ValueError: If an array has the wrong size or a mask is missing.
@@ -533,6 +540,16 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None):
         out = xp.empty(shape, dtype=xp.complex64)
     else:
         _check_size(out, expected, "out")
+
+    if nufft is None:
+        nufft = "library" if backend() == "cuda" else "mlx"
+    if nufft != "library":
+        # Validate the pointers' types up front, then run the two stages.
+        _ptr(phi2, "phi2", "complex64")
+        _ptr(traj, "traj", "float32")
+        from ._psf import calc_toep_two_stage  # noqa: PLC0415
+        calc_toep_two_stage(cfg, phi2, traj, mask, out, nufft, xp, _ptr)
+        return out
 
     check(
         lib.mr_calc_toep(

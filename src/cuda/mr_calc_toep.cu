@@ -118,6 +118,46 @@ static int mr_toep_pick_chunk(const mr_config *cfg, int64_t pad_size,
     return MR_SUCCESS;
 }
 
+/**
+ * @brief Geometry of the centred inverse FFT that turns point-spread functions
+ *        into `phi2_toep` (steps 3-4 of ::mr_calc_toep).
+ */
+struct mr_toep_fft_geom {
+    int   rank;   /**< 3 for a 3D trajectory, else 2.                         */
+    int   n[3];   /**< cuFFT extents, slowest first.                          */
+    int   dist;   /**< Elements between consecutive transforms.               */
+    int   per_comp; /**< Transforms per triangular component (Nkz for a stack). */
+    float scale;  /**< 1/prod(M) over the transformed axes.                   */
+    int   s[3];   /**< Centring shifts, 0 on an axis that is not transformed. */
+};
+
+/**
+ * @brief Fill an ::mr_toep_fft_geom from a validated configuration.
+ *
+ * A 3D trajectory transforms every axis of the upsampled grid. For 2D and
+ * stack-of-stars, kz (if any) is already Cartesian, so it is merely another
+ * batch axis and is neither transformed nor shifted.
+ */
+static void mr_toep_geom(const mr_config *cfg, mr_toep_fft_geom *g)
+{
+    const int Mx = cfg->phi2_dim[0], My = cfg->phi2_dim[1], Mz = cfg->phi2_dim[2];
+    if (cfg->traj_type == MR_TRAJ_3D) {
+        g->rank = 3;
+        g->n[0] = Mz; g->n[1] = My; g->n[2] = Mx;
+        g->dist = Mx * My * Mz;
+        g->per_comp = 1;
+        g->scale = 1.0f / (float)((double)Mx * My * Mz);
+        g->s[0] = Mx / 2; g->s[1] = My / 2; g->s[2] = Mz / 2;
+    } else {
+        g->rank = 2;
+        g->n[0] = My; g->n[1] = Mx; g->n[2] = 1;
+        g->dist = Mx * My;
+        g->per_comp = Mz; /* Nkz for a stack, 1 in 2D */
+        g->scale = 1.0f / (float)((double)Mx * My);
+        g->s[0] = Mx / 2; g->s[1] = My / 2; g->s[2] = 0;
+    }
+}
+
 /* Body of ::mr_calc_toep, run with the target device current. Documented in
  * mr_internal.cuh because ::mr_calc_mask_kernel reuses it. */
 int mr_calc_toep_impl(const mr_config *cfg, const mr_complex *d_phi2,
@@ -235,39 +275,20 @@ int mr_calc_toep_impl(const mr_config *cfg, const mr_complex *d_phi2,
     }
 
     /* -- 4. Plan the centred inverse FFT over one chunk --------------------- */
-    int fft_rank, fft_n[3], fft_batch, fft_dist;
-    float scale;
-    if (nufft_dim == 3) {
-        /* Fully 3D: transform every axis of the upsampled grid. */
-        fft_rank  = 3;
-        fft_n[0]  = Mz; fft_n[1] = My; fft_n[2] = Mx;
-        fft_batch = chunk;
-        fft_dist  = (int)pad_size;
-        scale     = 1.0f / (float)((double)Mx * My * Mz);
-    } else {
-        /* 2D and stack-of-stars: kz (if any) is already Cartesian, so it is
-         * merely another batch axis and is neither transformed nor shifted. */
-        fft_rank  = 2;
-        fft_n[0]  = My; fft_n[1] = Mx;
-        fft_batch = (int)((int64_t)Nkz_eff * chunk);
-        fft_dist  = Mx * My;
-        scale     = 1.0f / (float)((double)Mx * My);
-    }
+    mr_toep_fft_geom g;
+    mr_toep_geom(cfg, &g);
     {
         const cufftResult fr =
-            cufftPlanMany(&w.fft, fft_rank, fft_n, NULL, 1, fft_dist, NULL, 1,
-                          fft_dist, CUFFT_C2C, fft_batch);
+            cufftPlanMany(&w.fft, g.rank, g.n, NULL, 1, g.dist, NULL, 1, g.dist,
+                          CUFFT_C2C, (int)((int64_t)g.per_comp * chunk));
         if (fr != CUFFT_SUCCESS) {
             mr_toep_workspace_free(&w);
             MR_FAIL(MR_ERR_CUFFT, "cufftPlanMany failed with code %d", (int)fr);
         }
         if (s != NULL) cufftSetStream(w.fft, s);
     }
-
-    /* Shift amounts: zero on an axis that is not transformed. */
-    const int s0 = Mx / 2;
-    const int s1 = My / 2;
-    const int s2 = (nufft_dim == 3) ? (Mz / 2) : 0;
+    const float scale = g.scale;
+    const int s0 = g.s[0], s1 = g.s[1], s2 = g.s[2];
 
     /* -- 5. Chunk loop ------------------------------------------------------ */
     for (int64_t t0 = 0; t0 < ntri; t0 += chunk) {
@@ -386,6 +407,108 @@ extern "C" int mr_calc_toep(const mr_config *cfg, const mr_complex *d_phi2,
     if (rc == MR_SUCCESS)
         rc = mr_calc_toep_impl(cfg, d_phi2, d_traj, Ntrajs, Nkx, d_mask,
                                d_phi2_toep);
+    if (prev >= 0) cudaSetDevice(prev);
+    return rc;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Two-stage path: finish phi2_toep from external point-spread functions    */
+/* ------------------------------------------------------------------------ */
+
+/** @brief Body of ::mr_calc_toep_from_psf, run with the target device current. */
+static int mr_calc_toep_from_psf_impl(const mr_config *cfg,
+                                      const mr_complex *d_psf, int64_t t0,
+                                      int64_t n_comp, const int64_t *d_mask,
+                                      mr_complex *d_phi2_toep)
+{
+    const int64_t pad_size = mr_pad_size(cfg);
+    const int Mx = cfg->phi2_dim[0], My = cfg->phi2_dim[1], Mz = cfg->phi2_dim[2];
+    cudaStream_t s = (cudaStream_t)cfg->stream;
+    const long long slab = (long long)pad_size * n_comp;
+
+    mr_toep_fft_geom g;
+    mr_toep_geom(cfg, &g);
+
+    mr_complex *d_work = NULL;
+    if (cudaMalloc((void **)&d_work, (size_t)slab * sizeof(mr_complex)) !=
+        cudaSuccess)
+        MR_FAIL(MR_ERR_ALLOC, "failed to allocate %lld scratch elements for "
+                "mr_calc_toep_from_psf", slab);
+    cufftHandle fft = 0;
+    if (cufftPlanMany(&fft, g.rank, g.n, NULL, 1, g.dist, NULL, 1, g.dist,
+                      CUFFT_C2C, (int)((int64_t)g.per_comp * n_comp)) !=
+        CUFFT_SUCCESS) {
+        cudaFree(d_work);
+        MR_FAIL(MR_ERR_CUFFT, "cufftPlanMany failed in mr_calc_toep_from_psf");
+    }
+    if (s != NULL) cufftSetStream(fft, s);
+
+    int rc = MR_SUCCESS;
+    mr_k_to_natural<<<(int)mr_ceil_div(slab, MR_BLOCK), MR_BLOCK, 0, s>>>(
+        d_work, d_psf, Mx, My, Mz, g.s[0], g.s[1], g.s[2], n_comp);
+    if (cudaGetLastError() != cudaSuccess) {
+        rc = MR_ERR_CUDA;
+        mr_set_error("mr_k_to_natural failed to launch in mr_calc_toep_from_psf");
+    }
+    if (rc == MR_SUCCESS &&
+        cufftExecC2C(fft, d_work, d_work, CUFFT_INVERSE) != CUFFT_SUCCESS) {
+        rc = MR_ERR_CUFFT;
+        mr_set_error("cufftExecC2C failed in mr_calc_toep_from_psf");
+    }
+    if (rc == MR_SUCCESS) {
+        if (cfg->is_masked) {
+            const long long total = (long long)cfg->num_masked * n_comp;
+            mr_k_gather_masked_scale<<<(int)mr_ceil_div(total, MR_BLOCK), MR_BLOCK,
+                                       0, s>>>(
+                d_phi2_toep, d_work, d_mask, (long long)cfg->num_masked, Mx, My,
+                Mz, g.s[0], g.s[1], g.s[2], t0, n_comp, g.scale);
+        } else {
+            mr_k_to_centered_scale<<<(int)mr_ceil_div(slab, MR_BLOCK), MR_BLOCK, 0,
+                                     s>>>(d_phi2_toep + pad_size * t0, d_work, Mx,
+                                          My, Mz, g.s[0], g.s[1], g.s[2], n_comp,
+                                          g.scale);
+        }
+        if (cudaGetLastError() != cudaSuccess) {
+            rc = MR_ERR_CUDA;
+            mr_set_error("output kernel failed to launch in mr_calc_toep_from_psf");
+        }
+    }
+    const cudaError_t ce =
+        (s != NULL) ? cudaStreamSynchronize(s) : cudaDeviceSynchronize();
+    if (rc == MR_SUCCESS && ce != cudaSuccess) {
+        rc = MR_ERR_CUDA;
+        mr_set_error("synchronisation failed in mr_calc_toep_from_psf: %s",
+                     cudaGetErrorString(ce));
+    }
+    cufftDestroy(fft);
+    cudaFree(d_work);
+    return rc;
+}
+
+extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
+                                     const mr_complex *d_psf, int64_t t0,
+                                     int64_t n_comp, const int64_t *d_mask,
+                                     mr_complex *d_phi2_toep)
+{
+    mr_clear_error();
+    MR_REQUIRE(cfg != NULL, "mr_calc_toep_from_psf: cfg is NULL");
+    MR_REQUIRE(d_psf != NULL, "mr_calc_toep_from_psf: d_psf is NULL");
+    MR_REQUIRE(d_phi2_toep != NULL, "mr_calc_toep_from_psf: d_phi2_toep is NULL");
+    const int status = mr_config_validate(cfg);
+    if (status != MR_SUCCESS) return status;
+    const int64_t ntri = mr_num_tri(cfg->L);
+    MR_REQUIRE(t0 >= 0 && n_comp >= 1 && t0 + n_comp <= ntri,
+               "mr_calc_toep_from_psf: components [%lld, %lld) outside [0, %lld)",
+               (long long)t0, (long long)(t0 + n_comp), (long long)ntri);
+    if (cfg->is_masked)
+        MR_REQUIRE(d_mask != NULL, "mr_calc_toep_from_psf: d_mask is required "
+                   "when is_masked is set");
+
+    int prev = -1;
+    int rc = mr_toep_push_device(cfg, &prev);
+    if (rc == MR_SUCCESS)
+        rc = mr_calc_toep_from_psf_impl(cfg, d_psf, t0, n_comp, d_mask,
+                                        d_phi2_toep);
     if (prev >= 0) cudaSetDevice(prev);
     return rc;
 }

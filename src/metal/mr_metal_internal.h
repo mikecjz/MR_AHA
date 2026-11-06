@@ -90,6 +90,18 @@ void mr_metal_dispatch_1d(MTL::ComputeCommandEncoder *enc,
                           const MTL::ComputePipelineState *pso, uint64_t n,
                           NS::UInteger tg = 0);
 
+/**
+ * @brief Encode a 2-D dispatch of `nx x ny` threads (`ny` is a batch axis).
+ *
+ * @param enc Encoder with the pipeline and arguments already set.
+ * @param pso The pipeline, for its thread-execution limits.
+ * @param nx  Threads along x (< 2^32), 256 per threadgroup.
+ * @param ny  Threads along y (< 2^32), one per threadgroup row.
+ */
+void mr_metal_dispatch_2d(MTL::ComputeCommandEncoder *enc,
+                          const MTL::ComputePipelineState *pso, uint64_t nx,
+                          uint64_t ny);
+
 /* ------------------------------------------------------------------------ */
 /* Caller arrays as Metal buffers                                           */
 /* ------------------------------------------------------------------------ */

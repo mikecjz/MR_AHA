@@ -144,6 +144,18 @@ void mr_metal_dispatch_1d(MTL::ComputeCommandEncoder *enc,
     enc->dispatchThreads(MTL::Size((NS::UInteger)n, 1, 1), MTL::Size(tg, 1, 1));
 }
 
+void mr_metal_dispatch_2d(MTL::ComputeCommandEncoder *enc,
+                          const MTL::ComputePipelineState *pso, uint64_t nx,
+                          uint64_t ny)
+{
+    if (nx == 0 || ny == 0) return;
+    NS::UInteger tg = 256;
+    if (tg > pso->maxTotalThreadsPerThreadgroup())
+        tg = pso->maxTotalThreadsPerThreadgroup();
+    enc->dispatchThreads(MTL::Size((NS::UInteger)nx, (NS::UInteger)ny, 1),
+                         MTL::Size(tg, 1, 1));
+}
+
 /* ------------------------------------------------------------------------ */
 /* Caller-array views                                                       */
 /* ------------------------------------------------------------------------ */

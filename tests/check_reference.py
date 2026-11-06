@@ -16,7 +16,12 @@ piece by piece while it is being ported:
     the stored ``AhAx_*``. Independent of ``calc_toep`` and ``calc_mask``.
 ``toep``
     :func:`mr_aha.calc_toep` on the stored ``phi2`` and ``traj`` (and stored
-    masks), compared to the stored ``phi2_toep_*``.
+    masks), compared to the stored ``phi2_toep_*``. When ``--nufft`` selects a
+    different NUFFT than the references were made with (the reference uses
+    single-precision cufinufft), the kernels legitimately differ by that
+    NUFFT's error, about 1e-5; the stage then also applies the operator with
+    each new kernel and compares it with the stored ``AhAx_*`` at the ``aha``
+    tolerance, which is the accuracy that matters.
 ``mask``
     :func:`mr_aha.calc_mask_kernel` and :func:`mr_aha.calc_mask` (both
     methods), compared to the stored kernel and masks.
@@ -142,17 +147,31 @@ def check_aha(z, bk: Backend, c: dict, tol: float) -> list:
     return rows
 
 
-def check_toep(z, bk: Backend, c: dict, tol: float) -> list:
-    """Stage ``toep``: recompute every stored ``phi2_toep`` variant."""
+def check_toep(z, bk: Backend, c: dict, tol: float, nufft=None,
+               tol_aha: float = 1e-5) -> list:
+    """Stage ``toep``: recompute every stored ``phi2_toep`` variant.
+
+    ``nufft`` is passed to :func:`mr_aha.calc_toep` (``None`` = backend
+    default, ``'library'`` = the one-shot C path, ``'finufft'`` / ``'mlx'`` =
+    the two-stage path). With an external NUFFT the operator is also applied
+    with each new kernel and compared with the stored ``AhAx_*``.
+    """
     rows = []
+    external = nufft not in (None, "library") or bk.name != "cuda"
     phi2, traj = bk.put(z["phi2"]), bk.put(z["traj"])
+    x, SEs = bk.put(z["x"]), bk.put(z["SEs"])
     for suf, tri, m in variants():
+        mask = None
         if m is None:
-            out = mr_aha.calc_toep(make_cfg(c, triangulation=tri), phi2, traj)
+            cfg = make_cfg(c, triangulation=tri)
         else:
             cfg = make_cfg(c, triangulation=tri, is_masked=True)
-            out = mr_aha.calc_toep(cfg, phi2, traj, mask=bk.put(z[f"mask_{m}"]))
+            mask = bk.put(z[f"mask_{m}"])
+        out = mr_aha.calc_toep(cfg, phi2, traj, mask=mask, nufft=nufft)
         rows.append((f"phi2_toep_{suf}", rel(bk.get(out), z[f"phi2_toep_{suf}"]), tol))
+        if external:
+            aha = bk.get(mr_aha.aha_toeplitz(cfg, x, SEs, out, mask=mask))
+            rows.append((f"AhAx_{suf} (new toep)", rel(aha, z[f"AhAx_{suf}"]), tol_aha))
     return rows
 
 
@@ -184,8 +203,12 @@ def main() -> int:
     ap.add_argument("--cases", nargs="*", help="file stems to check (default all)")
     ap.add_argument("--stages", nargs="+", default=list(STAGES), choices=STAGES)
     ap.add_argument("--tol-aha", type=float, default=1e-5)
-    ap.add_argument("--tol-toep", type=float, default=1e-5)
+    ap.add_argument("--tol-toep", type=float, default=None,
+                    help="default 1e-5 for the library's own NUFFT, 5e-5 "
+                         "for an external one (see the toep stage)")
     ap.add_argument("--tol-kernel", type=float, default=1e-5)
+    ap.add_argument("--nufft", default=None, choices=["library", "mlx", "finufft"],
+                    help="NUFFT engine of the toep stage (default: backend's)")
     args = ap.parse_args()
 
     bk = Backend()
@@ -205,7 +228,9 @@ def main() -> int:
         if "aha" in args.stages:
             rows += check_aha(z, bk, c, args.tol_aha)
         if "toep" in args.stages:
-            rows += check_toep(z, bk, c, args.tol_toep)
+            ext = args.nufft not in (None, "library") or bk.name != "cuda"
+            tol_toep = args.tol_toep or (5e-5 if ext else 1e-5)
+            rows += check_toep(z, bk, c, tol_toep, args.nufft, args.tol_aha)
         if "mask" in args.stages and "mask_kernel" in z.files:
             rows += check_mask(z, bk, c, args.tol_kernel)
         bad = [r for r in rows if not r[1] <= r[2]]

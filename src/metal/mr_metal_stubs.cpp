@@ -5,7 +5,9 @@
  * Each function validates its arguments like the CUDA backend, confirms that a
  * Metal device is available, and returns ::MR_ERR_UNSUPPORTED. They are
  * replaced one by one as the Metal port progresses: the operator is in
- * `mr_aha_metal.cpp`; ::mr_calc_toep and the mask functions remain here.
+ * `mr_aha_metal.cpp`, the second stage of the Toeplitz pre-computation in
+ * `mr_calc_toep_metal.cpp`. ::mr_calc_toep itself stays unsupported (it needs
+ * a NUFFT inside the library); the mask functions remain here for now.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */
@@ -40,7 +42,12 @@ extern "C" int mr_calc_toep(const mr_config *cfg, const mr_complex *d_phi2,
     mr_clear_error();
     const int status = mr_config_validate(cfg);
     if (status != MR_SUCCESS) return status;
-    return mr_metal_not_yet("mr_calc_toep");
+    /* There is no C/C++ NUFFT for Apple GPUs to call here: the type-1 NUFFT
+     * runs in Python (mlx-nufft) and mr_calc_toep_from_psf does the rest. */
+    MR_FAIL(MR_ERR_UNSUPPORTED, "mr_calc_toep is not available on the Metal "
+            "backend: compute the type-1 NUFFT outside the library (Python's "
+            "mr_aha.calc_toep does it with mlx-nufft) and finish with "
+            "mr_calc_toep_from_psf");
 }
 
 extern "C" int mr_calc_mask_kernel(const mr_config *cfg, const float *d_traj,

@@ -299,3 +299,97 @@ kernel void mr_k_zero(device float2 *p     [[buffer(0)]],
     if ((long)tid >= n) return;
     for (int l = 0; l < count; ++l) p[(ulong)tid + (ulong)n * l] = float2(0.0f);
 }
+
+/* ------------------------------------------------------------------------ */
+/* calc_toep kernels (stage 2: point-spread function -> phi2_toep)          */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * @brief Extents and per-axis centring shifts of a reorder kernel.
+ *
+ * A shift of 0 leaves that axis untouched, which is how the kz axis of a
+ * stack-of-stars kernel is carried through without a transform.
+ */
+struct mr_reorder {
+    int m[3]; /**< Axis extents `[m0, m1, m2]`.                         */
+    int s[3]; /**< Centre offsets `floor(m/2)`, or 0 to skip that axis. */
+};
+
+/**
+ * @brief Batch of volumes from centred to natural (FFT) order.
+ *
+ * Grid: `(m0*m1*m2, batch)`, one thread per element. Port of
+ * `mr_k_to_natural`.
+ */
+kernel void mr_k_to_natural(device float2       *dst [[buffer(0)]],
+                            device const float2 *src [[buffer(1)]],
+                            constant mr_reorder &r   [[buffer(2)]],
+                            uint2 gid [[thread_position_in_grid]])
+{
+    const uint vol = (uint)r.m[0] * (uint)r.m[1] * (uint)r.m[2];
+    if (gid.x >= vol) return;
+    const uint3 jc = mr_decompose3(gid.x, (uint)r.m[0], (uint)r.m[1]);
+    ulong src_idx = 0, stride = 1;
+    for (int a = 0; a < 3; ++a) {
+        int k = (int)jc[a] + r.s[a];
+        if (k >= r.m[a]) k -= r.m[a];
+        src_idx += (ulong)k * stride;
+        stride *= (ulong)r.m[a];
+    }
+    const ulong base = (ulong)gid.y * vol;
+    dst[base + gid.x] = src[base + src_idx];
+}
+
+/**
+ * @brief Batch of volumes from natural to centred order, scaled.
+ *
+ * Grid: `(m0*m1*m2, batch)`. Port of `mr_k_to_centered_scale`.
+ */
+kernel void mr_k_to_centered_scale(device float2       *dst   [[buffer(0)]],
+                                   device const float2 *src   [[buffer(1)]],
+                                   constant mr_reorder &r     [[buffer(2)]],
+                                   constant float      &scale [[buffer(3)]],
+                                   uint2 gid [[thread_position_in_grid]])
+{
+    const uint vol = (uint)r.m[0] * (uint)r.m[1] * (uint)r.m[2];
+    if (gid.x >= vol) return;
+    const uint3 kc = mr_decompose3(gid.x, (uint)r.m[0], (uint)r.m[1]);
+    ulong src_idx = 0, stride = 1;
+    for (int a = 0; a < 3; ++a) {
+        int j = (int)kc[a] - r.s[a];
+        if (j < 0) j += r.m[a];
+        src_idx += (ulong)j * stride;
+        stride *= (ulong)r.m[a];
+    }
+    const ulong base = (ulong)gid.y * vol;
+    dst[base + gid.x] = src[base + src_idx] * scale;
+}
+
+/**
+ * @brief Gather the masked locations of a natural-order batch, scaled, into
+ *        columns `[t0, t0 + batch)` of the `[num_masked, ntri]` output.
+ *
+ * Grid: `(num_masked, batch)`. Port of `mr_k_gather_masked_scale`.
+ */
+kernel void mr_k_gather_masked_scale(device float2       *dst        [[buffer(0)]],
+                                     device const float2 *src        [[buffer(1)]],
+                                     device const long   *mask       [[buffer(2)]],
+                                     constant long       &num_masked [[buffer(3)]],
+                                     constant mr_reorder &r          [[buffer(4)]],
+                                     constant long       &t0         [[buffer(5)]],
+                                     constant float      &scale      [[buffer(6)]],
+                                     uint2 gid [[thread_position_in_grid]])
+{
+    if ((long)gid.x >= num_masked) return;
+    const uint3 kc = mr_decompose3((uint)mask[gid.x], (uint)r.m[0], (uint)r.m[1]);
+    ulong src_idx = 0, stride = 1;
+    for (int a = 0; a < 3; ++a) {
+        int j = (int)kc[a] - r.s[a];
+        if (j < 0) j += r.m[a];
+        src_idx += (ulong)j * stride;
+        stride *= (ulong)r.m[a];
+    }
+    const ulong vol = stride;
+    dst[(ulong)gid.x + (ulong)num_masked * ((ulong)t0 + gid.y)] =
+        src[(ulong)gid.y * vol + src_idx] * scale;
+}

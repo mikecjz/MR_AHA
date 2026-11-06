@@ -545,6 +545,54 @@ MR_EXPORT int mr_calc_toep(const mr_config  *cfg,
                            const int64_t    *d_mask,
                            mr_complex       *d_phi2_toep);
 
+/**
+ * @brief Finish `phi2_toep` from externally computed point-spread functions.
+ *
+ * Steps 3 and 4 of ::mr_calc_toep (centred inverse FFT with the
+ * @f$1/\prod M@f$ scaling, then the optional mask gather) for a batch of
+ * triangular components whose type-1 NUFFT (step 2) was computed outside the
+ * library. This is how the Metal backend builds `phi2_toep`: the type-1 NUFFT
+ * runs in Python through mlx-nufft (`mr_aha.calc_toep`), and this function
+ * does the rest on the GPU. Both backends implement it, so the two-stage path
+ * can be validated against the one-shot ::mr_calc_toep on CUDA as well.
+ *
+ * Component @f$t@f$ of the point-spread function is the type-1 NUFFT, with
+ * sign @f$-1@f$, centred (CMCL, `modeord = 0`) mode order and modes
+ * `phi2_dim`, of the strengths obtained by broadcasting stored triangular
+ * element @f$t@f$ (see ::mr_triangulation) of every trajectory's Gram block
+ * along its readout:
+ * @f[
+ *   \mathrm{psf}_t[\mathbf{k}] = \sum_{m} c_{t,m}\, e^{-i \mathbf{k}\cdot
+ *   \mathbf{x}_m}, \qquad \mathbf{k} \in \textstyle\prod_d
+ *   [-\lfloor M_d/2 \rfloor, \lceil M_d/2 \rceil).
+ * @f]
+ * For ::MR_TRAJ_STACK the transform is two-dimensional and repeated for every
+ * kz encode, giving one `[Mx, My]` plane per kz.
+ *
+ * @param[in]  cfg         Validated configuration of the full operator
+ *                         (::mr_config::is_masked and ::mr_config::num_masked
+ *                         describe @p d_phi2_toep).
+ * @param[in]  d_psf       @p n_comp consecutive point-spread functions, each
+ *                         `[Mx, My, Mz]` in centred order (`Mz` = kz planes for
+ *                         a stack, 1 in 2D): `[Mx, My, Mz, n_comp]`. Not
+ *                         modified.
+ * @param[in]  t0          Index of the first component, `0 <= t0`.
+ * @param[in]  n_comp      Number of components, `t0 + n_comp <= (L^2+L)/2`.
+ * @param[in]  d_mask      Mask of ::mr_config::num_masked indices, or NULL
+ *                         when ::mr_config::is_masked is zero.
+ * @param[out] d_phi2_toep The **whole** output array of ::mr_calc_toep;
+ *                         components `[t0, t0 + n_comp)` are written, the
+ *                         others are left untouched, so the components can be
+ *                         produced in any number of calls.
+ * @return ::MR_SUCCESS or a negative ::mr_status.
+ */
+MR_EXPORT int mr_calc_toep_from_psf(const mr_config  *cfg,
+                                    const mr_complex *d_psf,
+                                    int64_t           t0,
+                                    int64_t           n_comp,
+                                    const int64_t    *d_mask,
+                                    mr_complex       *d_phi2_toep);
+
 /* ------------------------------------------------------------------------ */
 /* Automatic k-space mask                                                   */
 /* ------------------------------------------------------------------------ */

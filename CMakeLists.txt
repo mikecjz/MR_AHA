@@ -257,6 +257,7 @@ add_library(mr_aha STATIC
     src/metal/mr_metal_runtime.cpp
     src/metal/mr_metal_fft.cpp
     src/metal/mr_aha_metal.cpp
+    src/metal/mr_calc_toep_metal.cpp
     src/metal/mr_metal_stubs.cpp
     "${MR_METAL_GEN}/mr_metal_source.cpp"
     "${MR_METAL_GEN}/mr_metal_metallib.cpp"
