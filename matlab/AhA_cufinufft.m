@@ -73,10 +73,12 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
     nvox    = prod(img);
     stack   = strcmp(plan.traj_type, 'stack');
 
-    x    = reshape(single(x), [img, L]);
+    % Host inputs are moved to the GPU (cufinufft's MATLAB interface accepts
+    % gpuArrays only), as AHA_TOEPLITZ does.
+    x    = reshape(gpuArray(single(x)), [img, L]);
     nc   = numel(SEs) / nvox;
-    SEs  = reshape(single(SEs), [nvox, nc]);
-    phi2 = single(phi2);
+    SEs  = reshape(gpuArray(single(SEs)), [nvox, nc]);
+    phi2 = gpuArray(single(phi2));
 
     % Rearrange the Gram blocks once into pages of Phi.' so that
     % pagemtimes(k_page, P_page) = k_page * Phi.' = (Phi * k_page.').'.
