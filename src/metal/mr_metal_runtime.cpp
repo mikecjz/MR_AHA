@@ -163,16 +163,24 @@ int mr_metal_view_make(const mr_metal_ctx *ctx, const void *ptr, size_t bytes,
 
     /* Wrap the page-aligned span containing the array: Metal requires a
      * page-aligned pointer and length for no-copy buffers, and every page
-     * overlapping the caller's array is mapped. */
-    const uintptr_t page = (uintptr_t)getpagesize();
-    const uintptr_t addr = (uintptr_t)ptr;
-    const uintptr_t base = addr & ~(page - 1);
-    const uintptr_t end = (addr + bytes + page - 1) & ~(page - 1);
-    v->buf = ctx->device->newBuffer((const void *)base, (NS::UInteger)(end - base),
-                                    MTL::ResourceStorageModeShared, nullptr);
-    if (v->buf) {
-        v->offset = (NS::UInteger)(addr - base);
-        return MR_SUCCESS;
+     * overlapping the caller's array is mapped. MR_AHA_METAL_FORCE_COPY=1
+     * skips the wrap so that the copy fallback below can be tested. */
+    static const bool force_copy = [] {
+        const char *e = std::getenv("MR_AHA_METAL_FORCE_COPY");
+        return e && e[0] && e[0] != '0';
+    }();
+    if (!force_copy) {
+        const uintptr_t page = (uintptr_t)getpagesize();
+        const uintptr_t addr = (uintptr_t)ptr;
+        const uintptr_t base = addr & ~(page - 1);
+        const uintptr_t end = (addr + bytes + page - 1) & ~(page - 1);
+        v->buf = ctx->device->newBuffer((const void *)base,
+                                        (NS::UInteger)(end - base),
+                                        MTL::ResourceStorageModeShared, nullptr);
+        if (v->buf) {
+            v->offset = (NS::UInteger)(addr - base);
+            return MR_SUCCESS;
+        }
     }
 
     /* Fallback: a shared copy. */

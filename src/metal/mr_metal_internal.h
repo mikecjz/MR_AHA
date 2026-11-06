@@ -101,7 +101,8 @@ void mr_metal_dispatch_1d(MTL::ComputeCommandEncoder *enc,
  * in place (`newBuffer(bytesNoCopy)`) over the page-aligned span that
  * contains it, and bound at @ref offset. Only if Metal refuses the wrap is
  * the array copied into a shared buffer (and, for outputs, copied back by
- * ::mr_metal_view_finish).
+ * ::mr_metal_view_finish). The environment variable
+ * `MR_AHA_METAL_FORCE_COPY=1` forces the copy path, for testing.
  */
 struct mr_metal_view {
     MTL::Buffer  *buf       = nullptr; /**< Buffer to bind (owned).            */
