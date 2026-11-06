@@ -1,0 +1,70 @@
+{
+  "info": {
+    "gpu": "NVIDIA TITAN RTX",
+    "cupy": "14.2.0",
+    "cuda_runtime": 12090,
+    "cufft": 11300,
+    "reps": 20,
+    "note": "in-place C2C complex64, unnormalised inverse, plan reused; median of CUDA-event timings after 3 warm-up calls"
+  },
+  "results": [
+    {
+      "case": "2d",
+      "grid_colmajor": [
+        320,
+        320
+      ],
+      "batch": 6,
+      "rowmajor_shape": [
+        6,
+        320,
+        320
+      ],
+      "bytes": 4915200,
+      "forward_ms": 0.043007999658584595,
+      "inverse_ms": 0.043007999658584595,
+      "fwd_inv_ms": 0.08344000205397606,
+      "roundtrip_rel_err": 3.8339081243066175e-07
+    },
+    {
+      "case": "stack",
+      "grid_colmajor": [
+        640,
+        640,
+        56
+      ],
+      "batch": 12,
+      "rowmajor_shape": [
+        12,
+        56,
+        640,
+        640
+      ],
+      "bytes": 2202009600,
+      "forward_ms": 27.11736011505127,
+      "inverse_ms": 27.08830451965332,
+      "fwd_inv_ms": 54.14236640930176,
+      "roundtrip_rel_err": 4.042929049319355e-07
+    },
+    {
+      "case": "3d",
+      "grid_colmajor": [
+        320,
+        320,
+        320
+      ],
+      "batch": 12,
+      "rowmajor_shape": [
+        12,
+        320,
+        320,
+        320
+      ],
+      "bytes": 3145728000,
+      "forward_ms": 39.09006309509277,
+      "inverse_ms": 39.100751876831055,
+      "fwd_inv_ms": 78.1785888671875,
+      "roundtrip_rel_err": 4.875248009739153e-07
+    }
+  ]
+}

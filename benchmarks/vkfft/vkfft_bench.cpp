@@ -122,6 +122,12 @@ double median(std::vector<double> v)
 double run(VkFFTApplication *app, MTL::CommandQueue *queue, MTL::Buffer *buf,
            const std::vector<int> &directions)
 {
+    /* The command buffer and encoder are autoreleased: drain them per run so
+     * that they neither pile up over the iterations nor outlive the queue. */
+    struct Pool {
+        NS::AutoreleasePool *p = NS::AutoreleasePool::alloc()->init();
+        ~Pool() { p->release(); }
+    } pool;
     MTL::CommandBuffer *cb = queue->commandBuffer();
     MTL::ComputeCommandEncoder *enc = cb->computeCommandEncoder();
     VkFFTLaunchParams lp = {};
@@ -151,6 +157,8 @@ double run(VkFFTApplication *app, MTL::CommandQueue *queue, MTL::Buffer *buf,
 
 int main(int argc, char **argv)
 {
+    /* Unbuffered, so progress survives a crash when stdout is a pipe. */
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     const Options opt = parse(argc, argv);
     NS::AutoreleasePool *pool = NS::AutoreleasePool::alloc()->init();
 
@@ -251,6 +259,12 @@ int main(int argc, char **argv)
     buf->release();
     queue->release();
     dev->release();
-    pool->release();
+    /* The outer pool is deliberately NOT drained. VkFFT v1.3.4's Metal
+     * backend calls release() on autoreleased objects it creates in
+     * initializeVkFFT (NS::String::string, commandBuffer(), encoders), so
+     * draining the pool that was active during initialisation double-frees
+     * them (upstream issue DTolm/VkFFT#226, unmerged fix PR #227). The
+     * process exits right after, so leaking the pool is harmless here. */
+    (void)pool;
     return 0;
 }
