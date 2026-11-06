@@ -309,16 +309,46 @@ static inline void mr_block_apply(thread const float2 (&v)[L], thread float2 (&y
 }
 
 /**
+ * @brief ::mr_block_apply for two coils at once: every stored element is
+ *        loaded once and applied to both coils' vectors, so a coil pair costs
+ *        one read of `phi2_toep` from memory (or cache) instead of two.
+ */
+template <int L>
+static inline void mr_block_apply2(thread const float2 (&v0)[L],
+                                   thread const float2 (&v1)[L],
+                                   thread float2 (&y0)[L], thread float2 (&y1)[L],
+                                   device const float2 *base, ulong stride,
+                                   bool upper)
+{
+    for (int i = 0; i < L; ++i) { y0[i] = float2(0.0f); y1[i] = float2(0.0f); }
+    ulong off = 0;
+    for (int c = 0; c < L; ++c) {
+        const int r0 = upper ? 0 : c;
+        const int r1 = upper ? c : L - 1;
+        for (int r = r0; r <= r1; ++r, off += stride) {
+            const float2 a = base[off];
+            y0[r] += mr_cmul(a, v0[c]);
+            y1[r] += mr_cmul(a, v1[c]);
+            if (r != c) {
+                y0[c] += mr_cmul_conj(a, v0[r]);
+                y1[c] += mr_cmul_conj(a, v1[r]);
+            }
+        }
+    }
+}
+
+/**
  * @brief In-place block-diagonal multiplication over the whole grid,
  *        specialised on L (host names `mr_k_bd_dense_<L>`, L = 1..32).
  *
  * Same contract as ::mr_k_blockdiag_dense, without threadgroup memory, and
  * applied to @p ncoil coils whose `[Mx, My, Mz, L]` grids follow one another
  * in @p pad (`slot` = `L * Mx*My*Mz` elements apart). The coils of a group
- * are processed back to back by the same thread, so the kernel values it
- * reads for the first coil are still in the GPU's caches for the others:
- * `phi2_toep`, the dominant memory traffic, is fetched from DRAM about once
- * per group instead of once per coil.
+ * are processed by the same thread, two at a time (::mr_block_apply2 loads
+ * each `phi2_toep` value once for a coil pair), and the values it reads for
+ * one pair are still in the GPU's caches for the next: `phi2_toep`, the
+ * dominant memory traffic, is fetched from DRAM about once per group instead
+ * of once per coil.
  */
 template <int L>
 kernel void mr_k_bd_dense(device float2       *pad   [[buffer(0)]],
@@ -336,7 +366,16 @@ kernel void mr_k_bd_dense(device float2       *pad   [[buffer(0)]],
     const ulong padn = (ulong)d.pad_size;
     const ulong slot = padn * (ulong)L;
 
-    for (int s = 0; s < ncoil; ++s) {
+    int s = 0;
+    for (; s + 1 < ncoil; s += 2) {          /* coil pairs: one toep read */
+        device float2 *g0 = pad + slot * (ulong)s + (ulong)tid;
+        device float2 *g1 = g0 + slot;
+        float2 v0[L], v1[L], y0[L], y1[L];
+        for (int l = 0; l < L; ++l) { v0[l] = g0[padn * l]; v1[l] = g1[padn * l]; }
+        mr_block_apply2<L>(v0, v1, y0, y1, toep + pc, padn, d.tri_upper != 0);
+        for (int l = 0; l < L; ++l) { g0[padn * l] = y0[l]; g1[padn * l] = y1[l]; }
+    }
+    if (s < ncoil) {                          /* odd coil out */
         device float2 *g = pad + slot * (ulong)s + (ulong)tid;
         float2 v[L], y[L];
         for (int l = 0; l < L; ++l) v[l] = g[padn * l];
@@ -365,9 +404,21 @@ kernel void mr_k_bd_masked(device float2       *compact    [[buffer(0)]],
     const ulong jj = mr_mask_to_natural(mask[tid], d);
     const ulong padn = (ulong)d.pad_size, nm = (ulong)num_masked;
 
-    for (int s = 0; s < ncoil; ++s) {
-        device const float2 *g = pad + padn * (ulong)L * (ulong)s + jj;
-        device float2 *o = compact + nm * (ulong)L * (ulong)s + (ulong)tid;
+    const ulong gslot = padn * (ulong)L, cslot = nm * (ulong)L;
+    int s = 0;
+    for (; s + 1 < ncoil; s += 2) {          /* coil pairs: one toep read */
+        device const float2 *g0 = pad + gslot * (ulong)s + jj;
+        device const float2 *g1 = g0 + gslot;
+        device float2 *o0 = compact + cslot * (ulong)s + (ulong)tid;
+        device float2 *o1 = o0 + cslot;
+        float2 v0[L], v1[L], y0[L], y1[L];
+        for (int l = 0; l < L; ++l) { v0[l] = g0[padn * l]; v1[l] = g1[padn * l]; }
+        mr_block_apply2<L>(v0, v1, y0, y1, toep + tid, nm, d.tri_upper != 0);
+        for (int l = 0; l < L; ++l) { o0[nm * l] = y0[l]; o1[nm * l] = y1[l]; }
+    }
+    if (s < ncoil) {                          /* odd coil out */
+        device const float2 *g = pad + gslot * (ulong)s + jj;
+        device float2 *o = compact + cslot * (ulong)s + (ulong)tid;
         float2 v[L], y[L];
         for (int l = 0; l < L; ++l) v[l] = g[padn * l];
         mr_block_apply<L>(v, y, toep + tid, nm, d.tri_upper != 0);
