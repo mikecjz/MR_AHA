@@ -28,6 +28,7 @@
 #include "mr_metal_internal.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <new>
 #include <vector>
 
@@ -36,6 +37,10 @@ static_assert(sizeof(mr_dims) == 80,
 
 /** @brief Default threads per threadgroup for the block-diagonal kernels. */
 #define MR_METAL_BD_THREADS 256
+
+/** @brief Largest L with a specialised block-diagonal kernel (see
+ *         `mr_k_bd_dense<L>` in mr_kernels.metal). */
+#define MR_METAL_BD_MAX_L 32
 
 /** @brief Internal state of a reusable Metal @f$A^H A@f$ plan. */
 struct mr_aha_plan_s {
@@ -144,17 +149,34 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
         }
     }
 
-    /* Pipelines. */
+    /* Pipelines. The block-diagonal stage uses the kernels specialised on L
+     * (register vectors, each stored element read once) for L <= 32, and the
+     * generic threadgroup-memory kernels otherwise or when
+     * MR_AHA_METAL_GENERIC_BD=1 (kept for comparison). */
+    const char *gen = std::getenv("MR_AHA_METAL_GENERIC_BD");
+    const bool specialised =
+        cfg->L <= MR_METAL_BD_MAX_L && !(gen && gen[0] && gen[0] != '0');
+    char bd_name[64];
+    if (specialised)
+        snprintf(bd_name, sizeof(bd_name), "%s%d",
+                 cfg->is_masked ? "mr_k_bd_masked_" : "mr_k_bd_dense_", cfg->L);
+    else
+        snprintf(bd_name, sizeof(bd_name), "%s",
+                 cfg->is_masked ? "mr_k_blockdiag_masked" : "mr_k_blockdiag_dense");
     if ((rc = mr_metal_pipeline("mr_k_pad_mul_se", &p->k_pad)) != MR_SUCCESS ||
         (rc = mr_metal_pipeline("mr_k_crop_mul_conj_se", &p->k_crop)) != MR_SUCCESS ||
-        (rc = mr_metal_pipeline(cfg->is_masked ? "mr_k_blockdiag_masked"
-                                               : "mr_k_blockdiag_dense",
-                                &p->k_bd)) != MR_SUCCESS ||
+        (rc = mr_metal_pipeline(bd_name, &p->k_bd)) != MR_SUCCESS ||
         (cfg->is_masked &&
          ((rc = mr_metal_pipeline("mr_k_scatter_masked", &p->k_scatter)) != MR_SUCCESS ||
-          (rc = mr_metal_pipeline("mr_k_zero", &p->k_zero)) != MR_SUCCESS)) ||
-        (rc = mr_pick_bd(ctx, p->k_bd, cfg->L, &p->bd_threads, &p->bd_tgmem)) !=
-            MR_SUCCESS) {
+          (rc = mr_metal_pipeline("mr_k_zero", &p->k_zero)) != MR_SUCCESS))) {
+        mr_plan_free(p);
+        return rc;
+    }
+    if (specialised) {
+        p->bd_threads = 0; /* default threadgroup size, no threadgroup memory */
+        p->bd_tgmem = 0;
+    } else if ((rc = mr_pick_bd(ctx, p->k_bd, cfg->L, &p->bd_threads,
+                                &p->bd_tgmem)) != MR_SUCCESS) {
         mr_plan_free(p);
         return rc;
     }
@@ -182,16 +204,56 @@ extern "C" int mr_aha_plan_destroy(mr_aha_plan plan)
 /* Execution                                                                */
 /* ------------------------------------------------------------------------ */
 
+/** @brief Number of profiled stages of one coil (see ::mr_stage_names). */
+#define MR_N_STAGES 5
+
+/** @brief Names of the profiled stages, in execution order. */
+static const char *const mr_stage_names[MR_N_STAGES] = {
+    "pad * S_c", "forward FFT", "block-diagonal", "inverse FFT",
+    "crop * conj(S_c)"};
+
+/**
+ * @brief Optional per-stage GPU timing (`MR_AHA_METAL_PROFILE=1`).
+ *
+ * When enabled, every stage of every coil is closed into its own command
+ * buffer, run to completion and timed from the command buffer's GPU
+ * timestamps, which serialises the work (the totals are therefore slightly
+ * above the normal run time). Disabled, it costs nothing.
+ */
+struct mr_profile {
+    bool   on = false;               /**< Profiling requested.             */
+    const mr_metal_ctx *ctx = nullptr; /**< For new command buffers.        */
+    double ms[MR_N_STAGES] = {0};    /**< Accumulated GPU time per stage.   */
+};
+
+/**
+ * @brief Close stage @p k when profiling: run it, time it, reopen @p cb/@p enc.
+ * @return ::MR_SUCCESS or ::MR_ERR_METAL.
+ */
+static int mr_stage_end(mr_profile *prof, int k, MTL::CommandBuffer *&cb,
+                        MTL::ComputeCommandEncoder *&enc)
+{
+    if (!prof || !prof->on) return MR_SUCCESS;
+    enc->endEncoding();
+    const int rc = mr_metal_wait(cb, "mr_aha_plan_execute (profiled)");
+    if (rc != MR_SUCCESS) return rc;
+    prof->ms[k] += (cb->GPUEndTime() - cb->GPUStartTime()) * 1e3;
+    cb = prof->ctx->queue->commandBuffer();
+    enc = cb->computeCommandEncoder();
+    return MR_SUCCESS;
+}
+
 /**
  * @brief Encode the whole operator for one coil into @p enc.
  *
- * Buffer indices follow the kernel signatures in `mr_kernels.metal`.
+ * Buffer indices follow the kernel signatures in `mr_kernels.metal`. With
+ * profiling on, @p cb and @p enc are replaced at every stage boundary.
  */
-static int mr_encode_coil(mr_aha_plan p, MTL::CommandBuffer *cb,
-                          MTL::ComputeCommandEncoder *enc, int coil,
+static int mr_encode_coil(mr_aha_plan p, MTL::CommandBuffer *&cb,
+                          MTL::ComputeCommandEncoder *&enc, int coil,
                           const mr_metal_view &x, const mr_metal_view &se,
                           const mr_metal_view &toep, const mr_metal_view &mask,
-                          const mr_metal_view &out)
+                          const mr_metal_view &out, mr_profile *prof)
 {
     const mr_dims &d = p->dims;
     const int accumulate = coil > 0 ? 1 : 0;
@@ -204,10 +266,13 @@ static int mr_encode_coil(mr_aha_plan p, MTL::CommandBuffer *cb,
     enc->setBytes(&d, sizeof(d), 3);
     enc->setBytes(&coil, sizeof(coil), 4);
     mr_metal_dispatch_1d(enc, p->k_pad, (uint64_t)d.pad_size);
+    int rc = mr_stage_end(prof, 0, cb, enc);
+    if (rc != MR_SUCCESS) return rc;
 
     /* 2. Forward FFT onto the upsampled Cartesian k-space grid. */
-    int rc = mr_metal_fft_encode(p->fft, cb, enc, p->pad, false);
+    rc = mr_metal_fft_encode(p->fft, cb, enc, p->pad, false);
     if (rc != MR_SUCCESS) return rc;
+    if ((rc = mr_stage_end(prof, 1, cb, enc)) != MR_SUCCESS) return rc;
 
     /* 3. Hermitian block-diagonal multiplication. */
     if (p->cfg.is_masked) {
@@ -219,7 +284,7 @@ static int mr_encode_coil(mr_aha_plan p, MTL::CommandBuffer *cb,
         mr_metal_bind(enc, mask, 3);
         enc->setBytes(&nm, sizeof(nm), 4);
         enc->setBytes(&d, sizeof(d), 5);
-        enc->setThreadgroupMemoryLength(p->bd_tgmem, 0);
+        if (p->bd_tgmem) enc->setThreadgroupMemoryLength(p->bd_tgmem, 0);
         mr_metal_dispatch_1d(enc, p->k_bd, (uint64_t)nm, p->bd_threads);
 
         /* Samples outside the mask contribute nothing. */
@@ -243,13 +308,16 @@ static int mr_encode_coil(mr_aha_plan p, MTL::CommandBuffer *cb,
         enc->setBuffer(p->pad, 0, 0);
         mr_metal_bind(enc, toep, 1);
         enc->setBytes(&d, sizeof(d), 2);
-        enc->setThreadgroupMemoryLength(p->bd_tgmem, 0);
+        if (p->bd_tgmem) enc->setThreadgroupMemoryLength(p->bd_tgmem, 0);
         mr_metal_dispatch_1d(enc, p->k_bd, (uint64_t)d.pad_size, p->bd_threads);
     }
+
+    if ((rc = mr_stage_end(prof, 2, cb, enc)) != MR_SUCCESS) return rc;
 
     /* 4. Inverse FFT back to the padded image domain. */
     rc = mr_metal_fft_encode(p->fft, cb, enc, p->pad, true);
     if (rc != MR_SUCCESS) return rc;
+    if ((rc = mr_stage_end(prof, 3, cb, enc)) != MR_SUCCESS) return rc;
 
     /* 5. Crop, apply the adjoint sensitivity and accumulate over coils. */
     enc->setComputePipelineState(p->k_crop);
@@ -260,7 +328,7 @@ static int mr_encode_coil(mr_aha_plan p, MTL::CommandBuffer *cb,
     enc->setBytes(&coil, sizeof(coil), 4);
     enc->setBytes(&accumulate, sizeof(accumulate), 5);
     mr_metal_dispatch_1d(enc, p->k_crop, (uint64_t)d.image_size);
-    return MR_SUCCESS;
+    return mr_stage_end(prof, 4, cb, enc);
 }
 
 extern "C" int mr_aha_plan_execute(mr_aha_plan plan, const mr_complex *d_x,
@@ -297,12 +365,18 @@ extern "C" int mr_aha_plan_execute(mr_aha_plan plan, const mr_complex *d_x,
         return rc;
 
     /* One command buffer per coil, committed in order; wait for all. */
+    mr_profile prof;
+    {
+        const char *e = std::getenv("MR_AHA_METAL_PROFILE");
+        prof.on = e && e[0] && e[0] != '0';
+        prof.ctx = ctx;
+    }
     std::vector<MTL::CommandBuffer *> cbs;
     cbs.reserve((size_t)cfg->n_coils);
     for (int coil = 0; coil < cfg->n_coils; ++coil) {
         MTL::CommandBuffer *cb = ctx->queue->commandBuffer();
         MTL::ComputeCommandEncoder *enc = cb->computeCommandEncoder();
-        rc = mr_encode_coil(plan, cb, enc, coil, x, se, toep, mask, out);
+        rc = mr_encode_coil(plan, cb, enc, coil, x, se, toep, mask, out, &prof);
         enc->endEncoding();
         if (rc != MR_SUCCESS) break;
         cb->commit();
@@ -319,6 +393,16 @@ extern "C" int mr_aha_plan_execute(mr_aha_plan plan, const mr_complex *d_x,
                         : "(no error description)");
     mr_metal_view_finish(&out);
 
+    if (prof.on) {
+        double total = 0.0;
+        for (int k = 0; k < MR_N_STAGES; ++k) total += prof.ms[k];
+        fprintf(stderr, "[mr_aha] Metal profile, %d coil(s), %s:\n", cfg->n_coils,
+                cfg->is_masked ? "masked" : "unmasked");
+        for (int k = 0; k < MR_N_STAGES; ++k)
+            fprintf(stderr, "[mr_aha]   %-18s %9.2f ms  (%4.1f%%)\n",
+                    mr_stage_names[k], prof.ms[k], 100.0 * prof.ms[k] / total);
+        fprintf(stderr, "[mr_aha]   %-18s %9.2f ms\n", "total GPU", total);
+    }
     if (cfg->verbose)
         printf("[mr_aha] AhA applied over %d coil(s), grid [%d %d %d] -> "
                "[%d %d %d], L = %d%s (Metal)\n",

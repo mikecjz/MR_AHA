@@ -268,6 +268,121 @@ kernel void mr_k_blockdiag_masked(device float2       *compact    [[buffer(0)]],
             mr_apply_block_row(v, base, nm, d.L, d.tri_upper, i);
 }
 
+/* ------------------------------------------------------------------------ */
+/* Block-diagonal kernels specialised on L                                  */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * @brief Hermitian block times vector, reading each stored element once.
+ *
+ * Walks the stored triangle in packed order (::mr_triangulation): element
+ * `t` is entry `(r, c)` of the block, and it contributes `A_rc v_c` to `y_r`
+ * and, off the diagonal, `conj(A_rc) v_r` to `y_c` (Hermitian symmetry). The
+ * generic ::mr_apply_block_row instead evaluates every row separately and so
+ * fetches each off-diagonal element twice; this halves the dominant memory
+ * traffic of the block-diagonal stage. With @p L a compile-time constant the
+ * vectors live in registers instead of threadgroup memory.
+ *
+ * @tparam L        Rank.
+ * @param  v        Input vector.
+ * @param  y        Output vector (overwritten).
+ * @param  base     Packed component 0 of this location.
+ * @param  stride   Element stride between consecutive packed components.
+ * @param  upper    Whether the upper triangle is stored.
+ */
+template <int L>
+static inline void mr_block_apply(thread const float2 (&v)[L], thread float2 (&y)[L],
+                                  device const float2 *base, ulong stride,
+                                  bool upper)
+{
+    for (int i = 0; i < L; ++i) y[i] = float2(0.0f);
+    ulong off = 0;
+    for (int c = 0; c < L; ++c) {
+        const int r0 = upper ? 0 : c;
+        const int r1 = upper ? c : L - 1;
+        for (int r = r0; r <= r1; ++r, off += stride) {
+            const float2 a = base[off];
+            y[r] += mr_cmul(a, v[c]);
+            if (r != c) y[c] += mr_cmul_conj(a, v[r]);
+        }
+    }
+}
+
+/**
+ * @brief In-place block-diagonal multiplication over the whole grid,
+ *        specialised on L (host names `mr_k_bd_dense_<L>`, L = 1..32).
+ *
+ * Same contract as ::mr_k_blockdiag_dense, without threadgroup memory.
+ */
+template <int L>
+kernel void mr_k_bd_dense(device float2       *pad  [[buffer(0)]],
+                          device const float2 *toep [[buffer(1)]],
+                          constant mr_dims    &d    [[buffer(2)]],
+                          uint tid [[thread_position_in_grid]])
+{
+    if ((long)tid >= d.pad_size) return;
+    const uint3 jc = mr_decompose3(tid, (uint)d.m[0], (uint)d.m[1]);
+    const ulong k0 = (ulong)mr_nat2cent((int)jc.x, d.m[0], d.c_m[0]);
+    const ulong k1 = (ulong)mr_nat2cent((int)jc.y, d.m[1], d.c_m[1]);
+    const ulong k2 = (ulong)mr_nat2cent((int)jc.z, d.m[2], d.c_m[2]);
+    const ulong pc = k0 + (ulong)d.m[0] * (k1 + (ulong)d.m[1] * k2);
+    const ulong padn = (ulong)d.pad_size;
+
+    float2 v[L], y[L];
+    for (int l = 0; l < L; ++l) v[l] = pad[(ulong)tid + padn * l];
+    mr_block_apply<L>(v, y, toep + pc, padn, d.tri_upper != 0);
+    for (int l = 0; l < L; ++l) pad[(ulong)tid + padn * l] = y[l];
+}
+
+/**
+ * @brief Masked block-diagonal multiplication specialised on L (host names
+ *        `mr_k_bd_masked_<L>`). Same contract as ::mr_k_blockdiag_masked.
+ */
+template <int L>
+kernel void mr_k_bd_masked(device float2       *compact    [[buffer(0)]],
+                           device const float2 *pad        [[buffer(1)]],
+                           device const float2 *toep       [[buffer(2)]],
+                           device const long   *mask       [[buffer(3)]],
+                           constant long       &num_masked [[buffer(4)]],
+                           constant mr_dims    &d          [[buffer(5)]],
+                           uint tid [[thread_position_in_grid]])
+{
+    if ((long)tid >= num_masked) return;
+    const ulong jj = mr_mask_to_natural(mask[tid], d);
+    const ulong padn = (ulong)d.pad_size, nm = (ulong)num_masked;
+
+    float2 v[L], y[L];
+    for (int l = 0; l < L; ++l) v[l] = pad[jj + padn * l];
+    mr_block_apply<L>(v, y, toep + tid, nm, d.tri_upper != 0);
+    for (int l = 0; l < L; ++l) compact[(ulong)tid + nm * l] = y[l];
+}
+
+/* Explicit instantiations, L = 1..32. Larger ranks use the generic
+ * threadgroup-memory kernels above. */
+#define MR_BD_INSTANTIATE(L)                                                     \
+    template [[host_name("mr_k_bd_dense_" #L)]] [[kernel]] void                 \
+    mr_k_bd_dense<L>(device float2 *pad [[buffer(0)]],                           \
+                     device const float2 *toep [[buffer(1)]],                    \
+                     constant mr_dims &d [[buffer(2)]],                          \
+                     uint tid [[thread_position_in_grid]]);                      \
+    template [[host_name("mr_k_bd_masked_" #L)]] [[kernel]] void                \
+    mr_k_bd_masked<L>(device float2 *compact [[buffer(0)]],                      \
+                      device const float2 *pad [[buffer(1)]],                    \
+                      device const float2 *toep [[buffer(2)]],                   \
+                      device const long *mask [[buffer(3)]],                     \
+                      constant long &num_masked [[buffer(4)]],                   \
+                      constant mr_dims &d [[buffer(5)]],                         \
+                      uint tid [[thread_position_in_grid]]);
+MR_BD_INSTANTIATE(1)  MR_BD_INSTANTIATE(2)  MR_BD_INSTANTIATE(3)  MR_BD_INSTANTIATE(4)
+MR_BD_INSTANTIATE(5)  MR_BD_INSTANTIATE(6)  MR_BD_INSTANTIATE(7)  MR_BD_INSTANTIATE(8)
+MR_BD_INSTANTIATE(9)  MR_BD_INSTANTIATE(10) MR_BD_INSTANTIATE(11) MR_BD_INSTANTIATE(12)
+MR_BD_INSTANTIATE(13) MR_BD_INSTANTIATE(14) MR_BD_INSTANTIATE(15) MR_BD_INSTANTIATE(16)
+MR_BD_INSTANTIATE(17) MR_BD_INSTANTIATE(18) MR_BD_INSTANTIATE(19) MR_BD_INSTANTIATE(20)
+MR_BD_INSTANTIATE(21) MR_BD_INSTANTIATE(22) MR_BD_INSTANTIATE(23) MR_BD_INSTANTIATE(24)
+MR_BD_INSTANTIATE(25) MR_BD_INSTANTIATE(26) MR_BD_INSTANTIATE(27) MR_BD_INSTANTIATE(28)
+MR_BD_INSTANTIATE(29) MR_BD_INSTANTIATE(30) MR_BD_INSTANTIATE(31) MR_BD_INSTANTIATE(32)
+#undef MR_BD_INSTANTIATE
+
 /**
  * @brief Scatter the compact masked result back into the (zeroed) padded
  *        grid. Port of `mr_k_scatter_masked`.
