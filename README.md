@@ -4,8 +4,9 @@ GPU evaluation of the forward normal operator $A^H A$ for **non-Cartesian MRI wi
 (subspace / MR-Multitasking) modelling**, via a Toeplitz embedding.
 
 The numerics live in a standalone C++ library with a pure C surface. MATLAB, Python and plain
-C/C++ all call the same code. The library is built for one GPU backend, CUDA (NVIDIA) or Metal
-(Apple silicon, in progress on the `mlx` branch), selected with the CMake option `MR_AHA_BACKEND`:
+C/C++ all call the same code. The library is built for one GPU backend, selected with the CMake
+option `MR_AHA_BACKEND`: **CUDA** (NVIDIA GPUs) or **Metal** (Apple silicon, see
+[Apple silicon](#apple-silicon-metal-backend)):
 
 ```
 include/mr_aha/mr_aha.h   public C API  (extern "C")
@@ -13,7 +14,7 @@ src/common/               backend-independent configuration and error handling
 src/cuda/                 the CUDA backend  ->  libmr_aha
 src/metal/                the Metal backend (Apple silicon)  ->  libmr_aha
 matlab/                   MEX gateways + .m wrappers
-python/                   ctypes binding + CuPy-friendly API
+python/                   ctypes binding + CuPy / NumPy API
 examples/                 standalone C++/CUDA example
 benchmarks/               Toeplitz vs. NUFFT speed / CG benchmarks and results
 tests/                    reference checks of a build against stored CUDA results
@@ -21,8 +22,10 @@ third_party/              VkFFT (Metal FFTs, fork with a Metal fix) and mlx-nuff
 legacy/                   the previous MATLAB-only implementation (reference only)
 ```
 
-Everything runs on the GPU. All array arguments are device pointers (`gpuArray` in MATLAB,
-`cupy.ndarray` in Python); the library never copies bulk data through the host.
+Everything runs on the GPU. With CUDA all array arguments are device pointers (`gpuArray` in
+MATLAB, `cupy.ndarray` in Python) and the library never copies bulk data through the host. With
+Metal they are ordinary host arrays (MATLAB arrays, `numpy.ndarray`), which the Apple GPU reads in
+place through unified memory.
 
 ---
 
@@ -36,7 +39,8 @@ Everything runs on the GPU. All array arguments are device pointers (`gpuArray` 
 6. [C / C++](#c--c)
 7. [Why Toeplitz and how does it work?](#why-toeplitz-and-how-does-it-work)
 8. [Implementation notes](#implementation-notes)
-9. [Benchmarks](#benchmarks)
+9. [Apple silicon (Metal backend)](#apple-silicon-metal-backend)
+10. [Benchmarks](#benchmarks)
 
 ---
 
@@ -190,8 +194,9 @@ stack, with an operator error of a few $10^{-6}$; it keeps 64 % for the kooshbal
 
 ## Building
 
-Requirements: CUDA toolkit (11.x or 12.x), CMake ≥ 3.18, a C++17 compiler, and the bundled FINUFFT
-submodule. Unlike the previous version, **stock upstream FINUFFT is enough** — no fork is needed.
+Requirements (CUDA backend): CUDA toolkit (11.x or 12.x), CMake ≥ 3.24, a C++17 compiler, and the
+bundled FINUFFT submodule. Unlike the previous version, **stock upstream FINUFFT is enough** — no
+fork is needed. For Apple silicon see [Apple silicon](#apple-silicon-metal-backend).
 
 ```bash
 git submodule update --init --recursive
@@ -208,8 +213,9 @@ cmake --build build -j
 | ------ | ------- | -------- |
 | `MR_AHA_BACKEND` | `METAL` on macOS, else `CUDA` | which GPU backend the library is built for |
 | — | | `build/libmr_aha.a` — the standalone library |
-| `MR_AHA_BUILD_PYTHON` | `ON` | `build/lib/libmr_aha_c.so` — for the ctypes binding |
-| `MR_AHA_BUILD_MATLAB` | `OFF` | `build/matlab/*.mexa64` — needs `MATLAB_ROOT` and the Parallel Computing Toolbox |
+| `MR_AHA_BUILD_PYTHON` | `ON` | `build/lib/libmr_aha_c.so` (`.dylib` on macOS) — for the ctypes binding |
+| `MR_AHA_BUILD_MATLAB` | `OFF` | `build/matlab/*.mexa64` / `*.mexmaca64` — needs `MATLAB_ROOT`; the CUDA gateways also need the Parallel Computing Toolbox |
+| `MR_AHA_METAL_PRECOMPILE` | `ON` | Metal only: precompile the shaders when `xcrun metal` works (they are always embedded as source too) |
 | `MR_AHA_BUILD_EXAMPLES` | `OFF` | `build/mr_example_aha` |
 | `MR_AHA_BUILD_CUFINUFFT_MATLAB` | `OFF` | `build/finufft/matlab/cufinufft.mexa64` + `.m` wrappers — finufft's own GPU MATLAB interface, needed by `AhA_cufinufft.m` |
 
@@ -256,6 +262,10 @@ The `.m` wrappers move host arrays to the GPU, cast to complex `single`, derive 
 > ⓘ MATLAB must have initialised its GPU before the first MEX call. Running `gpuDevice(1)`, or
 > simply creating any `gpuArray`, is enough; the wrappers do this implicitly by moving their inputs.
 
+On Apple silicon the same functions take ordinary MATLAB arrays (no Parallel Computing Toolbox);
+`calc_toep`, the `'threshold'` mask and `AhA_cufinufft` run their NUFFTs through MATLAB's Python
+interface. See [Apple silicon](#apple-silicon-metal-backend).
+
 ---
 
 ## Python
@@ -277,7 +287,9 @@ with mr_aha.AhAPlan(cfg) as plan:
         y = plan.apply(x, SEs, Om)
 ```
 
-Shapes are the reverse of the table above, because CuPy is row-major: `x` is `(L, Nz, Ny, Nx)`,
+On Apple silicon the arrays are NumPy arrays instead of CuPy arrays (see
+[Apple silicon](#apple-silicon-metal-backend)); everything else is the same. Shapes are the reverse
+of the table above, because CuPy and NumPy are row-major: `x` is `(L, Nz, Ny, Nx)`,
 `SEs` is `(Ncoils, Nz, Ny, Nx)`, `traj` is `(ndim, Nkx, Ntrajs)`, and so on. See
 [`python/README.md`](python/README.md).
 
@@ -420,6 +432,73 @@ To debug the MEX gateways: build with `-DCMAKE_BUILD_TYPE=Debug`, point `program
 `matlab/*.cu` or `src/cuda/*.cu`. The [MATLAB GPU CUDA and MEX Programming
 Manual](https://www.mathworks.com/help/parallel-computing/gpu-cuda-and-mex-programming.html) is the
 reference for the MathWorks side.
+
+## Apple silicon (Metal backend)
+
+The Metal backend runs the same operators on the GPU of Apple-silicon Macs (developed and tested on
+an M3 Ultra). It is selected automatically on macOS (`MR_AHA_BACKEND=METAL`).
+
+**How it maps onto the CUDA backend.**
+
+| | CUDA | Metal |
+|---|---|---|
+| kernels | `src/cuda/*.cu` | `src/metal/mr_kernels.metal` (same indexing, ported kernel by kernel) |
+| FFT | cuFFT | [VkFFT](https://github.com/DTolm/VkFFT)'s Metal backend (`third_party/VkFFT`) |
+| type-1 NUFFT (`calc_toep`, threshold mask) | cufinufft, inside the library | [mlx-nufft](https://github.com/martinlachaine/mlx-nufft), in Python (`third_party/mlx-nufft`) |
+| arrays | device pointers (gpuArray, CuPy) | host pointers in unified memory (MATLAB arrays, NumPy) |
+| MATLAB | gpuArray MEX gateways | host-array MEX gateways (`matlab/metal/`) + MATLAB's Python interface |
+
+There is no C/C++ NUFFT for Apple GPUs, so the Toeplitz pre-computation is split in two:
+`mr_aha.calc_toep` (Python) evaluates the type-1 NUFFT of each triangular component with mlx-nufft,
+then the library's `mr_calc_toep_from_psf` performs the inverse FFT, scaling and mask gather on the
+GPU. The threshold mask works the same way through `mr_calc_mask_from_kernel`. The C function
+`mr_calc_toep` returns `MR_ERR_UNSUPPORTED` on Metal with directions; the operator itself
+(`mr_aha_plan_*`, `mr_aha_toeplitz`) and the neighbourhood mask (`mr_calc_mask`) are complete in C.
+Both new functions also exist in the CUDA backend.
+
+**Requirements.** macOS 13 or newer on Apple silicon, CMake ≥ 3.24, Apple clang (Xcode or its
+Command Line Tools), Python 3.11/3.12 with `numpy`, `mlx==0.31.2` and mlx-nufft. Optional: Xcode's
+Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`), which lets CMake precompile the
+shaders; without it they are compiled by macOS's built-in Metal compiler on first use (~0.15 s,
+cached by macOS afterwards).
+
+```bash
+git submodule update --init third_party/VkFFT third_party/mlx-nufft
+cmake -S . -B build -DMR_AHA_BUILD_MATLAB=ON -DMatlab_ROOT_DIR=/Applications/MATLAB_R2024b.app
+cmake --build build -j
+
+uv venv --python 3.12 .venv                     # 3.12: newest Python MATLAB R2024b's pyenv accepts
+uv pip install -p .venv/bin/python numpy scipy "mlx==0.31.2" -e third_party/mlx-nufft
+```
+
+Python: `import mr_aha` with `python/` on the path (or `pip install -e python`); arrays are NumPy.
+MATLAB: put `matlab/` and `build/matlab/` on the path; `mr_python` loads `.venv/bin/python`
+in-process (or the interpreter named by `MR_AHA_PYTHON`) the first time a NUFFT is needed.
+
+**Validation.** `tests/check_reference.py` and `tests/check_reference_matlab.m` (via
+`tests/run_matlab_tests.m`) compare every public function with CUDA reference outputs
+(`benchmarks/make_reference.py`): 2D, 3D and stack-of-stars, odd sizes and a prime FFT length,
+L = 1, 3, 4, both triangulations, unmasked and both masks. The operator matches CUDA to 2-3e-7; the
+operator built by the mlx-nufft `calc_toep` matches the stored one to 0.8-1.9e-6; the neighbourhood
+mask is identical.
+
+**VkFFT fork.** `third_party/VkFFT` points to [mikecjz/VkFFT](https://github.com/mikecjz/VkFFT)
+(branch `mr_aha`): upstream `develop` plus two Metal fixes, an autorelease double free
+(DTolm/VkFFT#226) and push constants that were overwritten when several dispatches shared a
+command buffer. Batches of 16 GiB or more are split into launches below that size, because
+VkFFT's 64-bit addressing mode does not compile on Metal. Details in
+[`benchmarks/vkfft/README.md`](benchmarks/vkfft/README.md).
+
+**Environment variables** (testing and diagnostics): `MR_AHA_METAL_FROM_SOURCE=1` compiles the
+embedded shader source even when a precompiled library is embedded; `MR_AHA_METAL_FORCE_COPY=1`
+copies caller arrays instead of wrapping them in place; `MR_AHA_METAL_FFT_MAX_BYTES=<n>` lowers the
+FFT sub-batch size; `MR_AHA_PYTHON` selects MATLAB's Python.
+
+**Distributing a prebuilt library.** No Xcode is needed at run time (shaders are precompiled or
+compiled by macOS itself). A downloaded, unsigned `.dylib` / `.mexmaca64` is quarantined by
+Gatekeeper: clear it with `xattr -dr com.apple.quarantine <folder>` or sign and notarise the binaries.
+
+---
 
 ## Benchmarks
 

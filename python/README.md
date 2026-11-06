@@ -1,8 +1,12 @@
 # mr_aha (Python interface)
 
-Python bindings for **MR_AHA**, a CUDA library that evaluates the forward
-normal operator `AᴴA` for non-Cartesian MRI with low-rank
-(subspace / MR-Multitasking) modelling, using a Toeplitz embedding.
+Python bindings for **MR_AHA**, a GPU library (CUDA or Apple-silicon Metal)
+that evaluates the forward normal operator `AᴴA` for non-Cartesian MRI with
+low-rank (subspace / MR-Multitasking) modelling, using a Toeplitz embedding.
+
+`mr_aha.backend()` reports the backend of the loaded library: arrays are CuPy
+arrays for `'cuda'` and NumPy arrays for `'metal'` (Apple silicon, unified
+memory). The API is otherwise identical.
 
 ## Install
 
@@ -17,11 +21,20 @@ Then install the package (editable is convenient during development):
 
 ```bash
 pip install -e python
-pip install cupy-cuda12x   # match your CUDA toolkit
+pip install cupy-cuda12x   # CUDA: match your CUDA toolkit
+# Apple silicon instead:
+pip install numpy "mlx==0.31.2" -e third_party/mlx-nufft
 ```
 
-The binding locates `libmr_aha_c.so` automatically in `build/lib`; set
-`MR_AHA_LIBRARY` to an explicit path if it lives elsewhere.
+The binding locates `libmr_aha_c.so` / `libmr_aha_c.dylib` automatically in
+`build/lib`; set `MR_AHA_LIBRARY` to an explicit path if it lives elsewhere.
+
+On Apple silicon `calc_toep`, `calc_mask_kernel` and the `'threshold'` method
+of `calc_mask` evaluate their type-1 NUFFT in Python with mlx-nufft and let the
+library finish the job (`mr_calc_toep_from_psf`, `mr_calc_mask_from_kernel`);
+see `mr_aha._psf`. Their `nufft=` argument selects the engine (`'mlx'`,
+`'finufft'` for CPU FINUFFT, or `'library'` for the CUDA backend's built-in
+cufinufft). `AhANufftPlan` uses MLX and mlx-nufft there.
 
 ## Array layout
 
