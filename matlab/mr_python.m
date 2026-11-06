@@ -42,8 +42,9 @@ function mr = mr_python()
     end
 
     pyroot = fullfile(root, 'python');
-    if ~any(string(cell(py.sys.path)) == string(pyroot))
-        py.sys.path.insert(int32(0), pyroot);
+    syspath = py.sys.path;
+    if ~any(string(cell(syspath)) == string(pyroot))
+        insert(syspath, int32(0), pyroot);
     end
     try
         mod = py.importlib.import_module('mr_aha');
