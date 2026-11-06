@@ -253,7 +253,6 @@ add_custom_command(
 
 add_library(mr_aha STATIC
     ${MR_COMMON_SOURCES}
-    src/metal/mr_metal_cpp_impl.cpp
     src/metal/mr_backend_metal.cpp
     src/metal/mr_metal_runtime.cpp
     src/metal/mr_metal_fft.cpp

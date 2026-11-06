@@ -9,6 +9,12 @@
  * (DTolm/VkFFT#226); with that fix VkFFT must be called inside an autorelease
  * pool, which every public entry point of the backend provides.
  *
+ * This is also the one translation unit that instantiates metal-cpp:
+ * `vkFFT.h` (`vkFFT_Structs.h`) defines `NS_/CA_/MTL_PRIVATE_IMPLEMENTATION`
+ * itself before including the metal-cpp headers, so it must be included first
+ * here, before any other header pulls metal-cpp in without those macros, and
+ * no other translation unit may include it.
+ *
  * Settings, from `benchmarks/vkfft/README.md` (M3 Ultra): single precision,
  * `coalescedMemory = 32` bytes (1.35x faster than VkFFT's default on the
  * stack-of-stars grid, neutral on 3D). Forward error 3e-7 against an fp64
@@ -17,9 +23,10 @@
  * @author Junzhou Chen (junzhou@chen.engineer)
  */
 
-#include "mr_metal_internal.h"
-
+/* First: instantiates metal-cpp (see above). */
 #include "vkFFT.h"
+
+#include "mr_metal_internal.h"
 
 #include <new>
 

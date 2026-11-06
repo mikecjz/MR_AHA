@@ -2,7 +2,9 @@
  * @file mr_metal_internal.h
  * @brief Internal helpers of the Metal backend.
  *
- * Not part of the public API. Builds on the backend-independent
+ * Not part of the public API. metal-cpp itself is instantiated (its
+ * `*_PRIVATE_IMPLEMENTATION` symbols emitted) in `mr_metal_fft.cpp`, through
+ * `vkFFT.h`. Builds on the backend-independent
  * `src/common/mr_common.h` and adds the process-wide Metal context (device and
  * command queue) shared by every plan, plus an RAII autorelease-pool guard.
  *
