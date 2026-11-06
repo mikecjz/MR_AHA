@@ -1,0 +1,437 @@
+{
+  "device": "NVIDIA H100 80GB HBM3",
+  "n_visible": 3,
+  "host": "esplhpc-cp089",
+  "results": [
+    {
+      "case": "stack",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 1,
+      "split": "single",
+      "median_s": 0.10616519255563617,
+      "speedup": 1.0,
+      "efficiency": 1.0,
+      "info": null
+    },
+    {
+      "case": "stack",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 2,
+      "split": "off",
+      "median_s": 0.060247368877753615,
+      "plan_s": 0.3931179693900049,
+      "speedup": 1.762154838181452,
+      "efficiency": 0.881077419090726,
+      "info": {
+        "devices": [
+          0,
+          1
+        ],
+        "coil_begin": [
+          0,
+          4
+        ],
+        "coil_count": [
+          4,
+          3
+        ],
+        "group": [
+          4,
+          3
+        ],
+        "n_split_coils": 0,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 368.78404655694226
+      }
+    },
+    {
+      "case": "stack",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 2,
+      "split": "on",
+      "median_s": 0.06238881219178438,
+      "plan_s": 0.4779967498034239,
+      "speedup": 1.7016703608538397,
+      "efficiency": 0.8508351804269199,
+      "info": {
+        "devices": [
+          0,
+          1
+        ],
+        "coil_begin": [
+          0,
+          3
+        ],
+        "coil_count": [
+          3,
+          3
+        ],
+        "group": [
+          3,
+          3
+        ],
+        "n_split_coils": 1,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 369.00035390562516
+      }
+    },
+    {
+      "case": "stack",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 2,
+      "split": "auto",
+      "median_s": 0.06021759379655123,
+      "plan_s": 0.86257917387411,
+      "speedup": 1.7630261500371747,
+      "efficiency": 0.8815130750185873,
+      "info": {
+        "devices": [
+          0,
+          1
+        ],
+        "coil_begin": [
+          0,
+          4
+        ],
+        "coil_count": [
+          4,
+          3
+        ],
+        "group": [
+          4,
+          3
+        ],
+        "n_split_coils": 0,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 369.0436538927975
+      }
+    },
+    {
+      "case": "stack",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 3,
+      "split": "off",
+      "median_s": 0.04706280888058245,
+      "plan_s": 0.5482038096524775,
+      "speedup": 2.255819299375449,
+      "efficiency": 0.751939766458483,
+      "info": {
+        "devices": [
+          0,
+          1,
+          2
+        ],
+        "coil_begin": [
+          0,
+          3,
+          5
+        ],
+        "coil_count": [
+          3,
+          2,
+          2
+        ],
+        "group": [
+          3,
+          2,
+          2
+        ],
+        "n_split_coils": 0,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 368.3738046720966
+      }
+    },
+    {
+      "case": "stack",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 3,
+      "split": "on",
+      "median_s": 0.04774126992560923,
+      "plan_s": 0.7386717861518264,
+      "speedup": 2.223761385506994,
+      "efficiency": 0.741253795168998,
+      "info": {
+        "devices": [
+          0,
+          1,
+          2
+        ],
+        "coil_begin": [
+          0,
+          2,
+          4
+        ],
+        "coil_count": [
+          2,
+          2,
+          2
+        ],
+        "group": [
+          2,
+          2,
+          2
+        ],
+        "n_split_coils": 1,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 369.00035390562516
+      }
+    },
+    {
+      "case": "stack",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 3,
+      "split": "auto",
+      "median_s": 0.04775633639656007,
+      "plan_s": 1.2661167620681226,
+      "speedup": 2.223059819205129,
+      "efficiency": 0.7410199397350431,
+      "info": {
+        "devices": [
+          0,
+          1,
+          2
+        ],
+        "coil_begin": [
+          0,
+          2,
+          4
+        ],
+        "coil_count": [
+          2,
+          2,
+          2
+        ],
+        "group": [
+          2,
+          2,
+          2
+        ],
+        "n_split_coils": 1,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 369.00035390562516
+      }
+    },
+    {
+      "case": "3d",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 1,
+      "split": "single",
+      "median_s": 0.14882070431485772,
+      "speedup": 1.0,
+      "efficiency": 1.0,
+      "info": null
+    },
+    {
+      "case": "3d",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 2,
+      "split": "off",
+      "median_s": 0.08561270218342543,
+      "plan_s": 0.3021758091636002,
+      "speedup": 1.738301683271356,
+      "efficiency": 0.869150841635678,
+      "info": {
+        "devices": [
+          0,
+          1
+        ],
+        "coil_begin": [
+          0,
+          4
+        ],
+        "coil_count": [
+          4,
+          3
+        ],
+        "group": [
+          4,
+          3
+        ],
+        "n_split_coils": 0,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 369.30358661172676
+      }
+    },
+    {
+      "case": "3d",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 2,
+      "split": "on",
+      "median_s": 0.0857578672003001,
+      "plan_s": 0.5276140407659113,
+      "speedup": 1.7353592057888416,
+      "efficiency": 0.8676796028944208,
+      "info": {
+        "devices": [
+          0,
+          1
+        ],
+        "coil_begin": [
+          0,
+          3
+        ],
+        "coil_count": [
+          3,
+          3
+        ],
+        "group": [
+          3,
+          3
+        ],
+        "n_split_coils": 1,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 368.97870772211445
+      }
+    },
+    {
+      "case": "3d",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 2,
+      "split": "auto",
+      "median_s": 0.0855940564069897,
+      "plan_s": 1.0204732050187886,
+      "speedup": 1.7386803542436724,
+      "efficiency": 0.8693401771218362,
+      "info": {
+        "devices": [
+          0,
+          1
+        ],
+        "coil_begin": [
+          0,
+          4
+        ],
+        "coil_count": [
+          4,
+          3
+        ],
+        "group": [
+          4,
+          3
+        ],
+        "n_split_coils": 0,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 369.8898368964811
+      }
+    },
+    {
+      "case": "3d",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 3,
+      "split": "off",
+      "median_s": 0.0656881530303508,
+      "plan_s": 0.47922811517491937,
+      "speedup": 2.2655638414143877,
+      "efficiency": 0.7551879471381292,
+      "info": {
+        "devices": [
+          0,
+          1,
+          2
+        ],
+        "coil_begin": [
+          0,
+          3,
+          5
+        ],
+        "coil_count": [
+          3,
+          2,
+          2
+        ],
+        "group": [
+          3,
+          2,
+          2
+        ],
+        "n_split_coils": 0,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 366.2081596575196
+      }
+    },
+    {
+      "case": "3d",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 3,
+      "split": "on",
+      "median_s": 0.06301931641064584,
+      "plan_s": 0.812953625805676,
+      "speedup": 2.3615093401698255,
+      "efficiency": 0.7871697800566085,
+      "info": {
+        "devices": [
+          0,
+          1,
+          2
+        ],
+        "coil_begin": [
+          0,
+          2,
+          4
+        ],
+        "coil_count": [
+          2,
+          2,
+          2
+        ],
+        "group": [
+          2,
+          2,
+          2
+        ],
+        "n_split_coils": 1,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 369.00035390562516
+      }
+    },
+    {
+      "case": "3d",
+      "masked": false,
+      "n_coils": 7,
+      "gpus": 3,
+      "split": "auto",
+      "median_s": 0.06302530458196998,
+      "plan_s": 1.439985522069037,
+      "speedup": 2.361284968029044,
+      "efficiency": 0.7870949893430147,
+      "info": {
+        "devices": [
+          0,
+          1,
+          2
+        ],
+        "coil_begin": [
+          0,
+          2,
+          4
+        ],
+        "coil_count": [
+          2,
+          2,
+          2
+        ],
+        "group": [
+          2,
+          2,
+          2
+        ],
+        "n_split_coils": 1,
+        "peer_access": true,
+        "peer_bandwidth_gbs": 369.00035390562516
+      }
+    }
+  ]
+}
