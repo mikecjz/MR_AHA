@@ -492,9 +492,25 @@ command buffer. Details in [`benchmarks/vkfft/README.md`](benchmarks/vkfft/READM
 it). The operator therefore requires `Mx·My·Mz·L < 2^31`, e.g. `L ≤ 65` for a 320^3 grid, and
 returns `MR_ERR_UNSUPPORTED` beyond that; `calc_toep` chunks its components to stay below it.
 
+**Accuracy of `calc_toep` on Metal.** mlx-nufft is a single-precision NUFFT, like the cufinufft
+used on CUDA, and both are accurate to about 1e-6 to 3e-5 on large 3D grids, depending on the
+input. On the 3D kooshball benchmark (smooth Gram blocks, a strongly peaked point-spread
+function) the Metal operator differs from the NUFFT reference by 1.4e-5 per application, against
+1.9e-6 for CUDA. Where that matters, `mr_aha.calc_toep(..., nufft='finufft')` computes the
+point-spread functions with CPU FINUFFT in double precision: 5e-6, at about 4x the pre-compute
+time (67 s instead of 15 s on an M3 Ultra). 2D and stack-of-stars are at CUDA's level (1e-6)
+with the default.
+
+**Performance tuning.** The block-diagonal stage, which is bound by reading `phi2_toep`, uses
+kernels specialised on L (L ≤ 32; generic ones otherwise) and processes the coils in groups
+(default 4, `MR_AHA_METAL_COIL_GROUP`), two at a time from registers, so `phi2_toep` is read far
+fewer times than once per coil. Together they cut the GPU time of one A^H A by 16-23 % on the
+benchmark problems; profile with `MR_AHA_METAL_PROFILE=1`.
+
 **Environment variables** (testing and diagnostics): `MR_AHA_METAL_FROM_SOURCE=1` compiles the
 embedded shader source even when a precompiled library is embedded; `MR_AHA_METAL_FORCE_COPY=1`
-copies caller arrays instead of wrapping them in place; `MR_AHA_METAL_GENERIC_BD=1` uses the
+copies caller arrays instead of wrapping them in place; `MR_AHA_METAL_COIL_GROUP=<n>` sets the
+coil group size; `MR_AHA_METAL_GENERIC_BD=1` uses the
 generic block-diagonal kernels instead of the ones specialised on L; `MR_AHA_METAL_PROFILE=1`
 prints the GPU time of each operator stage; `MR_AHA_PYTHON` selects MATLAB's Python.
 
