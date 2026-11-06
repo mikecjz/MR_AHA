@@ -25,6 +25,10 @@ piece by piece while it is being ported:
 ``mask``
     :func:`mr_aha.calc_mask_kernel` and :func:`mr_aha.calc_mask` (both
     methods), compared to the stored kernel and masks.
+``nufft``
+    The NUFFT reference operator :class:`mr_aha.AhANufftPlan` (cufinufft on
+    CUDA, mlx-nufft on Metal) on the stored inputs, compared to the stored
+    cufinufft ``AhAx_nufft``.
 
 Usage (from the repository root)::
 
@@ -50,7 +54,7 @@ import mr_aha  # noqa: E402
 
 TRIS = ("lower", "upper")
 MASKS = ("neighbour", "threshold")
-STAGES = ("aha", "toep", "mask")
+STAGES = ("aha", "toep", "mask", "nufft")
 
 
 def rel(a: np.ndarray, b: np.ndarray) -> float:
@@ -200,6 +204,16 @@ def check_mask(z, bk: Backend, c: dict, tol: float, nufft=None) -> list:
     return rows
 
 
+def check_nufft(z, bk: Backend, c: dict, tol: float) -> list:
+    """Stage ``nufft``: the NUFFT reference operator vs the stored one."""
+    if "AhAx_nufft" not in z.files:
+        return []
+    with mr_aha.AhANufftPlan(make_cfg(c), bk.put(z["traj"])) as plan:
+        out = bk.get(plan.apply(bk.put(z["x"]), bk.put(z["SEs"]),
+                                bk.put(z["phi2"])))
+    return [("AhAx_nufft", rel(out, z["AhAx_nufft"]), tol)]
+
+
 def main() -> int:
     """Run the requested stages on the requested reference files."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -239,6 +253,8 @@ def main() -> int:
             ext = args.nufft not in (None, "library") or bk.name != "cuda"
             rows += check_mask(z, bk, c, 5e-5 if ext else args.tol_kernel,
                                args.nufft)
+        if "nufft" in args.stages:
+            rows += check_nufft(z, bk, c, args.tol_aha)
         bad = [r for r in rows if not r[1] <= r[2]]
         failed += len(bad)
         worst = max(rows, key=lambda r: r[1] / r[2] if r[2] else r[1])

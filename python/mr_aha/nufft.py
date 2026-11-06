@@ -16,9 +16,16 @@ NUFFTs are unnormalised, which is precisely the convention the Toeplitz kernel
 of :func:`mr_aha.calc_toep` reproduces, so ``AhANufftPlan.apply`` and
 ``AhAPlan.apply`` agree to within the NUFFT tolerance.
 
-No C/CUDA code is involved: the NUFFTs come from the ``cufinufft`` Python
-package and everything else is CuPy, so this path doubles as an independent
-check of the Toeplitz library and as the baseline of the benchmarks.
+No C/CUDA/Metal code of the library is involved, so this path doubles as an
+independent check of the Toeplitz library and as the baseline of the
+benchmarks. The engine follows the loaded backend (:func:`mr_aha.backend`):
+
+* **CUDA**: ``cufinufft`` plans, everything else in CuPy; arrays are CuPy.
+* **Metal**: `mlx-nufft <https://github.com/martinlachaine/mlx-nufft>`_ plans
+  (the ``third_party/mlx-nufft`` submodule), everything else in MLX on the
+  Apple GPU; arrays are NumPy. mlx-nufft's type-2 plan transforms one vector
+  per call, so the type-2 step loops over the ``L`` ranks (and kz planes); the
+  type-1 step is one batched call.
 
 For a stack-of-stars trajectory, kz is Cartesian: the image is first Fourier
 transformed along z (centred, unnormalised), every kz plane then goes through
@@ -61,9 +68,121 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from ._lib import MRConfig, TrajType
+from ._lib import MRConfig, TrajType, backend
 
 __all__ = ["AhANufftPlan", "aha_nufft"]
+
+
+class _MlxNufft:
+    """Metal implementation of :class:`AhANufftPlan` (MLX + mlx-nufft).
+
+    Same algorithm, conventions and array layout as the CuPy/cufinufft
+    implementation in :class:`AhANufftPlan`; see that class and the module
+    docstring. Inputs and outputs are NumPy arrays; the work runs on the GPU
+    as MLX arrays.
+    """
+
+    def __init__(self, cfg: MRConfig, traj, eps: float):
+        import numpy as np  # noqa: PLC0415
+        try:
+            import mlx.core as mx  # noqa: PLC0415
+            from mlx_nufft import Type1PlanND, Type2PlanND  # noqa: PLC0415
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise ImportError(
+                "mr_aha.nufft on the Metal backend needs mlx and mlx-nufft: "
+                "`pip install -e third_party/mlx-nufft`."
+            ) from exc
+        self._np, self._mx = np, mx
+        self._tt = int(cfg.traj_type)
+        self._L = int(cfg.L)
+        n = [int(cfg.n_dim[i]) for i in range(3)]
+        ndim_traj = 3 if self._tt == TrajType.THREE_D else 2
+        traj = np.asarray(traj)
+        if traj.ndim != 3 or traj.shape[0] != ndim_traj:
+            raise ValueError(
+                f"traj must be shaped (ndim, Nkx, Ntrajs) with ndim = {ndim_traj}, "
+                f"got {traj.shape}"
+            )
+        self._Nkx, self._Ntrajs = int(traj.shape[1]), int(traj.shape[2])
+        self._M = self._Nkx * self._Ntrajs
+        self._Nz = n[2]
+        if self._tt == TrajType.TWO_D:
+            self._img_shape, self._modes, self._ntr = (n[1], n[0]), (n[1], n[0]), self._L
+        elif self._tt == TrajType.THREE_D:
+            self._img_shape = self._modes = (n[2], n[1], n[0])
+            self._ntr = self._L
+        else:
+            self._img_shape, self._modes = (n[2], n[1], n[0]), (n[1], n[0])
+            self._ntr = self._L * n[2]
+        # Coordinates reversed so that the C-ordered modes have x fastest.
+        coords = tuple(np.ascontiguousarray(traj[d].ravel(), dtype=np.float64)
+                       for d in reversed(range(ndim_traj)))
+        tol = max(float(eps), 1e-6)  # mlx-nufft's fp32 floor
+        self._t2 = Type2PlanND(coords, self._modes, eps=tol, isign=-1,
+                               upsampfac=2.0)
+        self._t1 = Type1PlanND(coords, self._modes, eps=tol, isign=+1,
+                               upsampfac=2.0)
+        self._zmod = None
+        if self._tt == TrajType.STACK:
+            nz = self._Nz
+            ph = 2.0 * math.pi * (nz // 2) * np.arange(nz) / nz
+            self._zmod = mx.array(np.exp(1j * ph).astype(np.complex64)[:, None, None])
+
+    def apply(self, x, SEs, phi2, out=None):
+        """See :meth:`AhANufftPlan.apply` (NumPy arrays in and out)."""
+        np, mx = self._np, self._mx
+        L, img = self._L, self._img_shape
+        stack = self._tt == TrajType.STACK
+        nkz = self._Nz if stack else 1
+        x = mx.array(np.ascontiguousarray(x, dtype=np.complex64).reshape((L,) + img))
+        nc = int(np.asarray(SEs).size) // math.prod(img)
+        SEs = mx.array(np.ascontiguousarray(SEs, dtype=np.complex64)
+                       .reshape((nc,) + img))
+        expected = L * L * nkz * self._Ntrajs
+        if np.asarray(phi2).size != expected:
+            raise ValueError(f"phi2 has {np.asarray(phi2).size} elements but "
+                             f"{expected} were expected")
+        ph = mx.array(np.ascontiguousarray(phi2, dtype=np.complex64).reshape(
+            (L, L, nkz, self._Ntrajs) if stack else (L, L, self._Ntrajs)))
+
+        acc = mx.zeros((L,) + img, dtype=mx.complex64)
+        for c in range(nc):
+            se = SEs[c] * self._zmod if stack else SEs[c]
+            im = x * se
+            if stack:
+                im = mx.fft.fft(im, axis=1)          # unnormalised, centred via zmod
+            im = im.reshape((self._ntr,) + self._modes)
+            # Type-2, one vector per call.
+            k = mx.stack([self._t2.execute(im[i], return_np=False)
+                          for i in range(self._ntr)])
+            del im
+            # Block-diagonal Gram multiplication, one block per readout.
+            if stack:
+                kk = k.reshape(L, self._Nz, self._Nkx, self._Ntrajs)
+                k = mx.einsum("jizt,jzkt->izkt", ph, kk)
+            else:
+                kk = k.reshape(L, self._Nkx, self._Ntrajs)
+                k = mx.einsum("jit,jkt->ikt", ph, kk)
+            k = k.reshape(self._ntr, self._M)
+            mx.eval(k)
+            # Type-1, all vectors in one batched call.
+            im = self._t1.execute_batch(np.asarray(k), return_np=False)
+            del k, kk
+            im = im.reshape((L,) + img)
+            if stack:
+                # Unnormalised inverse along z (MLX's ifft divides by Nz).
+                im = mx.fft.ifft(im, axis=1) * float(self._Nz)
+            acc = acc + im * mx.conj(se)
+            mx.eval(acc)
+        res = np.array(acc)
+        if out is not None:
+            out.reshape(res.shape)[...] = res
+            return out
+        return res
+
+    def close(self) -> None:
+        """Drop the mlx-nufft plans."""
+        self._t1 = self._t2 = None
 
 
 def _modules():
@@ -117,8 +236,13 @@ class AhANufftPlan:
     def __init__(self, cfg: MRConfig, traj, eps: Optional[float] = None,
                  type1_opts: Optional[dict] = None,
                  type2_opts: Optional[dict] = None, **nufft_opts):
-        cupy, cufinufft = _modules()
         self._cfg = cfg
+        self._impl = None
+        if backend() != "cuda":
+            # Metal: MLX + mlx-nufft; the cufinufft options do not apply.
+            self._impl = _MlxNufft(cfg, traj, cfg.eps if eps is None else eps)
+            return
+        cupy, cufinufft = _modules()
         self._tt = int(cfg.traj_type)
         self._L = int(cfg.L)
         n = [int(cfg.n_dim[i]) for i in range(3)]
@@ -257,6 +381,8 @@ class AhANufftPlan:
         Raises:
             ValueError: If an array has the wrong size.
         """
+        if self._impl is not None:
+            return self._impl.apply(x, SEs, phi2, out=out)
         cupy, _ = _modules()
         L = self._L
         img = self._img_shape
@@ -306,7 +432,10 @@ class AhANufftPlan:
         return out
 
     def close(self) -> None:
-        """Destroy the cufinufft plans. Idempotent."""
+        """Destroy the NUFFT plans. Idempotent."""
+        if self._impl is not None:
+            self._impl.close()
+            return
         # Dropping the last reference runs cufinufft's own destructor.
         self._t1 = None
         self._t2 = None
