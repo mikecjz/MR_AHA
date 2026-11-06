@@ -174,6 +174,21 @@ int mr_metal_wait(MTL::CommandBuffer *cb, const char *what);
 struct mr_metal_fft;
 
 /**
+ * @brief Known-zero block of every 1-D sequence along each axis.
+ *
+ * Along axis `a`, elements `[left[a], right[a])` of every sequence are zero
+ * in the input of the forward transform and are not needed in the output of
+ * the inverse transform; VkFFT then neither reads, computes nor writes them
+ * (its "spatial zero padding"). `left[a] >= right[a]` disables the axis. Used
+ * for the zero-padded Toeplitz grids, whose image occupies `[0, N - c)` and
+ * `[M - c, M)` along each upsampled axis in natural order.
+ */
+struct mr_metal_zeropad {
+    int left[3];  /**< First zero element per axis.          */
+    int right[3]; /**< One past the last zero element.       */
+};
+
+/**
  * @brief Create a batched, in-place, unnormalised complex FFT plan.
  *
  * Transforms @p batch consecutive column-major volumes of extents
@@ -190,10 +205,13 @@ struct mr_metal_fft;
  * @param[in]  dims  Extents, fastest first.
  * @param[in]  batch Number of volumes.
  * @param[out] out   Receives the plan.
+ * @param[in]  zeropad Optional known-zero blocks (see ::mr_metal_zeropad);
+ *                   NULL for a plain transform.
  * @return ::MR_SUCCESS, ::MR_ERR_VKFFT or ::MR_ERR_ALLOC.
  */
 int mr_metal_fft_create(const mr_metal_ctx *ctx, int rank, const int dims[3],
-                        int batch, mr_metal_fft **out);
+                        int batch, mr_metal_fft **out,
+                        const struct mr_metal_zeropad *zeropad = nullptr);
 
 /**
  * @brief Append one transform of @p buf to an open compute encoder.
