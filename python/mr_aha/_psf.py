@@ -135,7 +135,9 @@ def _chunk(cfg: MRConfig, pad: int, ntri: int, xp) -> int:
     Each component costs about three upsampled volumes at a time (its
     point-spread function, the library's scratch, the NUFFT's working set);
     the chunk keeps them within ``mem_fraction`` of a quarter of the memory
-    (unified memory on Metal, free device memory on CUDA).
+    (unified memory on Metal, free device memory on CUDA). On Metal a chunk
+    also stays below 2^31 complex values, the limit of one VkFFT transform
+    (see ``src/metal/mr_metal_fft.cpp``).
     """
     frac = cfg.mem_fraction if cfg.mem_fraction > 0 else 0.5
     if xp is np:
@@ -144,7 +146,10 @@ def _chunk(cfg: MRConfig, pad: int, ntri: int, xp) -> int:
     else:
         free, _ = xp.cuda.runtime.memGetInfo()
         budget = frac * free / 2
-    return int(max(1, min(ntri, budget // (3 * pad * 8))))
+    n = int(max(1, min(ntri, budget // (3 * pad * 8))))
+    if xp is np:
+        n = max(1, min(n, ((1 << 31) - 1) // pad))
+    return n
 
 
 def calc_toep_two_stage(cfg: MRConfig, phi2, traj, mask, out, engine: str,

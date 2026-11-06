@@ -485,14 +485,18 @@ mask is identical.
 **VkFFT fork.** `third_party/VkFFT` points to [mikecjz/VkFFT](https://github.com/mikecjz/VkFFT)
 (branch `mr_aha`): upstream `develop` plus two Metal fixes, an autorelease double free
 (DTolm/VkFFT#226) and push constants that were overwritten when several dispatches shared a
-command buffer. Batches of 16 GiB or more are split into launches below that size, because
-VkFFT's 64-bit addressing mode does not compile on Metal. Details in
-[`benchmarks/vkfft/README.md`](benchmarks/vkfft/README.md).
+command buffer. Details in [`benchmarks/vkfft/README.md`](benchmarks/vkfft/README.md).
+
+**Size limit.** One VkFFT transform on Metal must cover fewer than 2^31 complex values (VkFFT's
+32-bit indexing; its 64-bit mode does not compile on Metal, and launch offsets cannot get around
+it). The operator therefore requires `Mx·My·Mz·L < 2^31`, e.g. `L ≤ 65` for a 320^3 grid, and
+returns `MR_ERR_UNSUPPORTED` beyond that; `calc_toep` chunks its components to stay below it.
 
 **Environment variables** (testing and diagnostics): `MR_AHA_METAL_FROM_SOURCE=1` compiles the
 embedded shader source even when a precompiled library is embedded; `MR_AHA_METAL_FORCE_COPY=1`
-copies caller arrays instead of wrapping them in place; `MR_AHA_METAL_FFT_MAX_BYTES=<n>` lowers the
-FFT sub-batch size; `MR_AHA_PYTHON` selects MATLAB's Python.
+copies caller arrays instead of wrapping them in place; `MR_AHA_METAL_GENERIC_BD=1` uses the
+generic block-diagonal kernels instead of the ones specialised on L; `MR_AHA_METAL_PROFILE=1`
+prints the GPU time of each operator stage; `MR_AHA_PYTHON` selects MATLAB's Python.
 
 **Distributing a prebuilt library.** No Xcode is needed at run time (shaders are precompiled or
 compiled by macOS itself). A downloaded, unsigned `.dylib` / `.mexmaca64` is quarantined by

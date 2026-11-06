@@ -28,71 +28,27 @@
 
 #include "mr_metal_internal.h"
 
-#include <cstdlib>
 #include <new>
 
 /**
- * @brief Largest buffer one VkFFT application may address, in bytes.
+ * @brief Largest number of complex values one VkFFT-Metal transform may cover.
  *
- * From 2^34 bytes (16 GiB) on, VkFFT switches its generated kernels to 64-bit
- * addressing (`useUint64`), and that Metal code fails to compile
- * (`VKFFT_ERROR_FAILED_TO_COMPILE_PROGRAM`, seen with a 20 GB batch of 320^3
- * volumes). Larger batches are therefore split into sub-batches below this
- * size, launched at byte offsets. `MR_AHA_METAL_FFT_MAX_BYTES` lowers the
- * limit so that the splitting can be tested on small problems.
+ * VkFFT indexes its buffers with 32-bit signed integers unless it switches to
+ * 64-bit addressing (`useUint64`, automatic from 2^34-byte buffers), and the
+ * Metal code of that mode does not compile (`VKFFT_ERROR_FAILED_TO_COMPILE_
+ * PROGRAM`). Launch-time buffer offsets do not help either: they enter the same
+ * 32-bit index arithmetic, and a 3D batch split at 2^31 values came out wrong
+ * beyond that point. Batches of 2^31 values or more are therefore rejected;
+ * the callers keep below the limit (Python's `calc_toep` chunks its components
+ * accordingly).
  */
-static uint64_t mr_fft_max_bytes()
-{
-    const uint64_t hard = (1ull << 34) - 1;
-    const char *e = std::getenv("MR_AHA_METAL_FFT_MAX_BYTES");
-    if (e && e[0]) {
-        const unsigned long long v = std::strtoull(e, nullptr, 10);
-        if (v > 0 && v < hard) return (uint64_t)v;
-    }
-    return hard;
-}
+static const uint64_t MR_FFT_MAX_VALUES = (1ull << 31) - 1;
 
-/**
- * @brief A batched FFT, possibly split into sub-batches.
- *
- * `app[0]` transforms `nb[0]` volumes and is launched `reps` times at
- * consecutive offsets; `app[1]`, if `napps == 2`, transforms the remaining
- * `nb[1]` volumes once at the end.
- */
+/** @brief A VkFFT application plus the storage its configuration points to. */
 struct mr_metal_fft {
-    VkFFTApplication app[2];   /**< Full sub-batch and remainder plans.        */
-    uint64_t         bytes[2]; /**< Their buffer sizes; VkFFT keeps pointers.  */
-    int              nb[2];    /**< Volumes per plan.                          */
-    int              napps;    /**< 1 or 2.                                    */
-    int              reps;     /**< Launches of app[0].                        */
-    uint64_t         vol_bytes;/**< Bytes per volume.                          */
-    bool             offsets;  /**< Whether launches carry offsets.            */
+    VkFFTApplication app;   /**< The VkFFT plan (kernels for both directions). */
+    uint64_t         bytes; /**< Buffer size; VkFFT keeps a pointer to it.     */
 };
-
-/** @brief Initialise one VkFFT application for @p nb volumes. */
-static int mr_fft_init_app(const mr_metal_ctx *ctx, int rank, const int dims[3],
-                           int nb, bool offsets, VkFFTApplication *app,
-                           uint64_t *bytes, uint64_t vol_bytes)
-{
-    *bytes = vol_bytes * (uint64_t)nb;
-    VkFFTConfiguration cfg = {};
-    cfg.FFTdim = (pfUINT)rank;
-    for (int d = 0; d < rank; ++d) cfg.size[d] = (pfUINT)dims[d];
-    cfg.numberBatches = (pfUINT)nb;
-    cfg.device = ctx->device;
-    cfg.queue = ctx->queue;
-    cfg.bufferSize = bytes;         /* VkFFT keeps this pointer. */
-    cfg.normalize = 0;              /* unnormalised inverse, like cuFFT */
-    cfg.coalescedMemory = 32;
-    cfg.specifyOffsetsAtLaunch = offsets ? 1 : 0;
-    const VkFFTResult r = initializeVkFFT(app, cfg);
-    if (r != VKFFT_SUCCESS)
-        MR_FAIL(MR_ERR_VKFFT, "initializeVkFFT failed with code %d for a "
-                "rank-%d transform of %d x %d x %d, batch %d",
-                (int)r, rank, dims[0], rank > 1 ? dims[1] : 1,
-                rank > 2 ? dims[2] : 1, nb);
-    return MR_SUCCESS;
-}
 
 int mr_metal_fft_create(const mr_metal_ctx *ctx, int rank, const int dims[3],
                         int batch, mr_metal_fft **out)
@@ -103,41 +59,34 @@ int mr_metal_fft_create(const mr_metal_ctx *ctx, int rank, const int dims[3],
 
     uint64_t volume = 1;
     for (int d = 0; d < rank; ++d) volume *= (uint64_t)dims[d];
-    const uint64_t vol_bytes = volume * sizeof(mr_complex);
-    const uint64_t max_bytes = mr_fft_max_bytes();
-    if (vol_bytes > (1ull << 34) - 1)
-        MR_FAIL(MR_ERR_UNSUPPORTED, "one FFT volume of %llu bytes exceeds the "
-                "16 GiB VkFFT-Metal limit", (unsigned long long)vol_bytes);
-
-    uint64_t sub = max_bytes / vol_bytes;
-    if (sub < 1) sub = 1;
-    if (sub > (uint64_t)batch) sub = (uint64_t)batch;
-    const bool split = sub < (uint64_t)batch;
-    /* Launch offsets are added in VkFFT's 32-bit index arithmetic. */
-    if (split && volume * (uint64_t)batch > 0xFFFFFFFFull)
-        MR_FAIL(MR_ERR_UNSUPPORTED, "a batched FFT of %llu complex values is too "
-                "large for VkFFT-Metal (limit 2^32 values when split)",
-                (unsigned long long)(volume * (uint64_t)batch));
+    if (volume * (uint64_t)batch > MR_FFT_MAX_VALUES)
+        MR_FAIL(MR_ERR_UNSUPPORTED, "a batched FFT of %llu complex values (%d x "
+                "%llu) exceeds the 2^31-value limit of VkFFT on Metal; use fewer "
+                "ranks / components per call",
+                (unsigned long long)(volume * (uint64_t)batch), batch,
+                (unsigned long long)volume);
 
     mr_metal_fft *f = new (std::nothrow) mr_metal_fft();
     if (!f) MR_FAIL(MR_ERR_ALLOC, "failed to allocate an FFT plan");
-    f->vol_bytes = vol_bytes;
-    f->offsets = split;
-    f->nb[0] = (int)sub;
-    f->reps = (int)((uint64_t)batch / sub);
-    f->nb[1] = (int)((uint64_t)batch % sub);
-    f->napps = f->nb[1] > 0 ? 2 : 1;
+    f->bytes = volume * (uint64_t)batch * sizeof(mr_complex);
 
-    int rc = mr_fft_init_app(ctx, rank, dims, f->nb[0], split, &f->app[0],
-                             &f->bytes[0], vol_bytes);
-    if (rc == MR_SUCCESS && f->napps == 2) {
-        rc = mr_fft_init_app(ctx, rank, dims, f->nb[1], split, &f->app[1],
-                             &f->bytes[1], vol_bytes);
-        if (rc != MR_SUCCESS) deleteVkFFT(&f->app[0]);
-    }
-    if (rc != MR_SUCCESS) {
+    VkFFTConfiguration cfg = {};
+    cfg.FFTdim = (pfUINT)rank;
+    for (int d = 0; d < rank; ++d) cfg.size[d] = (pfUINT)dims[d];
+    cfg.numberBatches = (pfUINT)batch;
+    cfg.device = ctx->device;
+    cfg.queue = ctx->queue;
+    cfg.bufferSize = &f->bytes;     /* VkFFT keeps this pointer. */
+    cfg.normalize = 0;              /* unnormalised inverse, like cuFFT */
+    cfg.coalescedMemory = 32;
+
+    const VkFFTResult r = initializeVkFFT(&f->app, cfg);
+    if (r != VKFFT_SUCCESS) {
         delete f;
-        return rc;
+        MR_FAIL(MR_ERR_VKFFT, "initializeVkFFT failed with code %d for a "
+                "rank-%d transform of %d x %d x %d, batch %d",
+                (int)r, rank, dims[0], rank > 1 ? dims[1] : 1,
+                rank > 2 ? dims[2] : 1, batch);
     }
     *out = f;
     return MR_SUCCESS;
@@ -147,29 +96,21 @@ int mr_metal_fft_encode(mr_metal_fft *fft, MTL::CommandBuffer *cb,
                         MTL::ComputeCommandEncoder *enc, MTL::Buffer *buf,
                         bool inverse)
 {
+    VkFFTLaunchParams lp = {};
+    lp.buffer = &buf;
+    lp.commandBuffer = cb;
+    lp.commandEncoder = enc;
     /* VkFFT direction: -1 forward (exp(-i)), +1 inverse (exp(+i)). */
-    const int dir = inverse ? 1 : -1;
-    const int launches = fft->reps + (fft->napps == 2 ? 1 : 0);
-    for (int k = 0; k < launches; ++k) {
-        const int a = (k < fft->reps) ? 0 : 1;
-        VkFFTLaunchParams lp = {};
-        lp.buffer = &buf;
-        lp.commandBuffer = cb;
-        lp.commandEncoder = enc;
-        if (fft->offsets)
-            lp.bufferOffset = (pfUINT)((uint64_t)k * fft->nb[0] * fft->vol_bytes);
-        const VkFFTResult r = VkFFTAppend(&fft->app[a], dir, &lp);
-        if (r != VKFFT_SUCCESS)
-            MR_FAIL(MR_ERR_VKFFT, "VkFFTAppend (%s, launch %d of %d) failed with "
-                    "code %d", inverse ? "inverse" : "forward", k + 1, launches,
-                    (int)r);
-    }
+    const VkFFTResult r = VkFFTAppend(&fft->app, inverse ? 1 : -1, &lp);
+    if (r != VKFFT_SUCCESS)
+        MR_FAIL(MR_ERR_VKFFT, "VkFFTAppend (%s) failed with code %d",
+                inverse ? "inverse" : "forward", (int)r);
     return MR_SUCCESS;
 }
 
 void mr_metal_fft_destroy(mr_metal_fft *fft)
 {
     if (!fft) return;
-    for (int a = 0; a < fft->napps; ++a) deleteVkFFT(&fft->app[a]);
+    deleteVkFFT(&fft->app);
     delete fft;
 }

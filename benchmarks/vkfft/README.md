@@ -83,10 +83,14 @@ shared `MTLBuffer` that it rewrote on the CPU before every dispatch. The GPU rea
 when the command buffer runs, so all dispatches encoded into one command buffer saw the values of
 the last one. This broke launch-time offsets (`specifyOffsetsAtLaunch`) and would equally break
 VkFFT's own split dispatches (`workGroupShift`) on very large grids. The fork now passes the push
-constants with `setBytes`, which copies them at encode time. The library needs launch offsets
-because VkFFT's 64-bit addressing mode (used automatically for buffers of 16 GiB or more) does
-not compile on Metal, so `src/metal/mr_metal_fft.cpp` splits such batches into sub-16 GiB
-launches; with `MR_AHA_METAL_FFT_MAX_BYTES=100000` every reference case passes with split FFTs.
+constants with `setBytes`, which copies them at encode time.
+
+**Size limit.** VkFFT switches to 64-bit addressing for buffers of 2^34 bytes (2^31 complex
+values) or more, and that Metal code does not compile. An attempt to split such batches into
+launches at buffer offsets (which is what exposed the push-constant bug) worked on small tests
+but not at full size: the offsets enter VkFFT's 32-bit index arithmetic, and in a 20 GB 3D batch
+(78 x 320^3) every volume past 2^31 values came out wrong. The library therefore rejects FFT
+batches of 2^31 values or more (`src/metal/mr_metal_fft.cpp`) and `calc_toep` chunks below it.
 
 Re-checked with the fork (`coalescedMemory=32`): `--replan 50` (2d) and `--replan 3` (stack, 3d)
 pass; forward error vs SciPy 2.5e-7 / 2.9e-7 / 3.2e-7 and fwd+inv 0.12 / 38.1 / 54.1 ms
