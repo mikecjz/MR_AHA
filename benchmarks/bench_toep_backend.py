@@ -65,7 +65,7 @@ def gram(rng, L: int, n: int) -> np.ndarray:
     """Random Hermitian PSD blocks, row-major ``(L, L, n)``."""
     a = rng.standard_normal((n, 2, L)) + 1j * rng.standard_normal((n, 2, L))
     g = np.einsum("nki,nkj->jin", a.conj(), a)  # [j, i, n] = (A^H A)_{ij}
-    return g.astype(np.complex64)
+    return np.ascontiguousarray(g, dtype=np.complex64)
 
 
 def main() -> None:
