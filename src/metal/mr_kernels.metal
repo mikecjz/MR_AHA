@@ -160,9 +160,9 @@ kernel void mr_k_pad_mul_se(device float2       *pad  [[buffer(0)]],
         if (cand >= d.n[a]) inside = false;
     }
 
-    const ulong pad = (ulong)d.pad_size;
+    const ulong padn = (ulong)d.pad_size;
     if (!inside) {
-        for (int l = 0; l < d.L; ++l) pad[(ulong)tid + pad * l] = float2(0.0f);
+        for (int l = 0; l < d.L; ++l) pad[(ulong)tid + padn * l] = float2(0.0f);
         return;
     }
 
@@ -171,7 +171,7 @@ kernel void mr_k_pad_mul_se(device float2       *pad  [[buffer(0)]],
     const float2 s = SEs[(ulong)d.se_coil * (ulong)coil + ii];
     const ulong img = (ulong)d.image_size;
     for (int l = 0; l < d.L; ++l)
-        pad[(ulong)tid + pad * l] = mr_cmul(s, x[ii + img * l]);
+        pad[(ulong)tid + padn * l] = mr_cmul(s, x[ii + img * l]);
 }
 
 /**
