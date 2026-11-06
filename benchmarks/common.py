@@ -1,9 +1,14 @@
 """Shared helpers for the MR_AHA benchmarks.
 
-Loads the three benchmark problems into row-major CuPy arrays (the
-column-major shapes of the documentation, reversed), together with a ready
+Loads the three benchmark problems into row-major arrays (the column-major
+shapes of the documentation, reversed), together with a ready
 :class:`mr_aha.MRConfig`, and provides a conjugate-gradient solver and timing
 utilities used by both ``bench_python.py`` and ``mask_threshold.py``.
+
+Backend-agnostic: the array module ``cp`` is CuPy for the CUDA backend and
+NumPy for the Metal backend (Apple silicon, unified memory), following
+:func:`mr_aha.backend`. On Metal the library calls are synchronous, so
+:func:`sync` is a no-op, and the CG vector updates run on the CPU.
 
 Datasets
 --------
@@ -38,8 +43,14 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python"))
 
-import cupy as cp  # noqa: E402
 import mr_aha  # noqa: E402
+
+#: ``'cuda'`` or ``'metal'``.
+BACKEND = mr_aha.backend()
+if BACKEND == "cuda":
+    import cupy as cp  # noqa: E402
+else:
+    cp = np  # noqa: N816 - array module of the Metal backend
 
 DATA = ROOT / "data"
 BENCH_DATA = Path(os.environ.get("MR_AHA_BENCH_DATA", ROOT / "benchmarks" / "data"))
@@ -55,7 +66,7 @@ def _h5_complex(ds):
 
 
 def load(name: str):
-    """Load a benchmark problem onto the GPU.
+    """Load a benchmark problem (onto the GPU for CUDA).
 
     Args:
         name: ``'2d'``, ``'stack'`` or ``'3d'``.
@@ -64,7 +75,8 @@ def load(name: str):
         ``dict`` with keys ``cfg`` (unmasked :class:`mr_aha.MRConfig`),
         ``traj_type``, ``n_dim``, ``L``, ``n_coils``, ``SEs``, ``phi2``,
         ``traj``, ``b`` (CG right-hand side), ``x_true`` (or ``None``) and
-        ``desc``. All arrays are row-major CuPy arrays.
+        ``desc``. All arrays are row-major CuPy (CUDA) or NumPy (Metal)
+        arrays.
     """
     if name == "2d":
         import scipy.io as sio
@@ -131,8 +143,9 @@ def make_cfg(d, **kw):
 
 
 def sync():
-    """Block until all queued GPU work is done."""
-    cp.cuda.Device().synchronize()
+    """Block until all queued GPU work is done (no-op on Metal)."""
+    if BACKEND == "cuda":
+        cp.cuda.Device().synchronize()
 
 
 def timeit(fn, n=10, warmup=2):
@@ -185,12 +198,16 @@ def cg(op, b, n_iter=20):
         ``(u, residual_norms)`` where ``residual_norms[i]`` is ``||r_i|| /
         ||b||`` after iteration ``i`` (index 0 is the initial residual, 1).
     """
-    from cupy import cublas
+    if BACKEND == "cuda":
+        from cupy import cublas
 
-    def dot(a, c):
-        # cuBLAS dotc: conj(a) . c without a full-size temporary (cp.vdot
-        # materialises the elementwise product, which matters for 3D data).
-        return complex(cublas.dotc(a.ravel(), c.ravel()))
+        def dot(a, c):
+            # cuBLAS dotc: conj(a) . c without a full-size temporary (cp.vdot
+            # materialises the elementwise product, which matters for 3D data).
+            return complex(cublas.dotc(a.ravel(), c.ravel()))
+    else:
+        def dot(a, c):
+            return complex(np.vdot(a.ravel(), c.ravel()))
 
     u = cp.zeros_like(b)
     r = b.copy()
@@ -219,6 +236,21 @@ def rel(a, b):
 
 def gpu_info():
     """Name and memory of the current GPU, plus software versions."""
+    if BACKEND != "cuda":
+        import subprocess  # noqa: PLC0415
+
+        import mlx.core as mx  # noqa: PLC0415
+        import mlx_nufft  # noqa: PLC0415
+
+        info = mx.device_info()
+        chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                              capture_output=True, text=True).stdout.strip()
+        return dict(
+            gpu=chip or str(info.get("device_name", "Apple GPU")),
+            gpu_mem_gb=round(int(info["memory_size"]) / 2**30, 1),
+            backend="metal", mlx=mx.__version__, mlx_nufft=mlx_nufft.__version__,
+            host=os.uname().nodename.split(".")[0],
+        )
     import cufinufft
 
     dev = cp.cuda.Device()
