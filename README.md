@@ -524,8 +524,10 @@ Gatekeeper: clear it with `xattr -dr com.apple.quarantine <folder>` or sign and 
 
 [`benchmarks/`](benchmarks/) compares the Toeplitz operator (Python) with the NUFFT reference
 (Python and MATLAB) on 2D radial, stack-of-stars and synthetic 3D kooshball problems, including
-20-iteration CG reconstructions, on a local TITAN RTX and an HPC L40S. Findings and how to
-reproduce them are in [`benchmarks/README.md`](benchmarks/README.md).
+20-iteration CG reconstructions, on a local TITAN RTX and an HPC L40S, and with the Metal backend
+on an Apple M3 Ultra (faster than the L40S for the Toeplitz operator on the large problems,
+identical reconstructions). Findings and how to reproduce them are in
+[`benchmarks/README.md`](benchmarks/README.md).
 
 ---
 

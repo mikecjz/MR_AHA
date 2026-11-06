@@ -260,6 +260,21 @@ Findings:
 An alternative mask, keeping only grid locations within r cells of a sample, is compared with
 this one in [neighbour_mask.md](neighbour_mask.md).
 
+## Apple silicon (Metal backend)
+
+The same benchmark on a Mac Studio (Apple M3 Ultra, 512 GB unified memory) with the Metal backend
+is in [`results/AW650523HJY/summary.md`](results/AW650523HJY/summary.md). In short:
+
+* **The Toeplitz operator is faster than on the L40S** for the large problems: one $A^HA$ takes
+  0.84 s (stack) and 1.17 s (3D) against 0.94 s and 1.33 s, and the unmasked 3D kernel (20 GB)
+  fits in unified memory. 2D is too small to matter (1.7 ms).
+* **Same reconstructions.** The 20-iteration CG solutions agree with the CUDA ones to 5-10e-6 in
+  2D and stack and 5e-5 in 3D (within its CG floor), and match the ground truth equally well.
+* **Pre-computation is slower** (mlx-nufft in Python): `calc_toep` 4.9 s (stack) and 15 s (3D)
+  against 2.9 s and 7.6 s on the L40S. In 3D the single-precision mlx-nufft kernel gives an
+  operator error of 1.4e-5 (CUDA 1.9e-6); `nufft='finufft'` reduces it to 5e-6 at 4x the time.
+* **The NUFFT reference is 3-5x slower** than tuned cufinufft; it serves only for validation.
+
 ## Recommendations
 
 * **Use the Toeplitz operator for iterative reconstruction.** It wins at every size tested, even
