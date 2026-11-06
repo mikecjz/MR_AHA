@@ -16,10 +16,17 @@
  * Differences from the CUDA backend:
  *  - Arrays are host pointers in unified memory, wrapped in place as Metal
  *    buffers (see ::mr_metal_view).
- *  - Each coil is one command buffer (pad, FFT, block-diagonal, inverse FFT,
- *    crop), all committed back to back to the same queue, which runs them in
- *    order; the call waits for the last one. Keeping each command buffer short
- *    avoids the GPU watchdog on very large problems.
+ *  - Coils are processed in groups of up to ::mr_aha_plan_s::group: the
+ *    padded grids of a group sit side by side, one batched FFT transforms them
+ *    all, and the block-diagonal kernel applies `phi2_toep` to every coil of
+ *    the group in one pass. The block-diagonal stage is memory-bound on
+ *    reading `phi2_toep`, and a group reads it from DRAM about once instead of
+ *    once per coil (the GPU's caches serve the other coils), which removes a
+ *    large share of the operator's memory traffic.
+ *  - Each coil group is one command buffer (pad, FFT, block-diagonal, inverse
+ *    FFT, crop), all committed back to back to the same queue, which runs them
+ *    in order; the call waits for the last one. Keeping each command buffer
+ *    short avoids the GPU watchdog on very large problems.
  *  - The calls are synchronous: on return @p d_AhAx holds the result.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
@@ -42,14 +49,21 @@ static_assert(sizeof(mr_dims) == 80,
  *         `mr_k_bd_dense<L>` in mr_kernels.metal). */
 #define MR_METAL_BD_MAX_L 32
 
+/** @brief Default number of coils per group (see the file comment). Measured
+ *         on the M3 Ultra; `MR_AHA_METAL_COIL_GROUP` overrides it. */
+#define MR_METAL_COIL_GROUP 4
+
 /** @brief Internal state of a reusable Metal @f$A^H A@f$ plan. */
 struct mr_aha_plan_s {
     mr_config           cfg;      /**< Copy of the caller's configuration.     */
     mr_dims             dims;     /**< Kernel geometry descriptor.             */
     const mr_metal_ctx *ctx;      /**< Shared device and queue.                */
-    mr_metal_fft       *fft;      /**< Batched FFT over the upsampled grid.    */
-    MTL::Buffer        *pad;      /**< Padded working buffer `[Mx,My,Mz,L]`.   */
-    MTL::Buffer        *compact;  /**< `[num_masked, L]`; masked mode only.    */
+    int                 group;    /**< Coils per group (>= 1).                 */
+    mr_metal_fft       *fft;      /**< FFT over `group*L` volumes.             */
+    mr_metal_fft       *fft_rem;  /**< FFT over the last, smaller group, or
+                                       NULL when `n_coils % group == 0`.      */
+    MTL::Buffer        *pad;      /**< Padded grids `[Mx,My,Mz,L,group]`.      */
+    MTL::Buffer        *compact;  /**< `[num_masked,L,group]`; masked only.    */
     MTL::ComputePipelineState *k_pad;     /**< mr_k_pad_mul_se.               */
     MTL::ComputePipelineState *k_crop;    /**< mr_k_crop_mul_conj_se.         */
     MTL::ComputePipelineState *k_bd;      /**< Dense or masked block-diagonal. */
@@ -68,6 +82,7 @@ static void mr_plan_free(mr_aha_plan p)
 {
     if (!p) return;
     mr_metal_fft_destroy(p->fft);
+    mr_metal_fft_destroy(p->fft_rem);
     if (p->pad) p->pad->release();
     if (p->compact) p->compact->release();
     delete p;
@@ -129,30 +144,10 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
                 p->dims.pad_size);
     }
 
-    /* Working buffers: GPU-only, so private storage. */
-    const NS::UInteger pad_bytes =
-        (NS::UInteger)p->dims.pad_size * cfg->L * sizeof(mr_complex);
-    p->pad = ctx->device->newBuffer(pad_bytes, MTL::ResourceStorageModePrivate);
-    if (!p->pad) {
-        mr_plan_free(p);
-        MR_FAIL(MR_ERR_ALLOC, "failed to allocate the %lu-byte padded buffer",
-                (unsigned long)pad_bytes);
-    }
-    if (cfg->is_masked) {
-        const NS::UInteger cb =
-            (NS::UInteger)cfg->num_masked * cfg->L * sizeof(mr_complex);
-        p->compact = ctx->device->newBuffer(cb, MTL::ResourceStorageModePrivate);
-        if (!p->compact) {
-            mr_plan_free(p);
-            MR_FAIL(MR_ERR_ALLOC, "failed to allocate the %lu-byte masked buffer",
-                    (unsigned long)cb);
-        }
-    }
-
     /* Pipelines. The block-diagonal stage uses the kernels specialised on L
-     * (register vectors, each stored element read once) for L <= 32, and the
-     * generic threadgroup-memory kernels otherwise or when
-     * MR_AHA_METAL_GENERIC_BD=1 (kept for comparison). */
+     * (register vectors, each stored element read once, coil groups) for
+     * L <= 32, and the generic threadgroup-memory kernels (one coil at a time)
+     * otherwise or when MR_AHA_METAL_GENERIC_BD=1 (kept for comparison). */
     const char *gen = std::getenv("MR_AHA_METAL_GENERIC_BD");
     const bool specialised =
         cfg->L <= MR_METAL_BD_MAX_L && !(gen && gen[0] && gen[0] != '0');
@@ -181,8 +176,52 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
         return rc;
     }
 
-    /* Batched FFT over the upsampled grid, one volume per rank. */
-    rc = mr_metal_fft_create(ctx, cfg->n_spatial, cfg->phi2_dim, cfg->L, &p->fft);
+    /* Coil group size: the default (or MR_AHA_METAL_COIL_GROUP), at most the
+     * number of coils, a group's FFT must stay below 2^31 complex values
+     * (mr_metal_fft.cpp), and its grids within a quarter of the GPU's
+     * recommended working set. The generic kernels handle one coil. */
+    const uint64_t per_coil = (uint64_t)p->dims.pad_size * (uint64_t)cfg->L;
+    int group = MR_METAL_COIL_GROUP;
+    {
+        const char *e = std::getenv("MR_AHA_METAL_COIL_GROUP");
+        if (e && e[0]) group = atoi(e);
+    }
+    if (!specialised || group < 1) group = 1;
+    if (group > cfg->n_coils) group = cfg->n_coils;
+    while (group > 1 && (per_coil * (uint64_t)group > (1ull << 31) - 1 ||
+                         per_coil * (uint64_t)group * sizeof(mr_complex) >
+                             ctx->device->recommendedMaxWorkingSetSize() / 4))
+        --group;
+    p->group = group;
+
+    /* Working buffers: GPU-only, so private storage. */
+    const NS::UInteger pad_bytes =
+        (NS::UInteger)(per_coil * (uint64_t)group * sizeof(mr_complex));
+    p->pad = ctx->device->newBuffer(pad_bytes, MTL::ResourceStorageModePrivate);
+    if (!p->pad) {
+        mr_plan_free(p);
+        MR_FAIL(MR_ERR_ALLOC, "failed to allocate the %lu-byte padded buffer",
+                (unsigned long)pad_bytes);
+    }
+    if (cfg->is_masked) {
+        const NS::UInteger cb = (NS::UInteger)cfg->num_masked * cfg->L * group *
+                                sizeof(mr_complex);
+        p->compact = ctx->device->newBuffer(cb, MTL::ResourceStorageModePrivate);
+        if (!p->compact) {
+            mr_plan_free(p);
+            MR_FAIL(MR_ERR_ALLOC, "failed to allocate the %lu-byte masked buffer",
+                    (unsigned long)cb);
+        }
+    }
+
+    /* Batched FFTs over the upsampled grid: one volume per rank and coil of a
+     * group, plus one for a smaller last group. */
+    rc = mr_metal_fft_create(ctx, cfg->n_spatial, cfg->phi2_dim, cfg->L * group,
+                             &p->fft);
+    const int rem = cfg->n_coils % group;
+    if (rc == MR_SUCCESS && rem)
+        rc = mr_metal_fft_create(ctx, cfg->n_spatial, cfg->phi2_dim, cfg->L * rem,
+                                 &p->fft_rem);
     if (rc != MR_SUCCESS) {
         mr_plan_free(p);
         return rc;
@@ -204,7 +243,7 @@ extern "C" int mr_aha_plan_destroy(mr_aha_plan plan)
 /* Execution                                                                */
 /* ------------------------------------------------------------------------ */
 
-/** @brief Number of profiled stages of one coil (see ::mr_stage_names). */
+/** @brief Number of profiled stages of one coil group (see ::mr_stage_names). */
 #define MR_N_STAGES 5
 
 /** @brief Names of the profiled stages, in execution order. */
@@ -244,39 +283,48 @@ static int mr_stage_end(mr_profile *prof, int k, MTL::CommandBuffer *&cb,
 }
 
 /**
- * @brief Encode the whole operator for one coil into @p enc.
+ * @brief Encode the whole operator for coils `[coil0, coil0 + nc)` into @p enc.
  *
- * Buffer indices follow the kernel signatures in `mr_kernels.metal`. With
+ * Buffer indices follow the kernel signatures in `mr_kernels.metal`. Coil
+ * `coil0 + s` uses slot `s` of the padded (and compact) buffers. With
  * profiling on, @p cb and @p enc are replaced at every stage boundary.
  */
-static int mr_encode_coil(mr_aha_plan p, MTL::CommandBuffer *&cb,
-                          MTL::ComputeCommandEncoder *&enc, int coil,
-                          const mr_metal_view &x, const mr_metal_view &se,
-                          const mr_metal_view &toep, const mr_metal_view &mask,
-                          const mr_metal_view &out, mr_profile *prof)
+static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
+                           MTL::ComputeCommandEncoder *&enc, int coil0, int nc,
+                           const mr_metal_view &x, const mr_metal_view &se,
+                           const mr_metal_view &toep, const mr_metal_view &mask,
+                           const mr_metal_view &out, mr_profile *prof)
 {
     const mr_dims &d = p->dims;
-    const int accumulate = coil > 0 ? 1 : 0;
+    const NS::UInteger slot =
+        (NS::UInteger)d.pad_size * (NS::UInteger)d.L * sizeof(mr_complex);
+    mr_metal_fft *fft = (nc == p->group) ? p->fft : p->fft_rem;
 
-    /* 1. Zero-pad and apply the coil sensitivity (also clears the grid). */
-    enc->setComputePipelineState(p->k_pad);
-    enc->setBuffer(p->pad, 0, 0);
-    mr_metal_bind(enc, x, 1);
-    mr_metal_bind(enc, se, 2);
-    enc->setBytes(&d, sizeof(d), 3);
-    enc->setBytes(&coil, sizeof(coil), 4);
-    mr_metal_dispatch_1d(enc, p->k_pad, (uint64_t)d.pad_size);
+    /* 1. Zero-pad and apply each coil's sensitivity (also clears the grid). */
+    for (int s = 0; s < nc; ++s) {
+        const int coil = coil0 + s;
+        enc->setComputePipelineState(p->k_pad);
+        enc->setBuffer(p->pad, slot * (NS::UInteger)s, 0);
+        mr_metal_bind(enc, x, 1);
+        mr_metal_bind(enc, se, 2);
+        enc->setBytes(&d, sizeof(d), 3);
+        enc->setBytes(&coil, sizeof(coil), 4);
+        mr_metal_dispatch_1d(enc, p->k_pad, (uint64_t)d.pad_size);
+    }
     int rc = mr_stage_end(prof, 0, cb, enc);
     if (rc != MR_SUCCESS) return rc;
 
-    /* 2. Forward FFT onto the upsampled Cartesian k-space grid. */
-    rc = mr_metal_fft_encode(p->fft, cb, enc, p->pad, false);
+    /* 2. Forward FFT of all ranks of all coils of the group. */
+    rc = mr_metal_fft_encode(fft, cb, enc, p->pad, false);
     if (rc != MR_SUCCESS) return rc;
     if ((rc = mr_stage_end(prof, 1, cb, enc)) != MR_SUCCESS) return rc;
 
-    /* 3. Hermitian block-diagonal multiplication. */
+    /* 3. Hermitian block-diagonal multiplication (one pass over phi2_toep
+     *    for the whole group with the specialised kernels). */
     if (p->cfg.is_masked) {
         const long long nm = (long long)p->cfg.num_masked;
+        const NS::UInteger cslot =
+            (NS::UInteger)nm * (NS::UInteger)d.L * sizeof(mr_complex);
         enc->setComputePipelineState(p->k_bd);
         enc->setBuffer(p->compact, 0, 0);
         enc->setBuffer(p->pad, 0, 1);
@@ -284,50 +332,57 @@ static int mr_encode_coil(mr_aha_plan p, MTL::CommandBuffer *&cb,
         mr_metal_bind(enc, mask, 3);
         enc->setBytes(&nm, sizeof(nm), 4);
         enc->setBytes(&d, sizeof(d), 5);
+        enc->setBytes(&nc, sizeof(nc), 6);
         if (p->bd_tgmem) enc->setThreadgroupMemoryLength(p->bd_tgmem, 0);
         mr_metal_dispatch_1d(enc, p->k_bd, (uint64_t)nm, p->bd_threads);
 
         /* Samples outside the mask contribute nothing. */
         const long long n = d.pad_size;
-        const int count = d.L;
+        const int count = d.L * nc;
         enc->setComputePipelineState(p->k_zero);
         enc->setBuffer(p->pad, 0, 0);
         enc->setBytes(&n, sizeof(n), 1);
         enc->setBytes(&count, sizeof(count), 2);
         mr_metal_dispatch_1d(enc, p->k_zero, (uint64_t)n);
 
-        enc->setComputePipelineState(p->k_scatter);
-        enc->setBuffer(p->pad, 0, 0);
-        enc->setBuffer(p->compact, 0, 1);
-        mr_metal_bind(enc, mask, 2);
-        enc->setBytes(&nm, sizeof(nm), 3);
-        enc->setBytes(&d, sizeof(d), 4);
-        mr_metal_dispatch_1d(enc, p->k_scatter, (uint64_t)nm);
+        for (int s = 0; s < nc; ++s) {
+            enc->setComputePipelineState(p->k_scatter);
+            enc->setBuffer(p->pad, slot * (NS::UInteger)s, 0);
+            enc->setBuffer(p->compact, cslot * (NS::UInteger)s, 1);
+            mr_metal_bind(enc, mask, 2);
+            enc->setBytes(&nm, sizeof(nm), 3);
+            enc->setBytes(&d, sizeof(d), 4);
+            mr_metal_dispatch_1d(enc, p->k_scatter, (uint64_t)nm);
+        }
     } else {
         enc->setComputePipelineState(p->k_bd);
         enc->setBuffer(p->pad, 0, 0);
         mr_metal_bind(enc, toep, 1);
         enc->setBytes(&d, sizeof(d), 2);
+        enc->setBytes(&nc, sizeof(nc), 3);
         if (p->bd_tgmem) enc->setThreadgroupMemoryLength(p->bd_tgmem, 0);
         mr_metal_dispatch_1d(enc, p->k_bd, (uint64_t)d.pad_size, p->bd_threads);
     }
-
     if ((rc = mr_stage_end(prof, 2, cb, enc)) != MR_SUCCESS) return rc;
 
     /* 4. Inverse FFT back to the padded image domain. */
-    rc = mr_metal_fft_encode(p->fft, cb, enc, p->pad, true);
+    rc = mr_metal_fft_encode(fft, cb, enc, p->pad, true);
     if (rc != MR_SUCCESS) return rc;
     if ((rc = mr_stage_end(prof, 3, cb, enc)) != MR_SUCCESS) return rc;
 
     /* 5. Crop, apply the adjoint sensitivity and accumulate over coils. */
-    enc->setComputePipelineState(p->k_crop);
-    mr_metal_bind(enc, out, 0);
-    enc->setBuffer(p->pad, 0, 1);
-    mr_metal_bind(enc, se, 2);
-    enc->setBytes(&d, sizeof(d), 3);
-    enc->setBytes(&coil, sizeof(coil), 4);
-    enc->setBytes(&accumulate, sizeof(accumulate), 5);
-    mr_metal_dispatch_1d(enc, p->k_crop, (uint64_t)d.image_size);
+    for (int s = 0; s < nc; ++s) {
+        const int coil = coil0 + s;
+        const int accumulate = coil > 0 ? 1 : 0;
+        enc->setComputePipelineState(p->k_crop);
+        mr_metal_bind(enc, out, 0);
+        enc->setBuffer(p->pad, slot * (NS::UInteger)s, 1);
+        mr_metal_bind(enc, se, 2);
+        enc->setBytes(&d, sizeof(d), 3);
+        enc->setBytes(&coil, sizeof(coil), 4);
+        enc->setBytes(&accumulate, sizeof(accumulate), 5);
+        mr_metal_dispatch_1d(enc, p->k_crop, (uint64_t)d.image_size);
+    }
     return mr_stage_end(prof, 4, cb, enc);
 }
 
@@ -373,10 +428,13 @@ extern "C" int mr_aha_plan_execute(mr_aha_plan plan, const mr_complex *d_x,
     }
     std::vector<MTL::CommandBuffer *> cbs;
     cbs.reserve((size_t)cfg->n_coils);
-    for (int coil = 0; coil < cfg->n_coils; ++coil) {
+    for (int coil0 = 0; coil0 < cfg->n_coils; coil0 += plan->group) {
+        const int nc = (cfg->n_coils - coil0 < plan->group) ? cfg->n_coils - coil0
+                                                            : plan->group;
         MTL::CommandBuffer *cb = ctx->queue->commandBuffer();
         MTL::ComputeCommandEncoder *enc = cb->computeCommandEncoder();
-        rc = mr_encode_coil(plan, cb, enc, coil, x, se, toep, mask, out, &prof);
+        rc = mr_encode_group(plan, cb, enc, coil0, nc, x, se, toep, mask, out,
+                             &prof);
         enc->endEncoding();
         if (rc != MR_SUCCESS) break;
         cb->commit();
@@ -396,8 +454,8 @@ extern "C" int mr_aha_plan_execute(mr_aha_plan plan, const mr_complex *d_x,
     if (prof.on) {
         double total = 0.0;
         for (int k = 0; k < MR_N_STAGES; ++k) total += prof.ms[k];
-        fprintf(stderr, "[mr_aha] Metal profile, %d coil(s), %s:\n", cfg->n_coils,
-                cfg->is_masked ? "masked" : "unmasked");
+        fprintf(stderr, "[mr_aha] Metal profile, %d coil(s) in groups of %d, %s:\n",
+                cfg->n_coils, plan->group, cfg->is_masked ? "masked" : "unmasked");
         for (int k = 0; k < MR_N_STAGES; ++k)
             fprintf(stderr, "[mr_aha]   %-18s %9.2f ms  (%4.1f%%)\n",
                     mr_stage_names[k], prof.ms[k], 100.0 * prof.ms[k] / total);

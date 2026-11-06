@@ -312,12 +312,19 @@ static inline void mr_block_apply(thread const float2 (&v)[L], thread float2 (&y
  * @brief In-place block-diagonal multiplication over the whole grid,
  *        specialised on L (host names `mr_k_bd_dense_<L>`, L = 1..32).
  *
- * Same contract as ::mr_k_blockdiag_dense, without threadgroup memory.
+ * Same contract as ::mr_k_blockdiag_dense, without threadgroup memory, and
+ * applied to @p ncoil coils whose `[Mx, My, Mz, L]` grids follow one another
+ * in @p pad (`slot` = `L * Mx*My*Mz` elements apart). The coils of a group
+ * are processed back to back by the same thread, so the kernel values it
+ * reads for the first coil are still in the GPU's caches for the others:
+ * `phi2_toep`, the dominant memory traffic, is fetched from DRAM about once
+ * per group instead of once per coil.
  */
 template <int L>
-kernel void mr_k_bd_dense(device float2       *pad  [[buffer(0)]],
-                          device const float2 *toep [[buffer(1)]],
-                          constant mr_dims    &d    [[buffer(2)]],
+kernel void mr_k_bd_dense(device float2       *pad   [[buffer(0)]],
+                          device const float2 *toep  [[buffer(1)]],
+                          constant mr_dims    &d     [[buffer(2)]],
+                          constant int        &ncoil [[buffer(3)]],
                           uint tid [[thread_position_in_grid]])
 {
     if ((long)tid >= d.pad_size) return;
@@ -327,16 +334,22 @@ kernel void mr_k_bd_dense(device float2       *pad  [[buffer(0)]],
     const ulong k2 = (ulong)mr_nat2cent((int)jc.z, d.m[2], d.c_m[2]);
     const ulong pc = k0 + (ulong)d.m[0] * (k1 + (ulong)d.m[1] * k2);
     const ulong padn = (ulong)d.pad_size;
+    const ulong slot = padn * (ulong)L;
 
-    float2 v[L], y[L];
-    for (int l = 0; l < L; ++l) v[l] = pad[(ulong)tid + padn * l];
-    mr_block_apply<L>(v, y, toep + pc, padn, d.tri_upper != 0);
-    for (int l = 0; l < L; ++l) pad[(ulong)tid + padn * l] = y[l];
+    for (int s = 0; s < ncoil; ++s) {
+        device float2 *g = pad + slot * (ulong)s + (ulong)tid;
+        float2 v[L], y[L];
+        for (int l = 0; l < L; ++l) v[l] = g[padn * l];
+        mr_block_apply<L>(v, y, toep + pc, padn, d.tri_upper != 0);
+        for (int l = 0; l < L; ++l) g[padn * l] = y[l];
+    }
 }
 
 /**
  * @brief Masked block-diagonal multiplication specialised on L (host names
- *        `mr_k_bd_masked_<L>`). Same contract as ::mr_k_blockdiag_masked.
+ *        `mr_k_bd_masked_<L>`). Same contract as ::mr_k_blockdiag_masked,
+ *        for a group of @p ncoil coils as in ::mr_k_bd_dense (`[num_masked,
+ *        L]` compact slots and `[Mx, My, Mz, L]` grid slots, one per coil).
  */
 template <int L>
 kernel void mr_k_bd_masked(device float2       *compact    [[buffer(0)]],
@@ -345,16 +358,21 @@ kernel void mr_k_bd_masked(device float2       *compact    [[buffer(0)]],
                            device const long   *mask       [[buffer(3)]],
                            constant long       &num_masked [[buffer(4)]],
                            constant mr_dims    &d          [[buffer(5)]],
+                           constant int        &ncoil      [[buffer(6)]],
                            uint tid [[thread_position_in_grid]])
 {
     if ((long)tid >= num_masked) return;
     const ulong jj = mr_mask_to_natural(mask[tid], d);
     const ulong padn = (ulong)d.pad_size, nm = (ulong)num_masked;
 
-    float2 v[L], y[L];
-    for (int l = 0; l < L; ++l) v[l] = pad[jj + padn * l];
-    mr_block_apply<L>(v, y, toep + tid, nm, d.tri_upper != 0);
-    for (int l = 0; l < L; ++l) compact[(ulong)tid + nm * l] = y[l];
+    for (int s = 0; s < ncoil; ++s) {
+        device const float2 *g = pad + padn * (ulong)L * (ulong)s + jj;
+        device float2 *o = compact + nm * (ulong)L * (ulong)s + (ulong)tid;
+        float2 v[L], y[L];
+        for (int l = 0; l < L; ++l) v[l] = g[padn * l];
+        mr_block_apply<L>(v, y, toep + tid, nm, d.tri_upper != 0);
+        for (int l = 0; l < L; ++l) o[nm * l] = y[l];
+    }
 }
 
 /* Explicit instantiations, L = 1..32. Larger ranks use the generic
@@ -364,6 +382,7 @@ kernel void mr_k_bd_masked(device float2       *compact    [[buffer(0)]],
     mr_k_bd_dense<L>(device float2 *pad [[buffer(0)]],                           \
                      device const float2 *toep [[buffer(1)]],                    \
                      constant mr_dims &d [[buffer(2)]],                          \
+                     constant int &ncoil [[buffer(3)]],                          \
                      uint tid [[thread_position_in_grid]]);                      \
     template [[host_name("mr_k_bd_masked_" #L)]] [[kernel]] void                \
     mr_k_bd_masked<L>(device float2 *compact [[buffer(0)]],                      \
@@ -372,6 +391,7 @@ kernel void mr_k_bd_masked(device float2       *compact    [[buffer(0)]],
                       device const long *mask [[buffer(3)]],                     \
                       constant long &num_masked [[buffer(4)]],                   \
                       constant mr_dims &d [[buffer(5)]],                         \
+                      constant int &ncoil [[buffer(6)]],                         \
                       uint tid [[thread_position_in_grid]]);
 MR_BD_INSTANTIATE(1)  MR_BD_INSTANTIATE(2)  MR_BD_INSTANTIATE(3)  MR_BD_INSTANTIATE(4)
 MR_BD_INSTANTIATE(5)  MR_BD_INSTANTIATE(6)  MR_BD_INSTANTIATE(7)  MR_BD_INSTANTIATE(8)

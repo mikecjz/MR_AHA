@@ -6,7 +6,10 @@ the generic threadgroup-memory kernels otherwise or when
 ``MR_AHA_METAL_GENERIC_BD=1``. The reference data cover only a few ranks, so
 this test applies the operator with both kernel families on random inputs for
 many ranks (including the fallback at L = 33), both triangulations, unmasked
-and masked, and checks that they agree to single-precision rounding.
+and masked, and checks that they agree to single-precision rounding. The
+specialised kernels also process coils in groups (``MR_AHA_METAL_COIL_GROUP``);
+with 5 coils, groups of 1, 2 and 4 (the last group smaller) are all checked
+against the generic kernels, which handle one coil at a time.
 
 Usage (Metal backend, from the repository root)::
 
@@ -28,13 +31,15 @@ import mr_aha  # noqa: E402
 RANKS = (1, 2, 5, 7, 12, 16, 20, 31, 32, 33)
 
 
-def apply(cfg, x, SEs, toep, mask, generic: bool) -> np.ndarray:
-    """One operator application with the chosen kernel family."""
+def apply(cfg, x, SEs, toep, mask, generic: bool, group: int = 4) -> np.ndarray:
+    """One operator application with the chosen kernel family and coil group."""
     os.environ["MR_AHA_METAL_GENERIC_BD"] = "1" if generic else "0"
+    os.environ["MR_AHA_METAL_COIL_GROUP"] = str(group)
     try:
         return mr_aha.aha_toeplitz(cfg, x, SEs, toep, mask=mask)
     finally:
         os.environ.pop("MR_AHA_METAL_GENERIC_BD", None)
+        os.environ.pop("MR_AHA_METAL_COIL_GROUP", None)
 
 
 def main() -> int:
@@ -43,7 +48,7 @@ def main() -> int:
         print("this test is for the Metal backend")
         return 0
     rng = np.random.default_rng(1)
-    n_dim, n_coils = (24, 20), 2
+    n_dim, n_coils = (24, 20), 5
     worst, failed = 0.0, 0
     for L in RANKS:
         for tri in ("lower", "upper"):
@@ -61,15 +66,16 @@ def main() -> int:
                 x = crandn(L, n_dim[1], n_dim[0])
                 SEs = crandn(n_coils, n_dim[1], n_dim[0])
                 toep = crandn(*mr_aha.phi2_toep_shape(cfg))
-                a = apply(cfg, x, SEs, toep, mask, generic=False)
                 b = apply(cfg, x, SEs, toep, mask, generic=True)
-                err = float(np.linalg.norm((a - b).astype(np.complex128).ravel())
-                            / np.linalg.norm(b.astype(np.complex128).ravel()))
-                worst = max(worst, err)
-                if not err < 1e-5:
-                    failed += 1
-                    print(f"FAIL L={L} {tri} masked={masked}: {err:.2e}")
-    print(f"{len(RANKS) * 4} combinations, worst relative difference {worst:.2e}, "
+                for group in (1, 2, 4):
+                    a = apply(cfg, x, SEs, toep, mask, generic=False, group=group)
+                    err = float(np.linalg.norm((a - b).astype(np.complex128).ravel())
+                                / np.linalg.norm(b.astype(np.complex128).ravel()))
+                    worst = max(worst, err)
+                    if not err < 1e-5:
+                        failed += 1
+                        print(f"FAIL L={L} {tri} masked={masked} group={group}: {err:.2e}")
+    print(f"{len(RANKS) * 4 * 3} combinations, worst relative difference {worst:.2e}, "
           f"{failed} failed")
     return 1 if failed else 0
 
