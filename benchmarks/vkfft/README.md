@@ -72,11 +72,21 @@ library cannot live with it.
 **Fix in use.** The `third_party/VkFFT` submodule points to the fork
 [mikecjz/VkFFT](https://github.com/mikecjz/VkFFT), branch `mr_aha`: upstream `develop`
 (`e687182`, two bug-fix releases after v1.3.4) plus only the Metal commit of PR #227
-(`bd406e8`, authored by nweston). The PR's second commit (an unrelated NVRTC change) is left out.
+(`bd406e8`, authored by nweston), plus the push-constant fix below (`2f9fb8f`). The PR's second commit (an unrelated NVRTC change) is left out.
 With the fix, VkFFT no longer releases autoreleased objects, so every call into VkFFT must run
 inside an autorelease pool, which the library provides around each API entry point.
 `vkfft_bench --replan N` exercises exactly that life cycle (create, run, destroy, drain) N times.
 Drop the fork once upstream merges the fix.
+
+**Second fork patch (`2f9fb8f`).** VkFFT's Metal backend kept each axis's push constants in one
+shared `MTLBuffer` that it rewrote on the CPU before every dispatch. The GPU reads that buffer only
+when the command buffer runs, so all dispatches encoded into one command buffer saw the values of
+the last one. This broke launch-time offsets (`specifyOffsetsAtLaunch`) and would equally break
+VkFFT's own split dispatches (`workGroupShift`) on very large grids. The fork now passes the push
+constants with `setBytes`, which copies them at encode time. The library needs launch offsets
+because VkFFT's 64-bit addressing mode (used automatically for buffers of 16 GiB or more) does
+not compile on Metal, so `src/metal/mr_metal_fft.cpp` splits such batches into sub-16 GiB
+launches; with `MR_AHA_METAL_FFT_MAX_BYTES=100000` every reference case passes with split FFTs.
 
 Re-checked with the fork (`coalescedMemory=32`): `--replan 50` (2d) and `--replan 3` (stack, 3d)
 pass; forward error vs SciPy 2.5e-7 / 2.9e-7 / 3.2e-7 and fwd+inv 0.12 / 38.1 / 54.1 ms
