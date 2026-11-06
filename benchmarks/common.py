@@ -264,6 +264,18 @@ def gpu_info():
     )
 
 
+def free_bytes():
+    """Free device memory after releasing CuPy's cached blocks.
+
+    On Metal (unified memory) this is the GPU's recommended working set.
+    """
+    if BACKEND != "cuda":
+        import mlx.core as mx  # noqa: PLC0415
+        return int(mx.device_info()["max_recommended_working_set_size"])
+    cp.get_default_memory_pool().free_all_blocks()
+    return cp.cuda.runtime.memGetInfo()[0]
+
+
 def save_json(obj, path):
     """Write ``obj`` as pretty JSON, creating parent directories."""
     path = Path(path)

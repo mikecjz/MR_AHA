@@ -39,24 +39,12 @@ import numpy as np
 import os
 from pathlib import Path
 
-from common import (BACKEND, RESULTS, cg, cp, gpu_info, load, make_cfg, mr_aha,
-                    rel, save_json, sync, timed_once, timeit)
+from common import (BACKEND, RESULTS, cg, cp, free_bytes, gpu_info, load,
+                    make_cfg, mr_aha, rel, save_json, sync, timed_once, timeit)
 
 N_ITER = 20
 N_REP = {"2d": 20, "stack": 5, "3d": 5}
 METHODS = [(1, 1), (1, 2), (2, 1), (2, 2)]  # (type-1 method, type-2 method)
-
-
-def free_bytes():
-    """Free device memory after releasing CuPy's cached blocks.
-
-    On Metal (unified memory) this is the GPU's recommended working set.
-    """
-    if BACKEND != "cuda":
-        import mlx.core as mx  # noqa: PLC0415
-        return int(mx.device_info()["max_recommended_working_set_size"])
-    cp.get_default_memory_pool().free_all_blocks()
-    return cp.cuda.runtime.memGetInfo()[0]
 
 
 def nufft_plan(d, methods=None):
