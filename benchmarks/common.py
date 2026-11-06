@@ -206,8 +206,7 @@ def cg(op, b, n_iter=20):
             # materialises the elementwise product, which matters for 3D data).
             return complex(cublas.dotc(a.ravel(), c.ravel()))
     else:
-        def dot(a, c):
-            return complex(np.vdot(a.ravel(), c.ravel()))
+        dot = dot64
 
     u = cp.zeros_like(b)
     r = b.copy()
@@ -229,9 +228,34 @@ def cg(op, b, n_iter=20):
     return u, res
 
 
+def dot64(a, c, chunk: int = 1 << 22) -> complex:
+    """``conj(a) . c`` accumulated in double precision, chunk by chunk.
+
+    Single-precision BLAS dot products are not accurate enough for the
+    benchmark vectors on the CPU: Apple's Accelerate (NumPy's BLAS on macOS)
+    gets the norm of a 69-million-element complex64 vector (the stack problem)
+    wrong by 1.2 %, and OpenBLAS's ``vdot`` by 0.7 %, which derails CG and the
+    reported differences. cuBLAS (the CUDA path) is unaffected. Each chunk is
+    promoted to complex128, which bounds the extra memory.
+    """
+    a, c = a.ravel(), c.ravel()
+    s = 0j
+    for i in range(0, a.size, chunk):
+        s += np.vdot(a[i:i + chunk].astype(np.complex128),
+                     c[i:i + chunk].astype(np.complex128))
+    return complex(s)
+
+
 def rel(a, b):
-    """Relative 2-norm difference ``||a - b|| / ||b||`` as a float."""
-    return float(cp.linalg.norm((a - b).ravel()) / cp.linalg.norm(b.ravel()))
+    """Relative 2-norm difference ``||a - b|| / ||b||`` as a float.
+
+    On the Metal backend (NumPy arrays) the norms are accumulated in double
+    precision, see :func:`dot64`.
+    """
+    if BACKEND == "cuda":
+        return float(cp.linalg.norm((a - b).ravel()) / cp.linalg.norm(b.ravel()))
+    d = a - b
+    return float((dot64(d, d).real / dot64(b, b).real) ** 0.5)
 
 
 def gpu_info():
