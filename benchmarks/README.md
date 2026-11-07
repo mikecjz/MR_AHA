@@ -274,9 +274,6 @@ made to the CUDA $A^HA$, following `.claude/optimization.md` and `.claude/multi-
 * **Multi-GPU** (`mr_aha.MultiGPUPlan`, `mr_aha_op`): coils distributed over the GPUs of a node,
   with an optional rank split of the remaining coils over NVLink.
 
-How each change works, and what was tried and rejected, is described in
-[`docs/PERFORMANCE.md`](../docs/PERFORMANCE.md).
-
 Inputs are constant arrays, timing is the median of 5 (single GPU) or 10 (multi-GPU) calls
 ([`bench_aha_backend.py`](bench_aha_backend.py), [`bench_mgpu.py`](bench_mgpu.py)). "Before" is
 the same build with `MR_AHA_CUDA_GENERIC_BD=1`, i.e. the generic kernels one coil at a time, which
