@@ -275,7 +275,7 @@ made to the CUDA $A^HA$, following `.claude/optimization.md` and `.claude/multi-
   with an optional rank split of the remaining coils over NVLink.
 
 How each change works, and what was tried and rejected, is described in
-[`PERFORMANCE.md`](../PERFORMANCE.md).
+[`docs/PERFORMANCE.md`](../docs/PERFORMANCE.md).
 
 Inputs are constant arrays, timing is the median of 5 (single GPU) or 10 (multi-GPU) calls
 ([`bench_aha_backend.py`](bench_aha_backend.py), [`bench_mgpu.py`](bench_mgpu.py)). "Before" is

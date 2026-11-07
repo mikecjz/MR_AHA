@@ -485,7 +485,7 @@ per coil. The group shrinks until its buffers fit `config.mem_fraction` of the f
 `MR_AHA_CUDA_COIL_GROUP=n` (requested group size), `MR_AHA_CUDA_GENERIC_BD=1` (generic
 shared-memory kernels, one coil at a time; always used for $L > 30$, where they are as fast); and at every application
 `MR_AHA_CUDA_PROFILE=1` prints the GPU time of each stage. The results are bitwise identical to the
-generic kernels (`tests/check_bd_kernels.py`). [`PERFORMANCE.md`](PERFORMANCE.md) explains these
+generic kernels (`tests/check_bd_kernels.py`). [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) explains these
 mechanisms, and those of the multi-GPU operator, in detail.
 
 **Re-entrancy.** No `__constant__` or other shared device state: kernel geometry travels by value.

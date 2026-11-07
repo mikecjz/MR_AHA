@@ -2,9 +2,9 @@
 
 This note explains the mechanisms behind the 2026-11 performance work on the CUDA backend:
 what each change does, why it saves time, and what was tried and rejected. The measurements are
-in [`benchmarks/README.md`](benchmarks/README.md#cuda-operator-optimisation-and-multi-gpu-2026-11);
-the user-facing description is in the [README](README.md#implementation-notes) and the
-[Multi-GPU section](README.md#multi-gpu-cuda). The work followed two plans, one for a single GPU
+in [`benchmarks/README.md`](../benchmarks/README.md#cuda-operator-optimisation-and-multi-gpu-2026-11);
+the user-facing description is in the [README](../README.md#implementation-notes) and the
+[Multi-GPU section](../README.md#multi-gpu-cuda). The work followed two plans, one for a single GPU
 and one for several GPUs.
 
 | | before | after |
