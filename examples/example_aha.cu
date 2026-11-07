@@ -87,7 +87,9 @@ int main(void)
         }
     }
 
-    /* Hermitian positive-semidefinite Gram blocks Phi^H Phi = B^H B. */
+    /* Hermitian positive-semidefinite Gram blocks in the MR-Multitasking
+     * convention: Phi2 = Phi Phi^H for a random rank x time basis Phi = B
+     * (L x L here). The library applies them as v <- v * Phi2. */
     std::vector<float2> h_phi2((size_t)Ntrajs * Nz * L * L);
     for (int64_t s = 0; s < Ntrajs; ++s) {
         for (int64_t z = 0; z < Nz; ++z) {
@@ -97,11 +99,11 @@ int main(void)
                 for (int j = 0; j < L; ++j) {
                     float re = 0.0f, im = 0.0f;
                     for (int k = 0; k < L; ++k) {
-                        /* (B^H B)_{ij} = sum_k conj(B_{ki}) B_{kj} */
-                        const float2 a = B[k + (size_t)L * i];
-                        const float2 b = B[k + (size_t)L * j];
+                        /* (B B^H)_{ij} = sum_k B_{ik} conj(B_{jk}) */
+                        const float2 a = B[i + (size_t)L * k];
+                        const float2 b = B[j + (size_t)L * k];
                         re += a.x * b.x + a.y * b.y;
-                        im += a.x * b.y - a.y * b.x;
+                        im += a.y * b.x - a.x * b.y;
                     }
                     const size_t idx = (size_t)(s + Ntrajs * (z + Nz * (i + L * j)));
                     h_phi2[idx] = {re, im};

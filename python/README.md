@@ -52,6 +52,14 @@ and no data is ever moved.
 | `traj[Ntrajs, Nkx, ndim]`    | `traj[ndim, Nkx, Ntrajs]`  |
 | `mask_kernel[Mx, My, Mz]`    | `mask_kernel[Mz, My, Mx]`  |
 
+**Gram blocks** follow MR-Multitasking: `phi2` holds `Phi_rt(:,idx) * Phi_rt(:,idx)'`
+of the rank x time basis, and every block multiplies the rank coefficients of a
+k-space location as a row vector from the right (`k * Phi2`). With row-major
+`phi2[a, b, ...]` holding column-major entry `(b, a)`, that is
+`out[l] = sum_m phi2[l, m] * v[m]`. A MR-Multitasking `Phi2` read with h5py,
+row-major `(Nz, Ntrajs, L, L)`, is passed as `P.transpose(2, 3, 0, 1)` (plus an
+`fftshift` along kz if it is in natural order). See the main README.
+
 ## Usage
 
 ```python

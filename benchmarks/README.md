@@ -60,8 +60,15 @@ JSON files next to them.
 | `3d` | `data/kooshball_3d.mat`, synthetic ([`make_kooshball.py`](make_kooshball.py)) | 160³ | 12 | 12 | 15680 spokes × 160 | $A^HA\,x_\text{true}$ for a random-ellipsoid `x_true` |
 
 The synthetic 3D problem uses golden-means kooshball directions, smooth complex Gaussian coil
-maps, and a smooth complex orthonormal temporal basis $U$. Each spoke is acquired at one time
-point, so its Gram block is the rank-one $\overline{u_t}u_t^T$.
+maps, and a smooth complex orthonormal temporal basis $U$ (the rank × time basis is $U^T$). Each
+spoke is acquired at one time point, so its Gram block is the rank-one $u_t\,\overline{u_t}^T$
+(MR-Multitasking convention, see the main README).
+
+**Gram-block convention.** All problems follow the library's MR-Multitasking convention: `phi2` is
+$\Phi\Phi^H$ of a rank × time basis and multiplies the rank row vector from the right. The `2d`
+file predates this convention (it holds the transposed blocks), so the loaders swap its two $L$
+axes; so do they for a `kooshball_3d.mat` written before the change (no `gram_convention`
+variable). The stack `Phi2` is MR-Multitasking's own `Phi_rt * Phi_rt'` and is used as is.
 
 **Stack data convention.** `Phi2` is stored as `[L, L, Ntraj, Nz]`. Its trace over kz peaks at
 indices 0 and 55 and is smallest around 28, so kz is in *natural* FFT order (DC first). The loaders

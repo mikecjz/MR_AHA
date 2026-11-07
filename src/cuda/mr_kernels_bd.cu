@@ -7,8 +7,8 @@
  *  - stage each thread's rank vector in shared memory (the rank is only known
  *    at run time), which limits the block size and the occupancy for large
  *    @f$L@f$;
- *  - evaluate the block row by row, so every off-diagonal stored element of
- *    `phi2_toep` is fetched twice (once as @f$A_{ij}@f$, once as
+ *  - evaluate the product one output component at a time, so every
+ *    off-diagonal stored element of `phi2_toep` is fetched twice (once as @f$A_{ij}@f$, once as
  *    @f$\overline{A_{ji}}@f$);
  *  - process one coil per launch, so `phi2_toep` (by far the largest array of
  *    the operator) is read from memory once per coil.
@@ -48,16 +48,18 @@ __device__ __forceinline__ mr_complex mr_cmul_conj(mr_complex a, mr_complex b)
 }
 
 /**
- * @brief Hermitian block times @p NC vectors, reading each stored element once.
+ * @brief @p NC row vectors times a Hermitian block, reading each stored
+ *        element once.
  *
- * Walks the stored triangle in packed order (see ::mr_triangulation): packed
- * component `t` is entry `(r, c)` of the block. It contributes
- * @f$A_{rc} v_c@f$ to @f$y_r@f$ and, off the diagonal,
- * @f$\overline{A_{rc}}\, v_r@f$ to @f$y_c@f$ (Hermitian symmetry), for each of
- * the @p NC vectors. The triangle orientation is a run-time (but
- * warp-uniform) flag; both walks are fully unrolled so that every register
- * index is a compile-time constant (a run-time index would demote the arrays
- * to local memory).
+ * Multitasking convention: each rank vector is a row vector multiplied from
+ * the right, @f$y = v A@f$, i.e. @f$y_c = \sum_r v_r A_{rc}@f$. Walks the
+ * stored triangle in packed order (see ::mr_triangulation): packed component
+ * `t` is entry `(r, c)` of the block. It contributes @f$v_r A_{rc}@f$ to
+ * @f$y_c@f$ and, off the diagonal, @f$v_c A_{cr} = v_c \overline{A_{rc}}@f$ to
+ * @f$y_r@f$ (Hermitian symmetry), for each of the @p NC vectors. The
+ * triangle orientation is a run-time (but warp-uniform) flag; both walks are
+ * fully unrolled so that every register index is a compile-time constant (a
+ * run-time index would demote the arrays to local memory).
  *
  * @tparam L        Rank.
  * @tparam NC       Number of vectors (coils) sharing each loaded element, 1 or 2.
@@ -98,8 +100,8 @@ __device__ __forceinline__ void mr_block_apply(const mr_complex (&v)[NC][L],
         const mr_complex a = *bp;                                              \
         bp += stride;                                                          \
         _Pragma("unroll") for (int k = 0; k < NC; ++k) {                       \
-            y[k][r] = cuCaddf(y[k][r], cuCmulf(a, v[k][c]));                   \
-            if ((r) != (c)) y[k][c] = cuCaddf(y[k][c], mr_cmul_conj(a, v[k][r])); \
+            y[k][c] = cuCaddf(y[k][c], cuCmulf(a, v[k][r]));                   \
+            if ((r) != (c)) y[k][r] = cuCaddf(y[k][r], mr_cmul_conj(a, v[k][c])); \
         }                                                                      \
     } while (0)
 

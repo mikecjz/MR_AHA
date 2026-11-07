@@ -16,18 +16,28 @@ Datasets
     ``data/human_C-35_2D_radial.mat``: 2D golden-angle radial, 160 x 160,
     16 coils, L = 6, 377 spokes x 160 samples. The right-hand side of the CG
     problem is the stored ``AhAx_ref`` (= A^H A x computed with CPU finufft),
-    so the exact solution is the stored ``x``.
+    so the exact solution is the stored ``x``. Its ``phi2`` predates the
+    MR-Multitasking Gram convention of the library (it is the transpose of
+    the block the library now expects), so the two ``L`` axes are swapped on
+    load.
 ``stack``
     ``data/AhAx_test_toeplitz.mat``: stack-of-stars, 320 x 320 x 56,
     12 coils, L = 12, 280 spokes x 320 samples. ``Phi2`` is stored as
     ``[L, L, Ntraj, Nz]`` with kz in natural FFT order (DC first, as its trace
-    shows); it is permuted to ``[Ntraj, Nz, L, L]`` and fftshifted along kz
-    into the centred order the library expects. The CG right-hand side is the
-    stored ``Ahb``.
+    shows); it is MR-Multitasking's ``Phi_rt * Phi_rt'`` and so is passed
+    unchanged apart from being permuted to ``[Ntraj, Nz, L, L]`` and
+    fftshifted along kz into the centred order the library expects. The CG
+    right-hand side is the stored ``Ahb``.
 ``3d``
     Synthetic 3D kooshball, 160^3, 12 coils, L = 12, 15680 spokes x 160
     samples, produced by ``make_kooshball.py``. The CG right-hand side is
-    ``A^H A x_true`` for a synthetic ``x_true``.
+    ``A^H A x_true`` for a synthetic ``x_true``. Files written before the
+    MR-Multitasking Gram convention (no ``gram_convention`` variable) hold
+    the transposed blocks and are converted on load (:func:`legacy_gram`).
+
+Gram blocks follow the library's MR-Multitasking convention (see
+:mod:`mr_aha.api`): ``Phi2 = Phi * Phi'`` with a rank x time basis, applied to
+the rank row vector from the right.
 """
 
 from __future__ import annotations
@@ -65,6 +75,23 @@ def _h5_complex(ds):
     return a.astype(np.complex64)
 
 
+def legacy_gram(phi2: np.ndarray) -> np.ndarray:
+    """Convert Gram blocks of the earlier convention to MR-Multitasking's.
+
+    Earlier versions of the library multiplied ``Phi2 @ v`` and so expected
+    ``Phi^H Phi`` of a time x rank basis, the transpose of MR-Multitasking's
+    ``Phi * Phi'``. Swapping the two ``L`` axes (the leading axes of the
+    row-major array) converts such blocks exactly.
+
+    Args:
+        phi2: Row-major ``(L, L, ...)`` Gram blocks in the earlier convention.
+
+    Returns:
+        A contiguous copy with the two ``L`` axes swapped.
+    """
+    return np.ascontiguousarray(np.swapaxes(phi2, 0, 1))
+
+
 def load(name: str):
     """Load a benchmark problem (onto the GPU for CUDA).
 
@@ -85,7 +112,7 @@ def load(name: str):
         L, Nt = 6, 377
         out = dict(
             traj_type="2D", n_dim=(160, 160), L=L,
-            SEs=d["SEs"].T, phi2=d["phi2"].T.reshape(L, L, Nt),
+            SEs=d["SEs"].T, phi2=legacy_gram(d["phi2"].T.reshape(L, L, Nt)),
             traj=d["traj"].T.astype(np.float32), b=d["AhAx_ref"].T,
             x_true=d["x"].T,
             desc="2D radial 160x160, 16 coils, L=6, 377x160 samples",
@@ -99,8 +126,8 @@ def load(name: str):
             b = _h5_complex(h["Ahb"])               # (L, Nz, Ny, Nx)
             om = h["st/om"][()].astype(np.float32)  # (2, Ntraj*Nkx)
         Nz, Nt, L = P.shape[0], P.shape[1], P.shape[2]
-        # Row-major (L, L, Nkz, Ntraj) with phi2[j, i, z, t] = Phi_{t,z}(i, j);
-        # then natural -> centred kz order.
+        # Row-major (L, L, Nkz, Ntraj) with phi2[j, i, z, t] = Phi2_{t,z}(i, j),
+        # i.e. MR-Multitasking's block unchanged; then natural -> centred kz.
         phi2 = np.fft.fftshift(P.transpose(2, 3, 0, 1), axes=2)
         Nkx = om.shape[1] // Nt
         out = dict(
@@ -117,9 +144,12 @@ def load(name: str):
         d = sio.loadmat(f)
         L = int(d["L"].item())
         Nt = int(d["traj"].shape[0])
+        phi2 = d["phi2"].T.reshape(L, L, Nt)
+        if "gram_convention" not in d:   # written before the convention change
+            phi2 = legacy_gram(phi2)
         out = dict(
             traj_type="3D", n_dim=(160, 160, 160), L=L,
-            SEs=d["SEs"].T, phi2=d["phi2"].T.reshape(L, L, Nt),
+            SEs=d["SEs"].T, phi2=phi2,
             traj=d["traj"].T.astype(np.float32), b=d["b"].T, x_true=d["x_true"].T,
             desc=f"3D kooshball 160^3, 12 coils, L={L}, {Nt}x160 samples (synthetic)",
         )

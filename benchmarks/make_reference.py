@@ -40,7 +40,8 @@ key                   row-major shape (saved)          column-major (C API docs)
 ====================  ===============================  =========================
 
 ``T = L (L + 1) / 2``. ``phi2[j, i, ...]`` holds entry ``(i, j)`` of the
-Hermitian Gram block. Mask indices are 0-based linear indices into the
+Hermitian Gram block ``Phi Phi^H`` (rank x time ``Phi``, MR-Multitasking
+convention, recorded as ``gram_convention`` in ``config_json``). Mask indices are 0-based linear indices into the
 centred upsampled grid ``[Mx, My, Mz]`` in column-major order, which equals
 the flat index of the row-major ``(Mz, My, Mx)`` array. For a stack the
 ``mask_kernel`` is the in-plane kernel only ``(My, Mx)``; the mask repeats it
@@ -77,6 +78,15 @@ import cupy as cp  # noqa: E402
 import mr_aha  # noqa: E402
 
 OUT_DIR = ROOT / "data" / "ref_mlx"
+
+#: Gram-block convention recorded in every file's ``config_json``
+#: (``gram_convention = "multitasking"``); ``tests/check_reference.py`` refuses
+#: files without it.
+GRAM_NOTE = (
+    "phi2 blocks are Phi*Phi' with a rank x time Phi (MR-Multitasking) and every "
+    "block (phi2 and phi2_toep) is applied to the rank row vector from the right, "
+    "v <- v*B."
+)
 
 #: Layout note copied into every file's ``config_json``.
 LAYOUT_NOTE = (
@@ -155,7 +165,10 @@ def make_traj(traj_type: str, n_traj: int, n_kx: int) -> np.ndarray:
 
 
 def make_phi2(rng, L: int, n_traj: int, n_kz: int | None) -> np.ndarray:
-    """Random Hermitian positive semi-definite Gram blocks ``A^H A``.
+    """Random Hermitian positive semi-definite Gram blocks ``Phi Phi^H``.
+
+    ``Phi = A^T`` is a random rank x time basis (MR-Multitasking convention,
+    see :mod:`mr_aha.api`), so ``B = A^T conj(A)``.
 
     Args:
         rng: NumPy random generator.
@@ -169,7 +182,7 @@ def make_phi2(rng, L: int, n_traj: int, n_kz: int | None) -> np.ndarray:
     """
     lead = (n_traj,) if n_kz is None else (n_traj, n_kz)
     A = (rng.standard_normal(lead + (2, L)) + 1j * rng.standard_normal(lead + (2, L)))
-    B = np.einsum("...ki,...kj->...ij", A.conj(), A) / 2.0   # (..., L, L), Hermitian
+    B = np.einsum("...ki,...kj->...ij", A, A.conj()) / 2.0   # (..., L, L) = Phi Phi^H
     phi2 = B.transpose(tuple(range(B.ndim))[::-1])         # [j, i, (z,) t]
     return np.ascontiguousarray(phi2, dtype=np.complex64)
 
@@ -284,7 +297,8 @@ def save_case(name: str, inputs: dict, outputs: dict, meta: dict) -> Path:
     """
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUT_DIR / f"{name}.npz"
-    meta = dict(meta, case=name, layout=LAYOUT_NOTE, env=environment())
+    meta = dict(meta, case=name, layout=LAYOUT_NOTE, env=environment(),
+                gram_convention="multitasking", gram_convention_note=GRAM_NOTE)
     np.savez(path, config_json=np.array(json.dumps(meta)), **inputs, **outputs)
     return path
 
@@ -339,7 +353,9 @@ def generate_real_2d() -> Path | None:
     d = sio.loadmat(f)
     L, Nt = 6, 377
     traj = np.ascontiguousarray(d["traj"].T, dtype=np.float32)
-    phi2 = np.ascontiguousarray(d["phi2"].T.reshape(L, L, Nt), dtype=np.complex64)
+    # The file's phi2 predates the MR-Multitasking convention: swap the L axes.
+    phi2 = np.ascontiguousarray(np.swapaxes(d["phi2"].T.reshape(L, L, Nt), 0, 1),
+                                dtype=np.complex64)
     x = np.ascontiguousarray(d["x"].T, dtype=np.complex64)
     SEs = np.ascontiguousarray(d["SEs"].T, dtype=np.complex64)
     ref = np.ascontiguousarray(d["AhAx_ref"].T, dtype=np.complex64)

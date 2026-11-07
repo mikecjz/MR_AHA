@@ -38,6 +38,11 @@ function check_reference_matlab(ref_dir)
     nfail = 0;
     for f = files'
         z = load(fullfile(f.folder, f.name));
+        if ~isfield(z, 'gram_convention') || ~strcmp(z.gram_convention, 'multitasking')
+            fprintf('FAIL %s: written before the MR-Multitasking Gram convention; regenerate it\n', f.name);
+            nfail = nfail + 1;
+            continue
+        end
         base = mr_default_config(z.traj_type, z.n_dim, double(z.L), ...
             'phi2_dim', z.phi2_dim, 'n_coils', double(z.n_coils), ...
             'eps', double(z.eps), 'mask_radius', double(z.cfg_mask_radius), ...

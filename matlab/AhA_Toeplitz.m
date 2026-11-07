@@ -19,6 +19,10 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
 %
 %     phi2_toep  complex single gpuArray holding the block-diagonal Toeplitz
 %                operator in packed triangular form, as returned by CALC_TOEP.
+%                At every upsampled k-space location the rank coefficients
+%                are multiplied as a row vector from the right by that
+%                location's Hermitian block B, k(1,:) <- k(1,:) * B
+%                (MR-Multitasking convention, see CALC_TOEP).
 %                  [Mx, My, (L^2+L)/2]          '2D',  unmasked
 %                  [Mx, My, Mz, (L^2+L)/2]      '3D'/'stack', unmasked
 %                  [numel(mask), (L^2+L)/2]     masked

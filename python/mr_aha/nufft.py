@@ -10,8 +10,11 @@ non-Cartesian MRI,
 where :math:`F_{-}` is a type-2 NUFFT (uniform image to non-uniform k-space,
 sign :math:`-1`), :math:`F_{+} = F_{-}^H` is the matching type-1 NUFFT
 (non-uniform k-space to uniform image, sign :math:`+1`) and
-:math:`\\mathcal{B}` multiplies the length-:math:`L` vector of every
-non-uniform sample by the Gram block :math:`\\Phi^H\\Phi` of its readout. Both
+:math:`\\mathcal{B}` multiplies the length-:math:`L` rank vector of every
+non-uniform sample, as a row vector from the right (MR-Multitasking's
+``reshape(k, [], L) * Phi2``), by the Gram block
+:math:`\\Phi_2 = \\Phi\\Phi^H` of its readout, :math:`\\Phi` being the
+rank x time temporal basis (see :mod:`mr_aha.api`). Both
 NUFFTs are unnormalised, which is precisely the convention the Toeplitz kernel
 of :func:`mr_aha.calc_toep` reproduces, so ``AhANufftPlan.apply`` and
 ``AhAPlan.apply`` agree to within the NUFFT tolerance.
@@ -159,10 +162,10 @@ class _MlxNufft:
             # Block-diagonal Gram multiplication, one block per readout.
             if stack:
                 kk = k.reshape(L, self._Nz, self._Nkx, self._Ntrajs)
-                k = mx.einsum("jizt,jzkt->izkt", ph, kk)
+                k = mx.einsum("ijzt,jzkt->izkt", ph, kk)
             else:
                 kk = k.reshape(L, self._Nkx, self._Ntrajs)
-                k = mx.einsum("jit,jkt->ikt", ph, kk)
+                k = mx.einsum("ijt,jkt->ikt", ph, kk)
             k = k.reshape(self._ntr, self._M)
             mx.eval(k)
             # Type-1, all vectors in one batched call.
@@ -339,7 +342,9 @@ class AhANufftPlan:
         """Apply the per-readout Gram blocks to non-uniform k-space data.
 
         For every readout ``t`` (and kz encode ``z`` of a stack) this computes
-        ``k[i, kx] <- sum_j Phi_t[i, j] k[j, kx]`` with a single
+        the MR-Multitasking product ``k[:, kx] <- k[:, kx] * Phi2_t``, i.e.
+        ``k[i, kx] <- sum_j k[j, kx] Phi2_t[j, i]`` (row-major
+        ``phi2[i, j, ...]`` is ``Phi2_t[j, i]``), with a single
         :func:`cupy.einsum`, which CuPy maps onto a batched GEMM without
         materialising any broadcast intermediate. On the 3D test case this was
         about 1.5x faster than an explicit transpose + :func:`cupy.matmul`
@@ -357,10 +362,10 @@ class AhANufftPlan:
         L, Nkx, Nt = self._L, self._Nkx, self._Ntrajs
         if self._tt == TrajType.STACK:
             kk = k.reshape(L, self._Nz, Nkx, Nt)
-            out = cupy.einsum("jizt,jzkt->izkt", phi2, kk)
+            out = cupy.einsum("ijzt,jzkt->izkt", phi2, kk)
         else:
             kk = k.reshape(L, Nkx, Nt)
-            out = cupy.einsum("jit,jkt->ikt", phi2, kk)
+            out = cupy.einsum("ijt,jkt->ikt", phi2, kk)
         return cupy.ascontiguousarray(out).reshape(self._ntr, self._M)
 
     def apply(self, x, SEs, phi2, out=None):

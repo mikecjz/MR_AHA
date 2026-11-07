@@ -26,6 +26,32 @@ column-major (docs, MATLAB)  row-major (this module, CuPy)
 Every array must be a C-contiguous CuPy array resident on the GPU; ``complex64``
 for the data arrays, ``float32`` for ``traj`` and ``int64`` for ``mask``.
 Masks use **0-based** linear indices into the centred upsampled grid.
+
+Gram blocks (MR-Multitasking convention)
+----------------------------------------
+The temporal basis :math:`\\Phi` is **rank x time** (MATLAB ``Phi_rt``,
+``[L, T]``) and the spatial coefficients keep the rank as their last
+column-major dimension. The Gram block of a readout (and kz encode) is
+
+.. math::
+
+    \\Phi_2 = \\sum_{t \\in \\mathcal{T}} \\Phi(:,t)\\,\\Phi(:,t)^H ,
+
+MATLAB ``Phi_rt(:, idx) * Phi_rt(:, idx)'``, and every block-diagonal
+multiplication treats the rank vector :math:`v` of a k-space location as a
+**row vector multiplied from the right**, :math:`v \\leftarrow v\\,\\Phi_2`
+(MR-Multitasking's ``reshape(k, [], L) * Phi2``). The same holds for the
+Toeplitz blocks in ``phi2_toep``. In NumPy terms, with a row-major
+``phi2[a, b, ...]`` holding column-major entry ``(b, a)``::
+
+    out[l] = sum_m v[m] * Phi2[m, l] = sum_m phi2[l, m] * v[m]
+
+A MR-Multitasking ``Phi2`` ``[L, L, Ntrajs, Nz]`` read with h5py (row-major
+``(Nz, Ntrajs, L, L)``) is passed as ``P.transpose(2, 3, 0, 1)`` (plus a kz
+fftshift if its kz order is natural). Earlier versions of the library
+multiplied ``Phi2 @ v`` instead (time x rank :math:`\\Phi`,
+:math:`\\Phi^H\\Phi`); blocks prepared for them need their two ``L`` axes
+swapped.
 """
 
 from __future__ import annotations
@@ -541,12 +567,12 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
         cfg: Configuration from :func:`make_config`. ``cfg.phi2_dim`` selects
             the upsampled grid the kernel is evaluated on.
         phi2: ``complex64`` CuPy array of Gram blocks
-            :math:`\\Phi^H\\Phi`, shaped ``(L, L, Ntrajs)`` for
+            :math:`\\Phi_2 = \\Phi\\Phi^H` (rank x time :math:`\\Phi`, see
+            the module docstring), shaped ``(L, L, Ntrajs)`` for
             ``'2D'``/``'3D'`` or ``(L, L, Nkz, Ntrajs)`` for ``'stack'`` (the
             column-major ``[Ntrajs, L, L]`` / ``[Ntrajs, Nkz, L, L]`` of the
             documentation, reversed). Element ``phi2[j, i, ...]`` is entry
-            ``(i, j)`` of the block; since the block is Hermitian this is
-            simply its conjugate transpose.
+            ``(i, j)`` of the block (the column-major layout of the C API).
         traj: ``float32`` CuPy array of non-Cartesian coordinates shaped
             ``(ndim, Nkx, Ntrajs)``, in radians per unit of the un-padded image
             grid (the usual ``[-pi, pi)`` range). ``ndim`` is 2 for ``'2D'``

@@ -9,9 +9,12 @@ the sizes requested for the benchmark:
   (successive spokes are near-uniformly spread, as in a real golden-means
   kooshball), samples run over ``[-pi, pi)``.
 * The temporal subspace is a smooth, complex, orthonormal basis ``U``
-  (``Ntraj x L``) of DCT-like functions of acquisition time. Spoke ``t`` is
-  acquired at one time point, so its Gram block is the rank-one
-  ``phi2_t = conj(u_t) u_t^T`` with ``u_t`` row ``t`` of ``U``.
+  (``Ntraj x L``) of DCT-like functions of acquisition time, i.e. the
+  rank x time basis ``Phi = U^T`` of the MR-Multitasking convention. Spoke
+  ``t`` is acquired at one time point, so its Gram block is the rank-one
+  ``phi2_t = Phi(:, t) Phi(:, t)^H = u_t conj(u_t)^T`` with ``u_t`` row ``t``
+  of ``U``. The file records ``gram_convention = 'multitasking'`` so that
+  loaders can tell it from files written before the convention change.
 * Coil maps are smooth complex Gaussians around the object, normalised to unit
   root-sum-of-squares inside the object support.
 * ``x_true`` is a sum of random ellipsoids per rank with energy decaying over
@@ -104,7 +107,7 @@ def main():
     traj = trajectory()                                   # [Ntraj, Nkx, 3]
     S = coil_maps(support)                                # (Nc, Nz, Ny, Nx)
     U = temporal_basis()                                  # (Ntraj, L)
-    phi2 = np.conj(U)[:, :, None] * U[:, None, :]         # [t, i, j]
+    phi2 = U[:, :, None] * np.conj(U)[:, None, :]         # [t, i, j] = Phi Phi^H
     X = phantom(rng, support)                             # (L, Nz, Ny, Nx)
 
     cfg = mr_aha.make_config("3D", (N, N, N), L, n_coils=NC)
@@ -116,7 +119,8 @@ def main():
     out = BENCH_DATA / "kooshball_3d.mat"
     # .T turns the row-major arrays into the column-major shapes of the docs.
     sio.savemat(out, dict(traj=traj, SEs=S.T, phi2=phi2.astype(np.complex64),
-                          x_true=X.T, b=b.T, L=np.int32(L)),
+                          x_true=X.T, b=b.T, L=np.int32(L),
+                          gram_convention="multitasking"),
                 do_compression=False)
     print(f"wrote {out}")
 

@@ -33,17 +33,19 @@ __device__ __forceinline__ void mr_decompose3(long long idx, int d0, int d1,
 /**
  * @brief Apply a Hermitian packed block to a staged rank vector.
  *
- * Computes @f$y_i = \sum_j A_{ij} v_j@f$ where the stored triangle lives at
- * `base[t * stride]` for packed offset `t`, and the unstored half follows from
- * @f$A_{ij} = \overline{A_{ji}}@f$.
+ * Multitasking convention: the rank vector is a *row* vector multiplied from
+ * the right, @f$y = v A@f$, i.e.
+ * @f$y_i = \sum_j v_j A_{ji}@f$ (the sum runs over the first index of the
+ * block). The stored triangle lives at `base[t * stride]` for packed offset
+ * `t`, and the unstored half follows from @f$A_{ji} = \overline{A_{ij}}@f$.
  *
  * @param[in]  v         Staged input vector of length @p L (shared memory).
  * @param[in]  base      Pointer to packed component 0 of this location.
  * @param[in]  stride    Element stride between consecutive packed components.
  * @param[in]  L         Rank.
  * @param[in]  tri_upper Non-zero when the upper triangle is stored.
- * @param[in]  i         Output row to evaluate.
- * @return Row @p i of the matrix-vector product.
+ * @param[in]  i         Output component (column of the block) to evaluate.
+ * @return Component @p i of the vector-matrix product @f$v A@f$.
  */
 __device__ __forceinline__ mr_complex mr_apply_block_row(const mr_complex *v,
                                                          const mr_complex *base,
@@ -53,7 +55,8 @@ __device__ __forceinline__ mr_complex mr_apply_block_row(const mr_complex *v,
     mr_complex acc = make_cuFloatComplex(0.0f, 0.0f);
     for (int j = 0; j < L; ++j) {
         int do_conj = 0;
-        int t = mr_tri_offset(i, j, L, tri_upper, &do_conj);
+        /* Element A_{ji}: row j, column i (Multitasking v * A). */
+        int t = mr_tri_offset(j, i, L, tri_upper, &do_conj);
         mr_complex a = base[(long long)t * stride];
         if (do_conj) a = cuConjf(a);
         acc = cuCaddf(acc, cuCmulf(a, v[j]));

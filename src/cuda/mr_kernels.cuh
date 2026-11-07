@@ -62,10 +62,11 @@ __global__ void mr_k_crop_mul_conj_se(mr_complex *d_out, const mr_complex *d_pad
 /**
  * @brief In-place Hermitian block-diagonal multiply over the whole grid.
  *
- * At every upsampled k-space location the length-@f$L@f$ vector of rank
- * coefficients is multiplied by the Hermitian @f$L\times L@f$ block stored in
- * packed triangular form, @f$y_i = \sum_j A_{ij} v_j@f$, with the unstored half
- * reconstructed as @f$A_{ij} = \overline{A_{ji}}@f$.
+ * At every upsampled k-space location the length-@f$L@f$ row vector of rank
+ * coefficients is multiplied from the right by the Hermitian
+ * @f$L\times L@f$ block stored in packed triangular form (Multitasking
+ * convention), @f$y = v A@f$, i.e. @f$y_i = \sum_j v_j A_{ji}@f$, with the
+ * unstored half reconstructed as @f$A_{ji} = \overline{A_{ij}}@f$.
  *
  * The working buffer is in natural FFT order while `phi2_toep` is centred, so
  * the kernel converts indices on the fly; this is what removes the need for any

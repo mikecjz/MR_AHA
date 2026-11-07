@@ -158,8 +158,9 @@ def synthetic(kind, traj, nc, rng):
     lead = (nc,) if kind == "2d" else (NZ_STACK, nc)
     B = (rng.standard_normal(lead + (RANK_PHI, L))
          + 1j * rng.standard_normal(lead + (RANK_PHI, L))) / math.sqrt(2 * RANK_PHI)
-    G = np.einsum("...ki,...kj->...ij", B.conj(), B)        # [.., i, j] = Phi(i, j)
-    # Row-major phi2[j, i, (z,) t] = Phi_{(t,z)}(i, j).
+    # MR-Multitasking Gram block Phi Phi^H of the rank x time basis Phi = B^T.
+    G = np.einsum("...ki,...kj->...ij", B, B.conj())        # [.., i, j] = Phi2(i, j)
+    # Row-major phi2[j, i, (z,) t] = Phi2_{(t,z)}(i, j).
     phi2 = np.moveaxis(G, (-1, -2), (0, 1)).astype(np.complex64)
 
     return dict(traj_type=traj_type, n_dim=n_dim,

@@ -32,7 +32,7 @@ place through unified memory.
 ## Contents
 
 1. [The operations](#the-operations)
-2. [Conventions](#conventions)
+2. [Conventions](#conventions) (including the [Gram-block convention](#gram-blocks-mr-multitasking-convention))
 3. [Building](#building)
 4. [MATLAB](#matlab)
 5. [Python](#python)
@@ -53,8 +53,10 @@ place through unified memory.
 phi2_toep = calc_toep(phi2, traj, config)
 ```
 
-Turns the non-Cartesian Gram blocks $\Phi^H\Phi$, one $L \times L$ matrix per trajectory, into the
-Cartesian block-diagonal multiplier used by the operator. Internally: pack each block into a
+Turns the non-Cartesian Gram blocks $\Phi_2 = \Phi\Phi^H$ (MR-Multitasking's
+`Phi_rt(:,idx) * Phi_rt(:,idx)'`, see [Gram blocks](#gram-blocks-mr-multitasking-convention)), one
+$L \times L$ matrix per trajectory, into the Cartesian block-diagonal multiplier used by the
+operator. Internally: pack each block into a
 triangle, type-1 cufinufft onto the upsampled grid, centred inverse FFT, optional mask gather.
 
 ### `AhA_Toeplitz` — the hot loop
@@ -64,9 +66,10 @@ AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config)
 AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
 ```
 
-For every coil: multiply by the sensitivity map, zero-pad onto the upsampled grid, FFT, multiply by
-the Hermitian $L \times L$ block at each k-space location, inverse FFT, crop, multiply by the
-adjoint sensitivity map, accumulate. No NUFFT is evaluated here, which is the whole point of the
+For every coil: multiply by the sensitivity map, zero-pad onto the upsampled grid, FFT, multiply the
+rank coefficients at each k-space location, as a row vector from the right, by that location's
+Hermitian $L \times L$ block ($v \leftarrow v\,B$, as MR-Multitasking does), inverse FFT, crop,
+multiply by the adjoint sensitivity map, accumulate. No NUFFT is evaluated here, which is the whole point of the
 Toeplitz embedding.
 
 ### `calc_mask` — automatic mask for the masked operator
@@ -138,6 +141,30 @@ Optional: `n_coils`, `num_masked`, `eps`, `mem_fraction`, `gpu_device_id`, `verb
 `mask_method` (`'neighbour'` or `'threshold'`), `mask_radius`, `mask_threshold`. The MATLAB
 helper `mr_default_config` and the Python `mr_aha.make_config` fill in sensible defaults.
 
+### Gram blocks (MR-Multitasking convention)
+
+The library follows MR-Multitasking. The temporal basis $\Phi$ is **rank × time** (`Phi_rt`,
+`[L, T]`), the spatial coefficients keep the rank as their **last** dimension, and the Gram block of
+a readout (and kz encode) is
+
+$$\Phi_2 = \sum_{t\,\in\,\text{readout}} \Phi(:,t)\,\Phi(:,t)^H, \qquad
+\texttt{Phi2 = Phi\_rt(:,idx) * Phi\_rt(:,idx)'} .$$
+
+Every block multiplication (by `phi2` in the NUFFT reference operators, by `phi2_toep` in the
+Toeplitz operator) treats the $L$ rank coefficients of one k-space location as a **row vector
+multiplied from the right**, $v \leftarrow v\,\Phi_2$, i.e. $v_l \leftarrow \sum_m v_m (\Phi_2)_{ml}$ —
+exactly MR-Multitasking's `reshape(k, [], L) * Phi2`. Since MR-Multitasking forms $A^Hb$ as
+`k.' * Phi_rt'`, this is its normal operator, and a MR-Multitasking `Phi2` (`[L, L, Ntrajs, Nz]`)
+is passed unchanged apart from the dimension order: `permute(Phi2, [3 4 1 2])` in MATLAB, or the
+row-major `P.transpose(2, 3, 0, 1)` of the h5py array in Python (plus an `fftshift` along kz if it is
+in natural order).
+
+> **Changed.** Earlier versions multiplied $\Phi_2 v$ (column vector from the left), i.e. they
+> expected $\Phi^H\Phi$ of a time × rank basis — the transpose (for these Hermitian blocks, the
+> complex conjugate) of the block above. Gram blocks prepared for those versions need their two
+> $L$ dimensions swapped; `phi2_toep` computed by them corresponds to the *other* triangulation with
+> its entries transposed, so recompute it with `calc_toep`.
+
 ### Triangular packing
 
 Only $(L^2+L)/2$ of the $L^2$ entries of each block are stored; the rest follows from
@@ -172,7 +199,7 @@ threshold method.
 **`'threshold'`.**
 
 1. Evaluate the Toeplitz kernel $T(\mathbf{k})$ of the trajectory with every weight set to one
-   (exactly `calc_toep` with $L = 1$ and $\Phi^H\Phi = 1$).
+   (exactly `calc_toep` with $L = 1$ and $\Phi\Phi^H = 1$).
 2. Max-filter $|T|$ over the $3\times3$ ($3\times3\times3$ in 3D) neighbourhood of every location.
 3. Keep the locations where the result exceeds `mask_threshold`.
 

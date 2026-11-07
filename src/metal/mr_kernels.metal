@@ -96,14 +96,16 @@ static inline int mr_tri_offset(int i, int j, int L, int tri_upper,
 }
 
 /**
- * @brief Row @p i of the Hermitian block times the staged rank vector @p v.
+ * @brief Component @p i of the staged rank row vector @p v times the
+ *        Hermitian block (Multitasking convention `y = v A`), i.e.
+ *        `y_i = sum_j v_j A_ji`.
  *
  * @param v         Staged input vector of length @p L (threadgroup memory).
  * @param base      Packed component 0 of this location.
  * @param stride    Element stride between consecutive packed components.
  * @param L         Rank.
  * @param tri_upper Non-zero when the upper triangle is stored.
- * @param i         Output row.
+ * @param i         Output component (column of the block).
  */
 static inline float2 mr_apply_block_row(threadgroup const float2 *v,
                                         device const float2 *base, ulong stride,
@@ -112,7 +114,8 @@ static inline float2 mr_apply_block_row(threadgroup const float2 *v,
     float2 acc = float2(0.0f);
     for (int j = 0; j < L; ++j) {
         bool conj;
-        const int t = mr_tri_offset(i, j, L, tri_upper, conj);
+        /* Element A_{ji}: row j, column i (Multitasking v * A). */
+        const int t = mr_tri_offset(j, i, L, tri_upper, conj);
         const float2 a = base[(ulong)t * stride];
         acc += conj ? mr_cmul_conj(a, v[j]) : mr_cmul(a, v[j]);
     }
@@ -211,7 +214,8 @@ kernel void mr_k_crop_mul_conj_se(device float2       *out        [[buffer(0)]],
  * @brief In-place Hermitian block-diagonal multiplication over the whole grid.
  *
  * Each thread stages its own rank vector in threadgroup memory (`L` float2
- * per thread, length set by the host) before overwriting it row by row.
+ * per thread, length set by the host) before overwriting it component by
+ * component with `v A` (Multitasking convention).
  * Port of `mr_k_blockdiag_dense`.
  */
 kernel void mr_k_blockdiag_dense(device float2         *pad  [[buffer(0)]],
@@ -273,11 +277,13 @@ kernel void mr_k_blockdiag_masked(device float2       *compact    [[buffer(0)]],
 /* ------------------------------------------------------------------------ */
 
 /**
- * @brief Hermitian block times vector, reading each stored element once.
+ * @brief Row vector times Hermitian block, reading each stored element once.
  *
- * Walks the stored triangle in packed order (::mr_triangulation): element
- * `t` is entry `(r, c)` of the block, and it contributes `A_rc v_c` to `y_r`
- * and, off the diagonal, `conj(A_rc) v_r` to `y_c` (Hermitian symmetry). The
+ * Multitasking convention: the rank vector is a row vector multiplied from
+ * the right, `y = v A`, i.e. `y_c = sum_r v_r A_rc`. Walks the stored
+ * triangle in packed order (::mr_triangulation): element `t` is entry
+ * `(r, c)` of the block, and it contributes `v_r A_rc` to `y_c` and, off the
+ * diagonal, `v_c A_cr = v_c conj(A_rc)` to `y_r` (Hermitian symmetry). The
  * generic ::mr_apply_block_row instead evaluates every row separately and so
  * fetches each off-diagonal element twice; this halves the dominant memory
  * traffic of the block-diagonal stage. With @p L a compile-time constant the
@@ -302,8 +308,8 @@ static inline void mr_block_apply(thread const float2 (&v)[L], thread float2 (&y
         const int r1 = upper ? c : L - 1;
         for (int r = r0; r <= r1; ++r, off += stride) {
             const float2 a = base[off];
-            y[r] += mr_cmul(a, v[c]);
-            if (r != c) y[c] += mr_cmul_conj(a, v[r]);
+            y[c] += mr_cmul(a, v[r]);
+            if (r != c) y[r] += mr_cmul_conj(a, v[c]);
         }
     }
 }
@@ -327,11 +333,11 @@ static inline void mr_block_apply2(thread const float2 (&v0)[L],
         const int r1 = upper ? c : L - 1;
         for (int r = r0; r <= r1; ++r, off += stride) {
             const float2 a = base[off];
-            y0[r] += mr_cmul(a, v0[c]);
-            y1[r] += mr_cmul(a, v1[c]);
+            y0[c] += mr_cmul(a, v0[r]);
+            y1[c] += mr_cmul(a, v1[r]);
             if (r != c) {
-                y0[c] += mr_cmul_conj(a, v0[r]);
-                y1[c] += mr_cmul_conj(a, v1[r]);
+                y0[r] += mr_cmul_conj(a, v0[c]);
+                y1[r] += mr_cmul_conj(a, v1[c]);
             }
         }
     }

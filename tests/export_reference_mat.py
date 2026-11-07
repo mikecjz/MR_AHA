@@ -16,6 +16,7 @@ Usage (from the repository root)::
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,10 @@ def main() -> None:
         for k in z.files:
             a = z[k]
             if k == "config_json":
+                # Carry the Gram-block convention marker over to MATLAB.
+                conv = json.loads(str(a)).get("gram_convention")
+                if conv:
+                    out["gram_convention"] = conv
                 continue
             if a.dtype.kind == "U":
                 out[k] = str(a)

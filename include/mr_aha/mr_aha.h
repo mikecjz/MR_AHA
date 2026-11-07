@@ -30,6 +30,44 @@
  * (i)fftshifts internally, by index remapping rather than by phase modulation,
  * so the convention is exact for both even and odd dimensions.
  *
+ * @section mr_gram Gram blocks (MR-Multitasking convention)
+ *
+ * The library follows the MR-Multitasking convention throughout. The temporal
+ * basis is stored **rank x time**, @f$\Phi \in \mathbb{C}^{L \times T}@f$
+ * (MATLAB `Phi_rt`, `[L, T]`), and the spatial coefficients keep the rank as
+ * their **last** dimension (`[Nx, Ny, Nz, L]`). The Gram block of a readout
+ * (and, for ::MR_TRAJ_STACK, of a kz encode) is
+ * @f[
+ *   \Phi_2 \;=\; \Phi_{\mathcal{T}}\,\Phi_{\mathcal{T}}^H
+ *          \;=\; \sum_{t \in \mathcal{T}} \Phi(:,t)\,\Phi(:,t)^H ,
+ * @f]
+ * where @f$\mathcal{T}@f$ are the time points acquired on that readout, i.e.
+ * MATLAB `Phi_rt(:, idx) * Phi_rt(:, idx)'`. It is Hermitian
+ * @f$L \times L@f$.
+ *
+ * Every block-diagonal multiplication (the Toeplitz multiplier in
+ * ::mr_aha_plan_execute and the Gram multiplication of the NUFFT reference
+ * operators of the bindings) treats the length-@f$L@f$ rank vector @f$v@f$ of
+ * one k-space location as a **row vector multiplied from the right**:
+ * @f[
+ *   v \;\leftarrow\; v\,\Phi_2, \qquad
+ *   v_l \;\leftarrow\; \sum_m v_m\,(\Phi_2)_{ml},
+ * @f]
+ * exactly MR-Multitasking's `reshape(k, [], L) * Phi2`. For the data model
+ * @f$k_t = \sum_m \Phi(m,t)\,(F S u_m)_t@f$ with adjoint
+ * @f$(A^H k)_l = S^H F^H \sum_t \overline{\Phi(l,t)}\,k_t@f$ (MR-Multitasking
+ * forms @f$A^H b@f$ as `k.' * Phi_rt'`), the coefficient coupling rank
+ * @f$m@f$ into rank @f$l@f$ is
+ * @f$\sum_t \overline{\Phi(l,t)}\,\Phi(m,t) = (\Phi_2)_{ml}@f$, so this is
+ * the normal operator.
+ *
+ * @note Earlier versions of the library multiplied @f$\Phi_2 v@f$ (column
+ *       vector from the left), i.e. they expected
+ *       @f$\Phi^H\Phi@f$ with a time x rank @f$\Phi@f$, which is the
+ *       transpose (equivalently, the complex conjugate) of the block above.
+ *       Gram blocks prepared for those versions must have their two @f$L@f$
+ *       axes swapped; `phi2_toep` arrays computed by them must be conjugated.
+ *
  * @section mr_memory Memory ownership
  *
  * The caller allocates and frees every input and output array; the library
@@ -438,8 +476,9 @@ MR_EXPORT int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out);
  * where @f$\mathcal{P}@f$ zero-pads the image onto the upsampled Toeplitz grid
  * (with the centring index remap folded in), @f$F@f$ is the centred DFT over
  * the upsampled grid, and @f$\hat{T}@f$ is the block-diagonal multiplication by
- * the Hermitian @f$L \times L@f$ block held in `phi2_toep` at every upsampled
- * k-space location. The scaling of `phi2_toep` produced by ::mr_calc_toep
+ * the Hermitian @f$L \times L@f$ block @f$B@f$ held in `phi2_toep` at every
+ * upsampled k-space location, applied MR-Multitasking style to the rank row
+ * vector from the right, @f$v \leftarrow v B@f$ (see @ref mr_gram). The scaling of `phi2_toep` produced by ::mr_calc_toep
  * already absorbs the @f$1/(M_xM_yM_z)@f$ of the unnormalised cuFFT pair, so no
  * further scaling is applied here.
  *
@@ -662,8 +701,8 @@ MR_EXPORT int mr_mgpu_plan_abandon(mr_mgpu_plan plan);
 /**
  * @brief Pre-compute the block-diagonal Toeplitz operator `phi2_toep`.
  *
- * Given the non-Cartesian Gram blocks @f$\Phi^H\Phi@f$ sampled along the
- * trajectory, this routine
+ * Given the non-Cartesian Gram blocks @f$\Phi_2 = \Phi\Phi^H@f$ (rank x time
+ * @f$\Phi@f$, see @ref mr_gram) sampled along the trajectory, this routine
  *   1. packs each @f$L \times L@f$ block into the requested triangle,
  *   2. evaluates a type-1 cufinufft (sign @f$-1@f$) of the packed strengths
  *      onto the upsampled grid `phi2_dim`, giving the point-spread function,
@@ -691,8 +730,13 @@ MR_EXPORT int mr_mgpu_plan_abandon(mr_mgpu_plan plan);
  *                          `[Ntrajs, L, L]` for ::MR_TRAJ_2D / ::MR_TRAJ_3D or
  *                          `[Ntrajs, Nkz, L, L]` for ::MR_TRAJ_STACK, where the
  *                          trailing `[L, L]` axes hold the (column-major)
- *                          @f$L\times L@f$ matrix @f$\Phi^H\Phi@f$ of that
- *                          trajectory and `Nkz == Mz == Nz`.
+ *                          @f$L\times L@f$ Gram block
+ *                          @f$\Phi_2 = \Phi\Phi^H@f$ of that trajectory
+ *                          (MATLAB `Phi_rt(:,idx) * Phi_rt(:,idx)'`, see
+ *                          @ref mr_gram) and `Nkz == Mz == Nz`. A
+ *                          MR-Multitasking `Phi2` `[L, L, Ntrajs, Nz]` is
+ *                          `permute(Phi2, [3 4 1 2])` (plus a kz fftshift
+ *                          if its kz order is natural).
  * @param[in]  d_traj       Device array of non-Cartesian coordinates,
  *                          `[Ntrajs, Nkx, ndim]`, in **radians per unit of the
  *                          un-padded image grid**, i.e. the usual

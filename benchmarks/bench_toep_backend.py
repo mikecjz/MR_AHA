@@ -62,9 +62,12 @@ def radial_traj(ndim: int, n_traj: int, n_kx: int) -> np.ndarray:
 
 
 def gram(rng, L: int, n: int) -> np.ndarray:
-    """Random Hermitian PSD blocks, row-major ``(L, L, n)``."""
+    """Random Hermitian PSD blocks ``Phi Phi^H``, row-major ``(L, L, n)``.
+
+    ``Phi = A^T`` is a random rank x time basis (MR-Multitasking convention).
+    """
     a = rng.standard_normal((n, 2, L)) + 1j * rng.standard_normal((n, 2, L))
-    g = np.einsum("nki,nkj->jin", a.conj(), a)  # [j, i, n] = (A^H A)_{ij}
+    g = np.einsum("nki,nkj->jin", a, a.conj())  # [j, i, n] = (A^T conj(A))_{ij}
     return np.ascontiguousarray(g, dtype=np.complex64)
 
 

@@ -241,6 +241,12 @@ def main() -> int:
     failed = 0
     for f in files:
         z = np.load(f)
+        if json.loads(str(z["config_json"])).get("gram_convention") != "multitasking":
+            print(f"FAIL {f.stem}: written before the MR-Multitasking Gram convention "
+                  "(no gram_convention in config_json); regenerate it with "
+                  "benchmarks/make_reference.py")
+            failed += 1
+            continue
         c = configs(z)
         rows = []
         if "aha" in args.stages:

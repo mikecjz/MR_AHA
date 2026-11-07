@@ -37,7 +37,7 @@
  * (378 vs. 280 vs. 15680 for the 2D, stack and 3D test trajectories).
  *
  * Why both are sound: for arbitrary Gram blocks the Toeplitz multiplier is
- * @f$\hat{T}(\mathbf{k}) = \sum_m \Phi_m^H\Phi_m\,
+ * @f$\hat{T}(\mathbf{k}) = \sum_m (\Phi\Phi^H)_m\,
  * D(\mathbf{k}-\mathbf{k}_m)@f$, where @f$D@f$ is the Dirichlet kernel of the
  * upsampled grid. Its main lobe around each sample spans a few cells, which
  * the neighbourhood mask keeps; its tails decay slowly, which the threshold
