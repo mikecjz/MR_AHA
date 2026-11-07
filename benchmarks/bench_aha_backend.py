@@ -140,7 +140,14 @@ def main() -> None:
     results = []
     for name in args.cases:
         for masked in ([False] if args.no_masked else [False, True]):
-            results.append(run_case(name, masked, args.reps, xp, sync))
+            try:
+                results.append(run_case(name, masked, args.reps, xp, sync))
+            except (MemoryError, RuntimeError) as err:
+                # e.g. the 3D unmasked kernel (20 GB) on a 24 GB GPU
+                print(f"{name:5s} {'masked  ' if masked else 'unmasked'} "
+                      f"skipped: {type(err).__name__}: {str(err).splitlines()[0]}")
+                if xp is not np:
+                    xp.get_default_memory_pool().free_all_blocks()
 
     out_dir = ROOT / "benchmarks" / "results" / host
     out_dir.mkdir(parents=True, exist_ok=True)

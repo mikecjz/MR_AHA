@@ -189,6 +189,24 @@ __global__ void mr_k_blockdiag_masked(mr_complex *d_compact,
             mr_apply_block_row(v, base, num_masked, dims.L, dims.tri_upper, i);
 }
 
+__global__ void mr_k_mask_inverse(int *d_inv, const int64_t *d_mask,
+                                  long long num_masked, mr_dims dims)
+{
+    long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_masked) return;
+
+    /* Centred linear index -> natural (FFT-order) linear index. */
+    int kc[3];
+    mr_decompose3((long long)d_mask[tid], dims.m[0], dims.m[1], kc);
+    long long jj = 0, stride = 1;
+    for (int d = 0; d < 3; ++d) {
+        int j = mr_cent2nat(kc[d], dims.m[d], dims.c_m[d]);
+        jj += (long long)j * stride;
+        stride *= dims.m[d];
+    }
+    d_inv[jj] = (int)tid;
+}
+
 __global__ void mr_k_scatter_masked(mr_complex *d_pad, const mr_complex *d_compact,
                                     const int64_t *d_mask, long long num_masked,
                                     mr_dims dims)

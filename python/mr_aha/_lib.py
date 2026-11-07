@@ -172,6 +172,32 @@ class MRConfig(ctypes.Structure):
     ]
 
 
+#: Mirror of ``MR_MGPU_MAX_DEVICES``.
+MGPU_MAX_DEVICES = 16
+
+#: Mirror of ``MR_MGPU_SHARE_PRIMARY``.
+MGPU_SHARE_PRIMARY = 1
+
+
+class MRMgpuInfo(ctypes.Structure):
+    """``ctypes`` mirror of the C ``mr_mgpu_info`` struct (CUDA backend).
+
+    Describes how a :class:`mr_aha.MultiGPUPlan` distributes the work; see
+    :attr:`mr_aha.MultiGPUPlan.info` for a dictionary view.
+    """
+
+    _fields_ = [
+        ("n_devices", ctypes.c_int),
+        ("devices", ctypes.c_int * MGPU_MAX_DEVICES),
+        ("coil_begin", ctypes.c_int * MGPU_MAX_DEVICES),
+        ("coil_count", ctypes.c_int * MGPU_MAX_DEVICES),
+        ("group", ctypes.c_int * MGPU_MAX_DEVICES),
+        ("n_split_coils", ctypes.c_int),
+        ("peer_access", ctypes.c_int),
+        ("peer_bandwidth_gbs", ctypes.c_double),
+    ]
+
+
 class MRError(RuntimeError):
     """Raised when an MR_AHA entry point returns a non-zero status.
 
@@ -297,6 +323,18 @@ lib.mr_aha_plan_destroy.argtypes = [ctypes.c_void_p]
 
 lib.mr_aha_toeplitz.restype = ctypes.c_int
 lib.mr_aha_toeplitz.argtypes = [_cfg_p, _c_ptr, _c_ptr, _c_ptr, _c_ptr, _c_ptr]
+
+if hasattr(lib, "mr_mgpu_plan_create"):  # CUDA backend only
+    lib.mr_mgpu_plan_create.restype = ctypes.c_int
+    lib.mr_mgpu_plan_create.argtypes = [
+        _cfg_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int, _c_ptr, _c_ptr,
+        _c_ptr, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+    lib.mr_mgpu_plan_execute.restype = ctypes.c_int
+    lib.mr_mgpu_plan_execute.argtypes = [ctypes.c_void_p, _c_ptr, _c_ptr]
+    lib.mr_mgpu_plan_info.restype = ctypes.c_int
+    lib.mr_mgpu_plan_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(MRMgpuInfo)]
+    lib.mr_mgpu_plan_destroy.restype = ctypes.c_int
+    lib.mr_mgpu_plan_destroy.argtypes = [ctypes.c_void_p]
 
 lib.mr_calc_toep.restype = ctypes.c_int
 lib.mr_calc_toep.argtypes = [

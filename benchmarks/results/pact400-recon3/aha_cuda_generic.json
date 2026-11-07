@@ -1,0 +1,114 @@
+{
+  "backend": "cuda",
+  "device": "NVIDIA TITAN RTX",
+  "host": "pact400-recon3",
+  "results": [
+    {
+      "case": "2d",
+      "masked": false,
+      "n_dim": [
+        160,
+        160
+      ],
+      "L": 6,
+      "n_coils": 16,
+      "phi2_dim": [
+        320,
+        320
+      ],
+      "kept": 1.0,
+      "kernel_gb": 0.0172032,
+      "plan_s": 0.0037090519908815622,
+      "median_s": 0.002764737932011485,
+      "min_s": 0.002760939998552203,
+      "reps": 5
+    },
+    {
+      "case": "2d",
+      "masked": true,
+      "n_dim": [
+        160,
+        160
+      ],
+      "L": 6,
+      "n_coils": 16,
+      "phi2_dim": [
+        320,
+        320
+      ],
+      "kept": 0.831005859375,
+      "kernel_gb": 0.01429596,
+      "plan_s": 0.0007213589269667864,
+      "median_s": 0.003077023895457387,
+      "min_s": 0.0030762050300836563,
+      "reps": 5
+    },
+    {
+      "case": "stack",
+      "masked": false,
+      "n_dim": [
+        320,
+        320,
+        56
+      ],
+      "L": 12,
+      "n_coils": 12,
+      "phi2_dim": [
+        640,
+        640,
+        56
+      ],
+      "kept": 1.0,
+      "kernel_gb": 14.3130624,
+      "plan_s": 0.046489572152495384,
+      "median_s": 1.3605852918699384,
+      "min_s": 1.3604055519681424,
+      "reps": 5
+    },
+    {
+      "case": "stack",
+      "masked": true,
+      "n_dim": [
+        320,
+        320,
+        56
+      ],
+      "L": 12,
+      "n_coils": 12,
+      "phi2_dim": [
+        640,
+        640,
+        56
+      ],
+      "kept": 0.81202880859375,
+      "kernel_gb": 11.622619008,
+      "plan_s": 0.04715511086396873,
+      "median_s": 1.387496193870902,
+      "min_s": 1.387055723927915,
+      "reps": 5
+    },
+    {
+      "case": "3d",
+      "masked": false,
+      "n_dim": [
+        160,
+        160,
+        160
+      ],
+      "L": 12,
+      "n_coils": 12,
+      "phi2_dim": [
+        320,
+        320,
+        320
+      ],
+      "kept": 1.0,
+      "kernel_gb": 20.447232,
+      "plan_s": 0.04572681616991758,
+      "median_s": 1.9058011670131236,
+      "min_s": 1.9054655290674418,
+      "reps": 5
+    }
+  ],
+  "variant": "generic block-diagonal kernels, one coil at a time (MR_AHA_CUDA_GENERIC_BD=1; the operator before the 2026-11 optimisation)"
+}

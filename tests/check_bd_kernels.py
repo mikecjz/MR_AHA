@@ -1,17 +1,19 @@
-"""Specialised vs generic block-diagonal kernels of the Metal backend.
+"""Specialised vs generic block-diagonal kernels (CUDA and Metal backends).
 
-The Metal operator uses block-diagonal kernels specialised on ``L``
-(``mr_k_bd_dense<L>`` / ``mr_k_bd_masked<L>``, L = 1..32) and falls back to
-the generic threadgroup-memory kernels otherwise or when
-``MR_AHA_METAL_GENERIC_BD=1``. The reference data cover only a few ranks, so
-this test applies the operator with both kernel families on random inputs for
-many ranks (including the fallback at L = 33), both triangulations, unmasked
-and masked, and checks that they agree to single-precision rounding. The
-specialised kernels also process coils in groups (``MR_AHA_METAL_COIL_GROUP``);
-with 5 coils, groups of 1, 2 and 4 (the last group smaller) are all checked
-against the generic kernels, which handle one coil at a time.
+Both backends use block-diagonal kernels specialised on ``L`` (CUDA:
+``mr_k_bd_dense_t<L>`` / ``mr_k_bd_masked_t<L>``; Metal: ``mr_k_bd_dense<L>``
+/ ``mr_k_bd_masked<L>``; L = 1..30 on CUDA, 1..32 on Metal) and fall back to the generic
+shared/threadgroup-memory kernels otherwise or when
+``MR_AHA_<BACKEND>_GENERIC_BD=1``. The reference data cover only a few ranks,
+so this test applies the operator with both kernel families on random inputs
+for many ranks (including the fallback at L = 33), both triangulations,
+unmasked and masked, and checks that they agree to single-precision rounding.
+The specialised kernels also process coils in groups
+(``MR_AHA_<BACKEND>_COIL_GROUP``); with 5 coils, groups of 1, 2 and 4 (the last
+group smaller) are all checked against the generic kernels, which handle one
+coil at a time.
 
-Usage (Metal backend, from the repository root)::
+Usage (from the repository root)::
 
     python tests/check_bd_kernels.py
 """
@@ -28,25 +30,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 
 import mr_aha  # noqa: E402
 
-RANKS = (1, 2, 5, 7, 12, 16, 20, 31, 32, 33)
+RANKS = (1, 2, 5, 7, 12, 16, 20, 30, 31, 32, 33)
 
 
 def apply(cfg, x, SEs, toep, mask, generic: bool, group: int = 4) -> np.ndarray:
-    """One operator application with the chosen kernel family and coil group."""
-    os.environ["MR_AHA_METAL_GENERIC_BD"] = "1" if generic else "0"
-    os.environ["MR_AHA_METAL_COIL_GROUP"] = str(group)
+    """One operator application with the chosen kernel family and coil group.
+
+    Inputs and output are NumPy arrays; on CUDA they are moved to the current
+    device (CuPy) and back.
+    """
+    prefix = "MR_AHA_" + mr_aha.backend().upper()
+    os.environ[prefix + "_GENERIC_BD"] = "1" if generic else "0"
+    os.environ[prefix + "_COIL_GROUP"] = str(group)
     try:
+        if mr_aha.backend() == "cuda":
+            import cupy as cp  # noqa: PLC0415
+            dev = [None if a is None else cp.asarray(a) for a in (x, SEs, toep, mask)]
+            return cp.asnumpy(mr_aha.aha_toeplitz(cfg, *dev[:3], mask=dev[3]))
         return mr_aha.aha_toeplitz(cfg, x, SEs, toep, mask=mask)
     finally:
-        os.environ.pop("MR_AHA_METAL_GENERIC_BD", None)
-        os.environ.pop("MR_AHA_METAL_COIL_GROUP", None)
+        os.environ.pop(prefix + "_GENERIC_BD", None)
+        os.environ.pop(prefix + "_COIL_GROUP", None)
 
 
 def main() -> int:
     """Run every combination; return 1 on any mismatch."""
-    if mr_aha.backend() != "metal":
-        print("this test is for the Metal backend")
-        return 0
     rng = np.random.default_rng(1)
     n_dim, n_coils = (24, 20), 5
     worst, failed = 0.0, 0

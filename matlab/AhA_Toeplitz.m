@@ -71,7 +71,9 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
         if metal
             mask = int64(gather(mask(:))) - 1;
         else
-            mask = int64(gpuArray(mask(:))) - 1;
+            % (int64 arithmetic on gpuArrays needs R2023a+; double is exact
+            % for any index below 2^53)
+            mask = int64(double(gpuArray(mask(:))) - 1);
         end
         config.num_masked = numel(mask);
         AhAx = AhA_Toeplitz_mex(x, SEs, phi2_toep, config, mask);

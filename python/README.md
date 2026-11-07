@@ -82,6 +82,24 @@ y    = mr_aha.aha_toeplitz(cfg, x, SEs, Om, mask=mask)
 
 `mask` holds **0-based** linear indices into the centred upsampled grid.
 
+## Several GPUs (CUDA)
+
+`mr_aha.MultiGPUPlan` spreads the coils of one application over several GPUs
+and sums the partial results on the current CuPy device. The constant arrays
+are passed (and copied to every GPU) once, at creation; `apply` takes only `x`:
+
+```python
+with mr_aha.MultiGPUPlan(cfg, SEs, Om, mask=None, devices=[0, 1, 2, 3],
+                         share_primary=True) as op:   # Om used in place on GPU 0
+    for _ in range(n_iter):
+        y = op.apply(x)                               # or op(x)
+    print(op.info)    # devices used, coils per device, split coils, peer bandwidth
+```
+
+The library may use fewer GPUs than given (the smallest number with the same
+coils per GPU) and keeps small problems on one GPU. See the
+[Multi-GPU section](../README.md#multi-gpu-cuda) of the main README.
+
 ## NUFFT reference
 
 `mr_aha.AhANufftPlan` evaluates the same operator with type-2 / type-1

@@ -1,0 +1,51 @@
+{
+  "backend": "cuda",
+  "device": "NVIDIA TITAN RTX",
+  "host": "pact400-recon3",
+  "results": [
+    {
+      "case": "stack",
+      "masked": false,
+      "n_dim": [
+        320,
+        320,
+        56
+      ],
+      "L": 12,
+      "n_coils": 12,
+      "phi2_dim": [
+        640,
+        640,
+        56
+      ],
+      "kept": 1.0,
+      "kernel_gb": 14.3130624,
+      "plan_s": 0.04739901889115572,
+      "median_s": 0.9885867959819734,
+      "min_s": 0.9881707159802318,
+      "reps": 3
+    },
+    {
+      "case": "stack",
+      "masked": true,
+      "n_dim": [
+        320,
+        320,
+        56
+      ],
+      "L": 12,
+      "n_coils": 12,
+      "phi2_dim": [
+        640,
+        640,
+        56
+      ],
+      "kept": 0.81202880859375,
+      "kernel_gb": 11.622619008,
+      "plan_s": 0.048390170093625784,
+      "median_s": 0.9545640551950783,
+      "min_s": 0.9543732388410717,
+      "reps": 3
+    }
+  ]
+}

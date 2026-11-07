@@ -107,7 +107,9 @@ function [mask, kernel] = calc_mask(traj, config, threshold)
         error('MR_AHA:calc_mask:complexTraj', 'traj must be real-valued.');
     end
 
-    mask = calc_mask_mex(traj, config) + 1;   % the library indexes from 0
+    % The library indexes from 0. (int64 arithmetic on gpuArrays needs
+    % R2023a+; double is exact for any index below 2^53.)
+    mask = int64(double(calc_mask_mex(traj, config)) + 1);
     if nargout > 1
         kernel = calc_mask_mex(traj, config, 'kernel');
     end

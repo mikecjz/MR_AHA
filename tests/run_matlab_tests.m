@@ -1,11 +1,14 @@
-%RUN_MATLAB_TESTS  Put MR_AHA on the path and run the MATLAB reference check.
+%RUN_MATLAB_TESTS  Put MR_AHA on the path and run the MATLAB checks.
 %
 %   From the repository root:
 %       matlab -batch "run('tests/run_matlab_tests.m')"
 %
 %   Uses the MEX files in build/matlab (or $MR_AHA_MEX_DIR) and the reference
-%   files in data/ref_mlx_mat (tests/export_reference_mat.py). See
-%   CHECK_REFERENCE_MATLAB.
+%   files in data/ref_mlx_mat (tests/export_reference_mat.py). Runs
+%   CHECK_REFERENCE_MATLAB and, when the environment variable MR_AHA_TEST_MGPU
+%   is 1, CHECK_MGPU_MATLAB (the multi-GPU operator MR_AHA_OP on every
+%   visible GPU; opt-in because it occupies several GPUs of a shared machine;
+%   skipped on Metal or with fewer than two GPUs).
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
@@ -16,3 +19,6 @@ if isempty(mex_dir)
 end
 addpath(mex_dir, fullfile(mr_root, 'matlab'), fullfile(mr_root, 'tests'));
 check_reference_matlab(fullfile(mr_root, 'data', 'ref_mlx_mat'));
+if strcmp(getenv('MR_AHA_TEST_MGPU'), '1')
+    check_mgpu_matlab();
+end

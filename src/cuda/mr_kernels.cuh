@@ -105,6 +105,23 @@ __global__ void mr_k_blockdiag_masked(mr_complex *d_compact,
                                       long long num_masked, mr_dims dims);
 
 /**
+ * @brief Build the natural-order grid-to-mask index map used by the
+ *        specialised masked block-diagonal kernels.
+ *
+ * Writes `d_inv[j] = i` for every mask entry `i`, where `j` is the natural
+ * (FFT-order) linear index of the centred location `d_mask[i]`. The caller
+ * must first fill @p d_inv with -1 (`cudaMemset` to `0xFF`), which then marks
+ * the locations outside the mask.
+ *
+ * @param[out] d_inv      `[Mx, My, Mz]` int32 map, natural order.
+ * @param[in]  d_mask     0-based centred linear indices.
+ * @param[in]  num_masked Number of retained locations (< 2^31).
+ * @param[in]  dims       Geometry descriptor.
+ */
+__global__ void mr_k_mask_inverse(int *d_inv, const int64_t *d_mask,
+                                  long long num_masked, mr_dims dims);
+
+/**
  * @brief Scatter a compact `[num_masked, L]` buffer back onto the padded grid.
  *
  * The padded grid must have been zeroed beforehand; locations outside the mask
@@ -120,6 +137,85 @@ __global__ void mr_k_blockdiag_masked(mr_complex *d_compact,
 __global__ void mr_k_scatter_masked(mr_complex *d_pad, const mr_complex *d_compact,
                                     const int64_t *d_mask, long long num_masked,
                                     mr_dims dims);
+
+/* ------------------------------------------------------------------------ */
+/* Block-diagonal kernels specialised on L (mr_kernels_bd.cu)               */
+/* ------------------------------------------------------------------------ */
+
+/** @brief Threads per block of the specialised block-diagonal kernels (also
+ *         their `__launch_bounds__`). */
+#define MR_BD_THREADS 256
+
+/** @brief Largest rank with a specialised block-diagonal kernel. Larger ranks
+ *         use the generic shared-memory kernels: above about L = 30 one coil's
+ *         vectors no longer fit the register file and the specialised kernels
+ *         spill (TITAN RTX, 384^2 2D, 8 coils: L = 28 73 vs 79 ms, L = 30
+ *         88 vs 89 ms, L = 32 105 vs 102 ms, specialised vs generic). */
+#define MR_BD_MAX_L 30
+
+/** @brief Largest rank whose specialised kernels process coils in pairs (see
+ *         `MR_BD_PAIR` in mr_kernels_bd.cu). */
+#define MR_BD_PAIR_MAX_L 16
+
+/**
+ * @brief Range of grid locations processed by a specialised block-diagonal
+ *        kernel, and the layout of its data.
+ *
+ * The kernels process the natural-order locations `[loc0, loc0 + nloc)`;
+ * rank `l` of coil `s` of location `loc0 + i` is at
+ * `d_pad[i + vstride * (l + L * s)]`. The whole grid is
+ * `{0, Mx*My*Mz, Mx*My*Mz}` (see ::mr_bd_whole).
+ */
+struct mr_bd_range {
+    long long loc0;    /**< First location (natural-order linear index).   */
+    long long nloc;    /**< Number of locations.                           */
+    long long vstride; /**< Element stride between consecutive ranks.      */
+};
+
+/** @brief ::mr_bd_range covering the whole upsampled grid of @p dims. */
+inline mr_bd_range mr_bd_whole(const mr_dims &dims)
+{
+    return mr_bd_range{0, dims.pad_size, dims.pad_size};
+}
+
+/** @brief Signature of the specialised dense kernel `mr_k_bd_dense_t<L>`:
+ *         `(d_pad, d_phi2_toep, dims, ncoil, range)`. */
+typedef void (*mr_bd_dense_fn)(mr_complex *, const mr_complex *, mr_dims, int,
+                               mr_bd_range);
+
+/** @brief Signature of the specialised masked kernel `mr_k_bd_masked_t<L>`:
+ *         `(d_pad, d_phi2_toep, d_inv, num_masked, dims, ncoil, range)`; it
+ *         works in place on the padded grids through the index map of
+ *         ::mr_k_mask_inverse. */
+typedef void (*mr_bd_masked_fn)(mr_complex *, const mr_complex *, const int *,
+                                long long, mr_dims, int, mr_bd_range);
+
+/** @brief The specialised block-diagonal kernels of one rank. */
+struct mr_bd_kernels {
+    mr_bd_dense_fn  dense;   /**< Dense kernel, or NULL if no specialisation. */
+    mr_bd_masked_fn masked;  /**< Masked kernel, or NULL likewise.            */
+    int             pair;    /**< Non-zero when coils are processed in pairs. */
+};
+
+/**
+ * @brief Look up the block-diagonal kernels specialised on rank @p L.
+ *
+ * The kernels (`mr_k_bd_dense_t<L>` / `mr_k_bd_masked_t<L>`, defined in
+ * mr_kernels_bd.cu) differ from ::mr_k_blockdiag_dense /
+ * ::mr_k_blockdiag_masked in three ways: the rank vectors live in registers
+ * (no shared memory), each stored element of `phi2_toep` is read once per
+ * triangle walk instead of twice, and one launch serves a group of `ncoil`
+ * coils whose grids (and, masked, compact buffers) are stored back to back,
+ * so `phi2_toep` is read from DRAM about once per group. The masked kernel
+ * works in place on the padded grids (see ::mr_k_mask_inverse). Launch with
+ * at most ::MR_BD_THREADS threads per block, no dynamic shared memory, and one
+ * thread per location of the upsampled grid.
+ *
+ * @param[in] L Rank.
+ * @return The kernels, with NULL pointers when @p L is outside
+ *         `1..`::MR_BD_MAX_L.
+ */
+mr_bd_kernels mr_bd_lookup(int L);
 
 /* ------------------------------------------------------------------------ */
 /* calc_toep kernels                                                        */

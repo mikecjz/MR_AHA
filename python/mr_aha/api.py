@@ -36,9 +36,11 @@ from typing import Optional, Sequence
 from ._lib import (
     DEFAULT_MASK_RADIUS,
     DEFAULT_MASK_THRESHOLD,
+    MGPU_SHARE_PRIMARY,
     MaskMethod,
     MRConfig,
     MRError,
+    MRMgpuInfo,
     TrajType,
     Triangulation,
     backend,
@@ -63,6 +65,7 @@ __all__ = [
     "calc_toep",
     "aha_toeplitz",
     "AhAPlan",
+    "MultiGPUPlan",
 ]
 
 
@@ -735,3 +738,164 @@ def aha_toeplitz(cfg: MRConfig, x, SEs, phi2_toep, mask=None, out=None):
     """
     with AhAPlan(cfg) as plan:
         return plan.apply(x, SEs, phi2_toep, mask=mask, out=out)
+
+
+class MultiGPUPlan:
+    """:math:`A^H A` on several GPUs of one node (CUDA backend).
+
+    The operator is a sum over coils; the plan gives each GPU a share of the
+    coils and sums the partial results on the current (primary) device.
+    ``phi2_toep`` and the mask are copied to every GPU once, here, together
+    with each GPU's own sensitivity maps, so :meth:`apply` only takes ``x``.
+    Multi-GPU makes the operator faster but does not raise the largest problem
+    size: the whole kernel must fit on every GPU.
+
+    The library chooses how many of the given GPUs to use: with ``C`` coils
+    and ``G`` GPUs, the smallest number with the same ``ceil(C / G)`` coils
+    per GPU (e.g. 12 coils on 5 GPUs use 4), and only the primary device for
+    problems too small to benefit (see ``mr_mgpu_plan_create`` in
+    ``mr_aha.h``). :attr:`info` reports the choice.
+
+    Inputs and outputs live on the current CuPy device, which becomes the
+    primary device; it always takes part.
+
+    Args:
+        cfg: Configuration from :func:`make_config`.
+        SEs: ``complex64`` CuPy sensitivity maps, see :meth:`AhAPlan.apply`.
+        phi2_toep: ``complex64`` CuPy kernel from :func:`calc_toep`.
+        mask: ``int64`` CuPy mask; required when ``cfg.is_masked``.
+        devices: CUDA device ordinals to use, or ``None`` for every visible
+            device.
+        share_primary: Use ``SEs``, ``phi2_toep`` and ``mask`` in place on the
+            primary device instead of copying them (saves one copy of the
+            kernel there). The plan then keeps references to these arrays,
+            which must not be modified while it is open.
+
+    Raises:
+        RuntimeError: On the Metal backend.
+        ValueError: If an array has the wrong size or a mask is missing.
+        MRError: If the plan cannot be created.
+
+    Example:
+        >>> with mr_aha.MultiGPUPlan(cfg, SEs, Om, devices=[0, 1, 2, 3]) as op:
+        ...     y = op.apply(x)                          # doctest: +SKIP
+    """
+
+    def __init__(self, cfg: MRConfig, SEs, phi2_toep, mask=None,
+                 devices: Optional[Sequence[int]] = None,
+                 share_primary: bool = False):
+        if not hasattr(lib, "mr_mgpu_plan_create"):
+            raise RuntimeError("MultiGPUPlan requires the CUDA backend")
+        self._handle = ctypes.c_void_p()
+        self._cfg = cfg
+        _check_size(SEs, int(lib.mr_se_size(ctypes.byref(cfg))), "SEs")
+        _check_size(
+            phi2_toep, int(lib.mr_phi2_toep_size(ctypes.byref(cfg))), "phi2_toep"
+        )
+        if cfg.is_masked and mask is None:
+            raise ValueError("cfg.is_masked is set, so a mask is required")
+        # Arrays used in place must outlive the plan.
+        self._keep = (SEs, phi2_toep, mask) if share_primary else ()
+        devs = None
+        n = 0
+        if devices is not None:
+            devices = [int(d) for d in devices]
+            n = len(devices)
+            devs = (ctypes.c_int * max(n, 1))(*devices)
+        check(
+            lib.mr_mgpu_plan_create(
+                ctypes.byref(cfg),
+                devs,
+                n,
+                _ptr(SEs, "SEs", "complex64"),
+                _ptr(phi2_toep, "phi2_toep", "complex64"),
+                _ptr(mask, "mask", "int64", allow_none=True),
+                MGPU_SHARE_PRIMARY if share_primary else 0,
+                ctypes.byref(self._handle),
+            ),
+            "mr_mgpu_plan_create",
+        )
+
+    @property
+    def config(self) -> MRConfig:
+        """The configuration this plan was built from."""
+        return self._cfg
+
+    @property
+    def info(self) -> dict:
+        """How the work is distributed.
+
+        Returns:
+            A dictionary with ``devices`` (CUDA ordinals, primary first),
+            ``coil_begin`` / ``coil_count`` (whole coils per device),
+            ``group`` (coils per group on each device), ``n_split_coils``
+            (remainder coils split by rank), ``peer_access`` and
+            ``peer_bandwidth_gbs``.
+        """
+        if not self._handle:
+            raise RuntimeError("this MultiGPUPlan has already been closed")
+        inf = MRMgpuInfo()
+        check(lib.mr_mgpu_plan_info(self._handle, ctypes.byref(inf)),
+              "mr_mgpu_plan_info")
+        n = inf.n_devices
+        return dict(
+            devices=list(inf.devices[:n]),
+            coil_begin=list(inf.coil_begin[:n]),
+            coil_count=list(inf.coil_count[:n]),
+            group=list(inf.group[:n]),
+            n_split_coils=int(inf.n_split_coils),
+            peer_access=bool(inf.peer_access),
+            peer_bandwidth_gbs=float(inf.peer_bandwidth_gbs),
+        )
+
+    def apply(self, x, out=None):
+        """Apply :math:`A^H A` to a set of spatial coefficients.
+
+        Args:
+            x: ``complex64`` CuPy array on the primary device, see
+                :meth:`AhAPlan.apply`.
+            out: Optional pre-allocated ``complex64`` output shaped like ``x``.
+
+        Returns:
+            The ``complex64`` CuPy array ``AhAx``, shaped like ``x``.
+
+        Raises:
+            RuntimeError: If the plan has already been closed.
+            MRError: If the library reports a failure.
+        """
+        if not self._handle:
+            raise RuntimeError("this MultiGPUPlan has already been closed")
+        xp = _xp()
+        _check_size(x, int(lib.mr_x_size(ctypes.byref(self._cfg))), "x")
+        if out is None:
+            out = xp.empty(x.shape, dtype=xp.complex64)
+        else:
+            _check_size(out, x.size, "out")
+        check(
+            lib.mr_mgpu_plan_execute(
+                self._handle, _ptr(x, "x", "complex64"), _ptr(out, "out", "complex64")
+            ),
+            "mr_mgpu_plan_execute",
+        )
+        return out
+
+    __call__ = apply
+
+    def close(self) -> None:
+        """Release the plan and everything it holds on every GPU. Idempotent."""
+        if self._handle:
+            lib.mr_mgpu_plan_destroy(self._handle)
+            self._handle = ctypes.c_void_p()
+        self._keep = ()
+
+    def __enter__(self) -> "MultiGPUPlan":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:  # pragma: no cover - interpreter shutdown
+            pass

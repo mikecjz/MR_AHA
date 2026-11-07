@@ -89,7 +89,9 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, mask)
     if isempty(mask)
         mask = calc_mask(traj, config);       % derived from the trajectory
     end
-    mask0 = int64(gpuArray(mask(:))) - 1;    % the library indexes from 0
+    % The library indexes from 0. (int64 arithmetic on gpuArrays needs
+    % R2023a+; double is exact for any index below 2^53.)
+    mask0 = int64(double(gpuArray(mask(:))) - 1);
     config.num_masked = numel(mask0);
     phi2_toep = calc_toep_mex(phi2, traj, config, mask0);
 end
