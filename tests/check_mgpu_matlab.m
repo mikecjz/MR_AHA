@@ -48,6 +48,15 @@ function check_mgpu_matlab(varargin)
 %     device change (optional) after gpuDevice(k) with another k, apply
 %                  raises ':deviceChanged'; back on the primary,
 %                  ':deviceReset' (selecting a GPU resets it).
+%     pre-computation  phi2_toep on several GPUs, for '2D', 'stack', '3D',
+%                  unmasked and masked, MR_AHA_TOEP_SPLIT = 'split',
+%                  'replicate' and 'auto' (and 'off' for the operator):
+%                  CALC_TOEP(..., 'devices', set) against CALC_TOEP on the
+%                  primary alone (< 1e-6: cufinufft's run-to-run noise), and
+%                  MR_AHA_OP.FROM_GRAM against AHA_TOEPLITZ with the
+%                  single-GPU kernel (< tol), its KERNEL() against that
+%                  kernel, the reported toep_source, and the current
+%                  gpuDevice unchanged.
 %
 %   NAME-VALUE PAIRS
 %     'primary'        gpuDevice index (1-based) of the primary GPU. Default:
@@ -350,6 +359,69 @@ function check_mgpu_matlab(varargin)
         nfail = nfail + report('back on the primary: apply errors (deviceReset)', ...
             strcmp(id2, 'MR_AHA:mr_aha_op:deviceReset'), id2);
     end
+    % ------------------------------------------------------------------
+    % Multi-GPU pre-computation of phi2_toep (calc_toep 'devices',
+    % mr_aha_op.from_gram)
+    % ------------------------------------------------------------------
+    old_toep = getenv('MR_AHA_TOEP_SPLIT');
+    gcases = {'2D', [40 36], 5; 'stack', [32 30 8], 4; '3D', [20 18 16], 3};
+    n_run = 0; n_pass = 0; worst_k = 0; worst_a = 0;
+    for ic = 1:size(gcases, 1)
+        for masked = [false true]
+            g = make_gram_problem(gcases{ic, 1}, gcases{ic, 2}, gcases{ic, 3}, 5);
+            cfg = g.cfg;
+            mask = [];
+            if masked
+                cfg.is_masked = true;
+                [Om, mask] = calc_toep(g.phi2, g.traj, cfg);
+            else
+                Om = calc_toep(g.phi2, g.traj, cfg);
+            end
+            yref = AhA_Toeplitz(g.x, g.SEs, Om, cfg, mask);
+            for mode = {'split', 'replicate', 'auto', 'off'}
+                setenv('MR_AHA_TOEP_SPLIT', mode{1});
+                k0 = current_index();
+                bad = {};
+                if ~strcmp(mode{1}, 'off')
+                    if masked
+                        Om2 = calc_toep(g.phi2, g.traj, cfg, mask, 'devices', big_set);
+                    else
+                        Om2 = calc_toep(g.phi2, g.traj, cfg, 'devices', big_set);
+                    end
+                    e = rel(Om2, Om); worst_k = max(worst_k, e);
+                    if ~(e < 1e-6), bad{end+1} = sprintf('calc_toep %.2e', e); end %#ok<AGROW>
+                end
+                op = mr_aha_op.from_gram(g.SEs, g.phi2, g.traj, cfg, ...
+                                         'devices', big_set, 'mask', mask);
+                e = rel(op * g.x, yref); worst_a = max(worst_a, e);
+                if ~(e < opt.tol), bad{end+1} = sprintf('AhA %.2e', e); end %#ok<AGROW>
+                e = rel(op.kernel(), Om); worst_k = max(worst_k, e);
+                if ~(e < 1e-6), bad{end+1} = sprintf('kernel %.2e', e); end %#ok<AGROW>
+                s = op.info();
+                expect = struct('split', 'split', 'replicate', 'replicate', ...
+                                'off', 'broadcast', 'auto', '');
+                one_gpu = numel(unique([big_set opt.primary])) == 1;   % allow_single
+                if ~isempty(expect.(mode{1})) && ~one_gpu && ...
+                        ~strcmp(s.toep_source, expect.(mode{1}))
+                    bad{end+1} = ['toep_source ' s.toep_source]; %#ok<AGROW>
+                end
+                delete(op);
+                if current_index() ~= k0, bad{end+1} = 'gpuDevice changed'; end %#ok<AGROW>
+                n_run = n_run + 1;
+                if isempty(bad)
+                    n_pass = n_pass + 1;
+                else
+                    fprintf('  FAIL pre-computation %s masked=%d %s: %s\n', ...
+                            gcases{ic, 1}, masked, mode{1}, strjoin(bad, ', '));
+                end
+            end
+        end
+    end
+    setenv('MR_AHA_TOEP_SPLIT', old_toep);
+    nfail = nfail + (n_run - n_pass);
+    fprintf(['pre-computation: %d / %d passed, worst kernel difference %.3e, ' ...
+             'worst AhA difference %.3e\n'], n_pass, n_run, worst_k, worst_a);
+
     nfail = nfail + report('registry empty and MEX unlocked at the end', ...
         mr_aha_op_mex('count') == 0 && ~mislocked('mr_aha_op_mex'), '');
 
@@ -378,6 +450,43 @@ function prob = make_problem(traj, n_dim, L, nc)
     npad = prod(cfg.phi2_dim);
     prob.mask = sort(randperm(npad, round(0.4 * npad))).';   % 1-based
     prob.toep_masked = crand([numel(prob.mask) ntri]);
+end
+
+function g = make_gram_problem(traj_type, n_dim, L, nc)
+%MAKE_GRAM_PROBLEM  Random Hermitian Gram blocks and a radial trajectory
+%   (golden-angle in-plane, or golden-means 3D) plus x and SEs.
+    cfg = mr_default_config(traj_type, n_dim, L);
+    cfg.n_coils = nc;
+    Nt = 24; Nkx = 2 * n_dim(1);
+    k = pi * ((0:Nkx-1) - Nkx/2) / (Nkx/2);
+    m = (0:Nt-1).';
+    if strcmpi(traj_type, '3D')
+        z = mod(m * 0.4656, 1) * 2 - 1; az = 2 * pi * mod(m * 0.6823, 1);
+        d = [sqrt(1 - z.^2) .* cos(az), sqrt(1 - z.^2) .* sin(az), z];
+    else
+        a = m * pi * (sqrt(5) - 1) / 2;
+        d = [cos(a), sin(a)];
+    end
+    traj = zeros(Nt, Nkx, size(d, 2), 'single');
+    for c = 1:size(d, 2), traj(:, :, c) = d(:, c) * k; end
+    nkz = 1;
+    if strcmpi(traj_type, 'stack'), nkz = n_dim(3); end
+    phi2 = zeros([Nt, nkz, L, L], 'single');
+    phi2 = complex(phi2, phi2);
+    for t = 1:Nt
+        for z = 1:nkz
+            P = complex(randn(L, 2), randn(L, 2));
+            phi2(t, z, :, :) = reshape(single(P * P'), [1 1 L L]);
+        end
+    end
+    if nkz == 1, phi2 = reshape(phi2, [Nt, L, L]); end
+    crand = @(varargin) complex(gpuArray.randn(varargin{:}, 'single'), ...
+                                gpuArray.randn(varargin{:}, 'single'));
+    g.cfg = cfg;
+    g.phi2 = gpuArray(phi2);
+    g.traj = gpuArray(traj);
+    g.x = crand([n_dim L]);
+    g.SEs = crand([n_dim nc]);
 end
 
 function op = make_shared_op(prob, devs)

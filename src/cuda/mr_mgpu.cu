@@ -38,6 +38,15 @@
  * price of moving its padded data twice between devices; worthwhile only
  * with fast links (NVLink). See ::mr_mgpu_plan_create for the cost model.
  *
+ * Kernel from the Gram blocks. ::mr_mgpu_plan_create_gram does not take a
+ * finished `phi2_toep`: the plan allocates its own copy of the kernel on every
+ * device that applies it and fills them with ::mr_toep_distribute
+ * (`mr_toep_mgpu.cu`). Every device computes a share of the triangular
+ * components into its own copy, then the shares are exchanged (or, when the
+ * links are too slow, every device computes the rest itself). From then on
+ * the plan is identical to one built from a caller's kernel, with the
+ * primary's copy taking the caller's place (see ::mr_mgpu_compute_kernel).
+ *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */
 
@@ -45,6 +54,7 @@
 
 #include <cuda.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -73,8 +83,9 @@ struct mr_mgpu_dev {
     mr_complex  *d_SEs;      /**< Maps of this device's coils `[.., ncoil]`.   */
     mr_complex  *d_toep;     /**< Replica of `phi2_toep`.                      */
     int64_t     *d_mask;     /**< Replica of the mask, or NULL.                */
-    int          owns_const; /**< Non-zero when the three arrays above are
-                                  owned (freed on destroy).                    */
+    int          owns_const; /**< Non-zero when `d_SEs` and `d_mask` are owned
+                                  (freed on destroy).                          */
+    int          owns_toep;  /**< Non-zero when `d_toep` is owned.             */
     mr_complex  *d_x;        /**< Copy of `x` (non-primary devices only).      */
     mr_complex  *d_part;     /**< Partial `AhAx` (non-primary devices only).   */
     mr_complex  *d_stage;    /**< Staging buffer for this device's partial
@@ -113,6 +124,22 @@ struct mr_mgpu_plan_s {
     mr_bd_kernels bd;        /**< Specialised block-diagonal kernels.          */
     mr_mgpu_dev  dev[MR_MGPU_MAX_DEVICES]; /**< Per-device state.              */
     mr_mgpu_info info;       /**< What ::mr_mgpu_plan_info reports.            */
+    /* How phi2_toep was obtained; copied into @ref info at the end of the
+     * creation (see the toep_* fields of ::mr_mgpu_info). */
+    int          toep_source;    /**< ::MR_MGPU_TOEP_SUPPLIED etc.             */
+    int          toep_devices;   /**< Devices that computed components.        */
+    double       toep_ms;        /**< Time of computing (and distributing).    */
+    double       toep_comp_ms;   /**< Pilot time per component.                */
+    double       toep_gbs;       /**< Probed concurrent receive bandwidth.     */
+};
+
+/** @brief Inputs of ::mr_mgpu_plan_create_gram, from which the plan computes
+ *         `phi2_toep` itself (see ::mr_mgpu_compute_kernel). */
+struct mr_mgpu_gram {
+    const mr_complex *d_phi2;  /**< Gram blocks (primary device).               */
+    const float      *d_traj;  /**< Trajectory (primary device).                */
+    int64_t           Ntrajs;  /**< Number of trajectories.                     */
+    int64_t           Nkx;     /**< Samples per trajectory.                     */
 };
 
 /** @brief Pointers to the staged partial results, passed by value. */
@@ -264,9 +291,9 @@ static void mr_mgpu_dev_release(mr_mgpu_plan p, mr_mgpu_dev *d, int alive,
         if (d->plan) mr_aha_plan_destroy(d->plan);
         if (d->owns_const) {
             if (d->d_SEs) cudaFree(d->d_SEs);
-            if (d->d_toep) cudaFree(d->d_toep);
             if (d->d_mask) cudaFree(d->d_mask);
         }
+        if (d->owns_toep && d->d_toep) cudaFree(d->d_toep);
         if (d->d_x) cudaFree(d->d_x);
         if (d->d_part) cudaFree(d->d_part);
         if (d->fft_r) cufftDestroy(d->fft_r);
@@ -313,17 +340,16 @@ static void mr_mgpu_release(mr_mgpu_plan p, int primary_lost = 0)
     free(p);
 }
 
-/**
- * @brief Enable direct peer access between @p a and @p b in both directions,
- *        when the hardware allows it.
- * @return 1 when both directions are enabled, else 0.
- */
-static int mr_mgpu_enable_peer(int a, int b)
+/* Body of mr_enable_peer, documented in mr_internal.cuh. */
+int mr_enable_peer(int a, int b)
 {
     int ab = 0, ba = 0;
     if (cudaDeviceCanAccessPeer(&ab, a, b) != cudaSuccess) ab = 0;
     if (cudaDeviceCanAccessPeer(&ba, b, a) != cudaSuccess) ba = 0;
-    if (!ab || !ba) return 0;
+    if (!ab || !ba) {
+        cudaGetLastError();
+        return 0;
+    }
     int ok = 1;
     if (cudaSetDevice(a) == cudaSuccess) {
         cudaError_t e = cudaDeviceEnablePeerAccess(b, 0);
@@ -534,7 +560,10 @@ static int mr_mgpu_probe_coils(mr_mgpu_plan p, int ncoil, const mr_complex *d_SE
  * @param[in,out] p        Plan (geometry, primary device).
  * @param[in,out] d        Slot with `dev`, `coil0` and `ncoil` filled.
  * @param[in]     d_SEs    Caller's maps (primary device).
- * @param[in]     d_toep   Caller's kernel (primary device).
+ * @param[in]     d_toep   Kernel to copy from (primary device): the caller's,
+ *                         or the plan's own copy on the primary. Not used
+ *                         when the slot already holds a kernel (`d->d_toep`
+ *                         set, see ::mr_mgpu_plan_create_gram).
  * @param[in]     d_mask   Caller's mask or NULL (primary device).
  * @param[in]     share    Use the caller's arrays in place (primary only).
  * @return ::MR_SUCCESS or a negative ::mr_status.
@@ -561,16 +590,26 @@ static int mr_mgpu_dev_setup(mr_mgpu_plan p, mr_mgpu_dev *d,
         if (rc != MR_SUCCESS) return rc;
     }
 
+    /* A kernel already in place (computed by mr_mgpu_plan_create_gram) is
+     * kept; otherwise it is aliased (shared primary) or copied. */
+    const int need_toep = (d->d_toep == NULL);
     if (is_primary && share) {
         /* Alias the caller's arrays: the maps of the primary's coils start at
          * coil0 of the caller's array. */
         d->owns_const = 0;
         d->d_SEs  = (mr_complex *)se_src;
-        d->d_toep = (mr_complex *)d_toep;
         d->d_mask = (int64_t *)d_mask;
+        if (need_toep) {
+            d->owns_toep = 0;
+            d->d_toep = (mr_complex *)d_toep;
+        }
     } else {
         d->owns_const = 1;
-        cudaError_t ce = cudaMalloc((void **)&d->d_toep, toep_bytes);
+        cudaError_t ce = cudaSuccess;
+        if (need_toep) {
+            ce = cudaMalloc((void **)&d->d_toep, toep_bytes);
+            if (ce == cudaSuccess) d->owns_toep = 1;
+        }
         if (ce == cudaSuccess) ce = cudaMalloc((void **)&d->d_SEs, se_bytes);
         if (ce == cudaSuccess && mask_bytes)
             ce = cudaMalloc((void **)&d->d_mask, mask_bytes);
@@ -579,11 +618,12 @@ static int mr_mgpu_dev_setup(mr_mgpu_plan p, mr_mgpu_dev *d,
             MR_FAIL(MR_ERR_ALLOC,
                     "failed to allocate the %.2f GB copy of phi2_toep, the maps "
                     "and the mask: %s",
-                    (toep_bytes + se_bytes + mask_bytes) / 1e9,
+                    ((need_toep ? toep_bytes : 0) + se_bytes + mask_bytes) / 1e9,
                     cudaGetErrorString(ce));
         }
-        MR_CUDA_CHECK(cudaMemcpyPeerAsync(d->d_toep, d->dev, d_toep, p->primary,
-                                          toep_bytes, d->stream));
+        if (need_toep)
+            MR_CUDA_CHECK(cudaMemcpyPeerAsync(d->d_toep, d->dev, d_toep, p->primary,
+                                              toep_bytes, d->stream));
         MR_CUDA_CHECK(cudaMemcpyPeerAsync(d->d_SEs, d->dev, se_src, p->primary,
                                           se_bytes, d->stream));
         if (mask_bytes)
@@ -628,53 +668,119 @@ static int mr_mgpu_dev_setup(mr_mgpu_plan p, mr_mgpu_dev *d,
     return mr_aha_plan_create(&dc, &d->plan);
 }
 
+/**
+ * @brief Compute `phi2_toep` for a plan from the Gram blocks (approach C of
+ *        ::mr_mgpu_plan_create_gram).
+ *
+ * Allocates the plan's own copy of the kernel on each of the first @p G1
+ * candidates (the devices that certainly apply it: the whole-coil devices,
+ * which the remainder split also uses) and lets ::mr_toep_distribute fill
+ * them, with every candidate computing a share. Devices the plan adds later
+ * (remainder split over more devices) copy the kernel from the primary in
+ * ::mr_mgpu_dev_setup, as with a caller's kernel. With
+ * `MR_AHA_TOEP_SPLIT=off` (or a single device) the primary computes the
+ * kernel alone and ::mr_mgpu_dev_setup copies it to the others: the previous
+ * behaviour, kept for comparison.
+ *
+ * On return `p->ndev` covers the slots holding a kernel so that
+ * ::mr_mgpu_release frees them on a later failure.
+ *
+ * @param[in,out] p      Plan (configuration, primary device and stream).
+ * @param[in]     cand   Candidate devices, primary first.
+ * @param[in]     G      Number of candidates.
+ * @param[in]     G1     Number of whole-coil devices (first @p G1 candidates).
+ * @param[in]     gram   Gram blocks and trajectory (primary device).
+ * @param[in]     d_mask Mask (primary device) or NULL.
+ * @return ::MR_SUCCESS or a negative ::mr_status.
+ */
+static int mr_mgpu_compute_kernel(mr_mgpu_plan p, const int *cand, int G, int G1,
+                                  const mr_mgpu_gram *gram, const int64_t *d_mask)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    mr_config cfg = p->cfg; /* gpu_device_id = primary, stream = caller's */
+    const size_t toep_bytes = (size_t)mr_phi2_toep_size(&cfg) * sizeof(mr_complex);
+    const int mode = mr_toep_split_env();
+    const int alone = (mode < 0 || G == 1);
+    const int nrecv = alone ? 1 : G1;
+
+    /* The plan's copies, before any calc_toep transient (whose chunks are
+     * sized against the memory left). */
+    for (int k = 0; k < nrecv; ++k) {
+        mr_mgpu_dev *d = &p->dev[k];
+        d->dev = cand[k];
+        p->ndev = k + 1;
+        MR_CUDA_CHECK(cudaSetDevice(d->dev));
+        const cudaError_t ce = cudaMalloc((void **)&d->d_toep, toep_bytes);
+        if (ce != cudaSuccess) {
+            cudaGetLastError();
+            d->d_toep = NULL;
+            MR_FAIL(MR_ERR_ALLOC,
+                    "device %d: failed to allocate the %.2f GB copy of phi2_toep: %s",
+                    d->dev, toep_bytes / 1e9, cudaGetErrorString(ce));
+        }
+        d->owns_toep = 1;
+    }
+
+    int rc;
+    if (alone) {
+        MR_CUDA_CHECK(cudaSetDevice(p->primary));
+        rc = mr_calc_toep_impl(&cfg, gram->d_phi2, gram->d_traj, gram->Ntrajs,
+                               gram->Nkx, d_mask, p->dev[0].d_toep);
+        p->toep_source = MR_MGPU_TOEP_BROADCAST;
+        p->toep_devices = 1;
+    } else {
+        mr_toep_dist_dev devs[MR_MGPU_MAX_DEVICES];
+        for (int k = 0; k < G; ++k) {
+            devs[k].dev = cand[k];
+            devs[k].d_full = (k < nrecv) ? p->dev[k].d_toep : NULL;
+        }
+        mr_toep_dist_report rep;
+        memset(&rep, 0, sizeof(rep));
+        rc = mr_toep_distribute(&cfg, devs, G, gram->d_phi2, gram->d_traj,
+                                gram->Ntrajs, gram->Nkx, d_mask, mode, &rep);
+        p->toep_source = (rep.mode == MR_TOEP_DIST_SELF) ? MR_MGPU_TOEP_REPLICATE
+                                                         : MR_MGPU_TOEP_SPLIT;
+        p->toep_devices = rep.n_devices;
+        p->toep_comp_ms = rep.entry_ms;
+        p->toep_gbs = rep.gather_gbs;
+    }
+    p->toep_ms = std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - t0)
+                     .count();
+    return rc;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Public API                                                               */
 /* ------------------------------------------------------------------------ */
 
-/** @brief Body of ::mr_mgpu_plan_create; may change the current device. */
-static int mr_mgpu_create_impl(const mr_config *cfg, const int *devices,
-                               int n_devices, const mr_complex *d_SEs,
+/**
+ * @brief Body of ::mr_mgpu_plan_create and ::mr_mgpu_plan_create_gram; may
+ *        change the current device.
+ *
+ * Exactly one of @p d_phi2_toep (the caller's kernel) and @p gram (compute
+ * the kernel, see ::mr_mgpu_compute_kernel) is non-NULL.
+ */
+static int mr_mgpu_create_impl(const char *who, const mr_config *cfg,
+                               const int *devices, int n_devices,
+                               const mr_complex *d_SEs,
                                const mr_complex *d_phi2_toep,
+                               const mr_mgpu_gram *gram,
                                const int64_t *d_mask, int flags,
                                mr_mgpu_plan *plan_out)
 {
     int rc = mr_config_validate(cfg);
     if (rc != MR_SUCCESS) return rc;
     if (cfg->is_masked)
-        MR_REQUIRE(d_mask != NULL,
-                   "mr_mgpu_plan_create: d_mask is required when is_masked is set");
-
-    int ndev_visible = 0;
-    MR_CUDA_CHECK(cudaGetDeviceCount(&ndev_visible));
-    int primary = cfg->gpu_device_id;
-    if (primary < 0) MR_CUDA_CHECK(cudaGetDevice(&primary));
-    MR_REQUIRE(primary < ndev_visible,
-               "mr_mgpu_plan_create: primary device %d is not visible", primary);
+        MR_REQUIRE(d_mask != NULL, "%s: d_mask is required when is_masked is set",
+                   who);
 
     /* Candidate list: the primary first, then the requested (or all visible)
      * devices in order, without duplicates. */
     int cand[MR_MGPU_MAX_DEVICES];
-    int G = 0;
-    cand[G++] = primary;
-    const int nreq = (devices != NULL && n_devices > 0) ? n_devices : ndev_visible;
-    for (int k = 0; k < nreq; ++k) {
-        const int dv = (devices != NULL && n_devices > 0) ? devices[k] : k;
-        MR_REQUIRE(dv >= 0 && dv < ndev_visible,
-                   "mr_mgpu_plan_create: device %d is not visible (%d visible)",
-                   dv, ndev_visible);
-        int dup = 0;
-        for (int j = 0; j < G; ++j) dup |= (cand[j] == dv);
-        if (dup) continue;
-        if (devices == NULL || n_devices == 0) {
-            if (G == MR_MGPU_MAX_DEVICES) break; /* all visible: use the first 16 */
-        } else {
-            MR_REQUIRE(G < MR_MGPU_MAX_DEVICES,
-                       "mr_mgpu_plan_create: at most %d devices are supported",
-                       MR_MGPU_MAX_DEVICES);
-        }
-        cand[G++] = dv;
-    }
+    int G = 0, primary = 0;
+    rc = mr_mgpu_candidates(who, cfg, devices, n_devices, cand, &G, &primary);
+    if (rc != MR_SUCCESS) return rc;
 
     /* Number of devices for whole-coil assignment (option 1, see the header
      * and ::mr_mgpu_pick_count); tiny problems stay on the primary device. */
@@ -698,10 +804,25 @@ static int mr_mgpu_create_impl(const mr_config *cfg, const int *devices,
     if (cudaSetDevice(primary) != cudaSuccess ||
         cudaStreamSynchronize(p->stream) != cudaSuccess ||
         cudaEventCreateWithFlags(&p->start, cudaEventDisableTiming) != cudaSuccess) {
-        mr_set_error("mr_mgpu_plan_create: CUDA error on the primary device %d: %s",
+        mr_set_error("%s: CUDA error on the primary device %d: %s", who,
                      primary, cudaGetErrorString(cudaGetLastError()));
         mr_mgpu_release(p);
         return MR_ERR_CUDA;
+    }
+
+    /* Kernel from the Gram blocks (mr_mgpu_plan_create_gram): computed on all
+     * candidates into the plan's own copies; from here on it is used exactly
+     * like a caller's kernel on the primary. */
+    if (gram != NULL) {
+        rc = mr_mgpu_compute_kernel(p, cand, G, G1, gram, d_mask);
+        if (rc != MR_SUCCESS) {
+            char msg[1024];
+            snprintf(msg, sizeof(msg), "%s", mr_last_error());
+            mr_mgpu_release(p);
+            mr_set_error("%s: %s", who, msg);
+            return rc;
+        }
+        d_phi2_toep = p->dev[0].d_toep;
     }
 
     /* Remainder split (option 2): all G devices take q = floor(C/G) whole
@@ -731,7 +852,7 @@ static int mr_mgpu_create_impl(const mr_config *cfg, const int *devices,
         int ok = 1;
         for (int k = 1; k < nprobe && ok; ++k) {
             double b = 0.0;
-            mr_mgpu_enable_peer(primary, cand[k]);
+            mr_enable_peer(primary, cand[k]);
             if (mr_mgpu_probe_bw(primary, cand[k], &b) != MR_SUCCESS) ok = 0;
             else if (b < bmin) bmin = b;
         }
@@ -790,10 +911,10 @@ static int mr_mgpu_create_impl(const mr_config *cfg, const int *devices,
     /* Peer access: primary <-> every device, and every pair for the split's
      * all-to-all exchange. */
     int peer_all = 1;
-    for (int k = 1; k < Gp; ++k) peer_all &= mr_mgpu_enable_peer(primary, cand[k]);
+    for (int k = 1; k < Gp; ++k) peer_all &= mr_enable_peer(primary, cand[k]);
     if (split)
         for (int a = 1; a < Gp; ++a)
-            for (int b = a + 1; b < Gp; ++b) mr_mgpu_enable_peer(cand[a], cand[b]);
+            for (int b = a + 1; b < Gp; ++b) mr_enable_peer(cand[a], cand[b]);
 
     /* Non-primary devices first: the primary then sizes its coil groups
      * knowing about the staging buffers it holds for the others. */
@@ -819,6 +940,11 @@ static int mr_mgpu_create_impl(const mr_config *cfg, const int *devices,
     in->n_split_coils = p->nsplit;
     in->peer_access = (Gp > 1) ? peer_all : 0;
     in->peer_bandwidth_gbs = (bw < 1e29) ? bw : 0.0;
+    in->toep_source = p->toep_source;
+    in->toep_devices = p->toep_devices;
+    in->toep_ms = p->toep_ms;
+    in->toep_component_ms = p->toep_comp_ms;
+    in->toep_gather_gbs = p->toep_gbs;
     if (cfg->verbose && t_whole > 0.0)
         printf("[mr_aha] multi-GPU cost model: bw %.1f GB/s, whole coils on %d "
                "device(s) %.2f ms, split on %d %.2f ms -> %s\n",
@@ -858,10 +984,54 @@ extern "C" int mr_mgpu_plan_create(const mr_config *cfg, const int *devices,
 
     int prev = 0;
     MR_CUDA_CHECK(cudaGetDevice(&prev));
-    const int rc = mr_mgpu_create_impl(cfg, devices, n_devices, d_SEs,
-                                       d_phi2_toep, d_mask, flags, plan_out);
+    const int rc = mr_mgpu_create_impl("mr_mgpu_plan_create", cfg, devices,
+                                       n_devices, d_SEs, d_phi2_toep, NULL, d_mask,
+                                       flags, plan_out);
     cudaSetDevice(prev);
     return rc;
+}
+
+extern "C" int mr_mgpu_plan_create_gram(const mr_config *cfg, const int *devices,
+                                        int n_devices, const mr_complex *d_SEs,
+                                        const mr_complex *d_phi2,
+                                        const float *d_traj, int64_t Ntrajs,
+                                        int64_t Nkx, const int64_t *d_mask,
+                                        int flags, mr_mgpu_plan *plan_out)
+{
+    mr_clear_error();
+    MR_REQUIRE(plan_out != NULL, "mr_mgpu_plan_create_gram: plan_out is NULL");
+    *plan_out = NULL;
+    MR_REQUIRE(cfg != NULL, "mr_mgpu_plan_create_gram: cfg is NULL");
+    MR_REQUIRE(d_SEs != NULL, "mr_mgpu_plan_create_gram: d_SEs is NULL");
+    MR_REQUIRE(d_phi2 != NULL, "mr_mgpu_plan_create_gram: d_phi2 is NULL");
+    MR_REQUIRE(d_traj != NULL, "mr_mgpu_plan_create_gram: d_traj is NULL");
+    MR_REQUIRE(Ntrajs > 0 && Nkx > 0,
+               "mr_mgpu_plan_create_gram: Ntrajs = %lld and Nkx = %lld must be > 0",
+               (long long)Ntrajs, (long long)Nkx);
+    MR_REQUIRE(n_devices >= 0 && n_devices <= MR_MGPU_MAX_DEVICES,
+               "mr_mgpu_plan_create_gram: n_devices must be in [0, %d]",
+               MR_MGPU_MAX_DEVICES);
+
+    const mr_mgpu_gram gram = {d_phi2, d_traj, Ntrajs, Nkx};
+    int prev = 0;
+    MR_CUDA_CHECK(cudaGetDevice(&prev));
+    const int rc = mr_mgpu_create_impl("mr_mgpu_plan_create_gram", cfg, devices,
+                                       n_devices, d_SEs, NULL, &gram, d_mask, flags,
+                                       plan_out);
+    cudaSetDevice(prev);
+    return rc;
+}
+
+extern "C" int mr_mgpu_plan_kernel(mr_mgpu_plan plan, int k,
+                                   const mr_complex **d_phi2_toep)
+{
+    mr_clear_error();
+    MR_REQUIRE(plan != NULL, "mr_mgpu_plan_kernel: plan is NULL");
+    MR_REQUIRE(d_phi2_toep != NULL, "mr_mgpu_plan_kernel: d_phi2_toep is NULL");
+    MR_REQUIRE(k >= 0 && k < plan->ndev,
+               "mr_mgpu_plan_kernel: device index %d outside [0, %d)", k, plan->ndev);
+    *d_phi2_toep = plan->dev[k].d_toep;
+    return MR_SUCCESS;
 }
 
 /**

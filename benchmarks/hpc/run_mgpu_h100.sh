@@ -18,12 +18,20 @@
 #              the GPU counts), split off/on/auto: remainder-split timing and
 #              the cost model's choice
 #  PART=matlab builds the MEX files inside the Singularity MATLAB image (its
-#              MATLAB R2025b and CUDA 12.9, into build_h100_matlab) and runs
+#              MATLAB R2025b and CUDA 12.9, into build_<TAG>_matlab) and runs
 #              tests/check_mgpu_matlab.m on 2 and all allocated GPUs, plus
 #              tests/check_reference_matlab.m on one GPU
+#  PART=toep_test  multi-GPU pre-computation of phi2_toep: check_reference.py
+#              on one GPU (the refactored calc_toep), then
+#              tests/check_toep_mgpu.py on every allocated GPU (QUICK=1 for
+#              fewer problems)
+#              (the set-up benchmark, bench_toep_mgpu.py, is run by
+#              docs/MRM/scripts/run_hpc.sbatch with MGPU=1 MGPU_STEPS=toep)
 #
-#  The library is built into build_h100_mgpu_<PART> (sm_90), one per part so
-#  that the parts can run at the same time. Node esplhpc-cp087 fails with
+#  The library is built into build_<TAG>_mgpu_<PART> (sm_<ARCH>), one per part
+#  so that the parts can run at the same time. Other GPU types: set ARCH and
+#  TAG, e.g. ARCH=89 TAG=l40s ... sbatch --gres=gpu:l40s:4 ... for L40S. PART=bench
+#  takes CASES (default "stack 3d 2d") and GPUS (default 2..N). Node esplhpc-cp087 fails with
 #  cudaErrorSystemNotReady (NVSwitch fabric manager down, 2026-11-06): exclude it.
 # ============================================================================
 #SBATCH --job-name=mr_aha_mgpu
@@ -40,7 +48,8 @@ ROOT=${SLURM_SUBMIT_DIR:-$(pwd)}
 cd "$ROOT"
 PART=${PART:-test}
 ENV_PY=${ENV_PY:-$HOME/.conda/envs/mr_aha/bin/python}
-BUILD=build_h100_mgpu_$PART
+ARCH=${ARCH:-90}
+BUILD=build_${TAG:-h100}_mgpu_$PART
 
 module load cuda12.9/toolkit/12.9.1
 export PATH=$(dirname "$ENV_PY"):$PATH
@@ -56,14 +65,15 @@ if [[ $PART == matlab ]]; then
         singularity exec --nv --env MLM_LICENSE_FILE=27000@cslxlms \
             --bind "$ROOT":"$ROOT" "$MATLAB_IMG" bash -c "$1"
     }
+    MBUILD=build_${TAG:-h100}_matlab
     sing "export PATH=/usr/local/cuda-12.9/bin:\$PATH; cd '$ROOT' && \
-        $(dirname "$ENV_PY")/cmake -S . -B build_h100_matlab -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CUDA_ARCHITECTURES=90 -DMR_AHA_BUILD_MATLAB=ON \
+        $(dirname "$ENV_PY")/cmake -S . -B $MBUILD -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=$ARCH -DMR_AHA_BUILD_MATLAB=ON \
             -DMR_AHA_BUILD_PYTHON=OFF -DMR_AHA_BUILD_EXAMPLES=OFF \
             -DMatlab_ROOT_DIR=/opt/matlab/R2025b > /dev/null && \
-        $(dirname "$ENV_PY")/cmake --build build_h100_matlab -j ${SLURM_CPUS_PER_TASK:-8} \
+        $(dirname "$ENV_PY")/cmake --build $MBUILD -j ${SLURM_CPUS_PER_TASK:-8} \
             --target AhA_Toeplitz_mex calc_toep_mex calc_mask_mex mr_aha_op_mex" || exit 1
-    ADDP="addpath('$ROOT/matlab', '$ROOT/build_h100_matlab/matlab', '$ROOT/tests')"
+    ADDP="addpath('$ROOT/matlab', '$ROOT/$MBUILD/matlab', '$ROOT/tests')"
     sing "matlab -batch \"$ADDP; check_mgpu_matlab('device_sets', {[1 2], 1:$NGPU}, \
         'split_modes', {'off', 'on'})\"" || echo "check_mgpu_matlab FAILED"
     sing "CUDA_VISIBLE_DEVICES=0 matlab -batch \"$ADDP; cd('$ROOT'); \
@@ -75,7 +85,7 @@ nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv,noheader
 nvidia-smi topo -m
 
 cmake -S . -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_CUDA_ARCHITECTURES=90 -DMR_AHA_BUILD_PYTHON=ON \
+      -DCMAKE_CUDA_ARCHITECTURES=$ARCH -DMR_AHA_BUILD_PYTHON=ON \
       -DMR_AHA_BUILD_EXAMPLES=OFF -DMR_AHA_BUILD_MATLAB=OFF > /dev/null || exit 1
 cmake --build "$BUILD" -j "${SLURM_CPUS_PER_TASK:-8}" --target mr_aha_c || exit 1
 
@@ -99,9 +109,13 @@ elif [[ $PART == single ]]; then
        benchmarks/results/$(hostname -s)/aha_cuda_generic.json 2>/dev/null
     for g in 1 2 6 4; do run MR_AHA_CUDA_COIL_GROUP=$g; done
 elif [[ $PART == bench ]]; then
-    "$ENV_PY" -u benchmarks/bench_mgpu.py --cases stack 3d 2d \
-        --gpus $(seq -s ' ' 2 "$NGPU") --split off auto --reps 10 \
+    "$ENV_PY" -u benchmarks/bench_mgpu.py --cases ${CASES:-stack 3d 2d} \
+        --gpus ${GPUS:-$(seq -s ' ' 2 "$NGPU")} --split off auto --reps 10 \
         || echo "bench_mgpu FAILED"
+elif [[ $PART == toep_test ]]; then
+    CUDA_VISIBLE_DEVICES=0 "$ENV_PY" -u tests/check_reference.py || echo "check_reference FAILED"
+    "$ENV_PY" -u tests/check_toep_mgpu.py --devices $ALL ${QUICK:+--quick} \
+        || echo "check_toep_mgpu FAILED"
 elif [[ $PART == split ]]; then
     # Remainder split: coil counts that do not divide the GPU count.
     for c in ${COILS:-8 7}; do

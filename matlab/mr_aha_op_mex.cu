@@ -7,8 +7,10 @@
  * `mr_aha_op` handle class and is driven by a command string:
  * @code
  *   h    = mr_aha_op_mex('create',  SEs, phi2_toep, config, mask, devices, share)
+ *   h    = mr_aha_op_mex('create_gram', SEs, phi2, traj, config, mask, devices, share)
  *   AhAx = mr_aha_op_mex('apply',   h, x)
  *   info = mr_aha_op_mex('info',    h)
+ *   Om   = mr_aha_op_mex('kernel',  h)
  *          mr_aha_op_mex('destroy', h)
  *   n    = mr_aha_op_mex('count')
  * @endcode
@@ -23,6 +25,14 @@
  *   every visible device; the primary device always takes part. `share` is a
  *   logical scalar selecting ::MR_MGPU_SHARE_PRIMARY. Returns the plan handle
  *   as a `uint64` scalar.
+ * - `create_gram`: the same plan built from the Gram blocks `phi2` and the
+ *   trajectory `traj` (as for `calc_toep_mex`) with
+ *   ::mr_mgpu_plan_create_gram: every GPU computes a share of `phi2_toep`
+ *   and the shares are exchanged between the GPUs. The GPUs are driven by
+ *   library threads that never call the MATLAB API. With `share` only `SEs`
+ *   and `mask` are used in place; the kernel belongs to the plan.
+ * - `kernel`: a copy of the plan's kernel on the primary device as a new
+ *   gpuArray, shaped like `calc_toep`'s output.
  * - `apply`: `x` is a complex single gpuArray of ::mr_x_size elements;
  *   returns a new gpuArray of the same shape.
  * - `info`: returns a struct with the work distribution (CUDA ordinals,
@@ -110,8 +120,9 @@ struct mr_op_entry {
                                      primary device; becomes invalid when
                                      MATLAB resets or deselects that device.   */
     const mxGPUArray *keep[3];  /**< With @ref shared: references to `SEs`,
-                                     `phi2_toep` and `mask` (or NULL) that keep
-                                     their storage alive until destroy.        */
+                                     `phi2_toep` (NULL for `create_gram`) and
+                                     `mask` (or NULL) that keep their storage
+                                     alive until destroy.                      */
 };
 
 /** @brief All live plans of this MEX file. */
@@ -251,65 +262,75 @@ static void mr_op_infer_n_coils(const mxGPUArray *SEs, mr_config *cfg,
 
 /**
  * @brief `h = mr_aha_op_mex('create', SEs, phi2_toep, config, mask, devices,
- *        share)`.
+ *        share)` and `h = mr_aha_op_mex('create_gram', SEs, phi2, traj,
+ *        config, mask, devices, share)`.
  *
- * Validates the inputs exactly like `AhA_Toeplitz_mex`, creates the plan on
- * the current (primary) device, registers it, locks the MEX file and returns
- * the handle.
+ * Validates the inputs exactly like `AhA_Toeplitz_mex` (and, for
+ * `create_gram`, like `calc_toep_mex`), creates the plan on the current
+ * (primary) device, registers it, locks the MEX file and returns the handle.
+ *
+ * @param[in] gram Non-zero for `create_gram`: the arguments after `SEs` are
+ *                 `phi2, traj` instead of `phi2_toep`, shifting the rest by
+ *                 one.
  */
 static void mr_op_create(int nlhs, mxArray *plhs[], int nrhs,
-                         const mxArray *prhs[])
+                         const mxArray *prhs[], int gram)
 {
-    if (nrhs != 7)
+    const int o = gram ? 1 : 0; /* offset of config, mask, devices, share */
+    if (nrhs != 7 + o)
         mexErrMsgIdAndTxt(MR_ID ":usage",
-                          "Usage: h = mr_aha_op_mex('create', SEs, phi2_toep, "
-                          "config, mask, devices, share_primary).");
+                          gram ? "Usage: h = mr_aha_op_mex('create_gram', SEs, "
+                                 "phi2, traj, config, mask, devices, "
+                                 "share_primary)."
+                               : "Usage: h = mr_aha_op_mex('create', SEs, "
+                                 "phi2_toep, config, mask, devices, "
+                                 "share_primary).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID ":usage", "Too many outputs.");
+    const mxArray *mx_cfg = prhs[3 + o], *mx_mask = prhs[4 + o];
+    const mxArray *mx_dev = prhs[5 + o], *mx_share = prhs[6 + o];
 
     /* ---- Configuration ------------------------------------------------- */
     mr_config cfg;
-    mr_mex_parse_config(prhs[3], &cfg, MR_ID);
-    const int user_coils = (mr_mex_field(prhs[3], "n_coils") != NULL);
+    mr_mex_parse_config(mx_cfg, &cfg, MR_ID);
+    const int user_coils = (mr_mex_field(mx_cfg, "n_coils") != NULL);
     /* The plan always runs on MATLAB's device: gpuArrays live there. */
     cfg.gpu_device_id = -1;
 
     /* ---- Devices (CUDA ordinals) and flags ------------------------------ */
-    const mxArray *mx_dev = prhs[5];
-    std::vector<int> devices;
-    if (!mxIsEmpty(mx_dev)) {
-        if (!mxIsInt32(mx_dev) || mxIsComplex(mx_dev))
-            mexErrMsgIdAndTxt(MR_ID ":devices",
-                              "devices must be an int32 vector of CUDA "
-                              "ordinals (mr_aha_op.m converts gpuDevice "
-                              "indices).");
-        const mwSize n = mxGetNumberOfElements(mx_dev);
-        if (n > MR_MGPU_MAX_DEVICES)
-            mexErrMsgIdAndTxt(MR_ID ":devices",
-                              "at most %d devices are supported.",
-                              MR_MGPU_MAX_DEVICES);
-        const int32_t *d = mxGetInt32s(mx_dev);
-        devices.assign(d, d + n);
-    }
-    if (mxGetNumberOfElements(prhs[6]) != 1 ||
-        !(mxIsLogical(prhs[6]) || mxIsNumeric(prhs[6])))
+    int dev_buf[MR_MGPU_MAX_DEVICES];
+    const int n_dev = mr_mex_devices(mx_dev, dev_buf, MR_ID ":devices");
+    std::vector<int> devices(dev_buf, dev_buf + n_dev);
+    if (mxGetNumberOfElements(mx_share) != 1 ||
+        !(mxIsLogical(mx_share) || mxIsNumeric(mx_share)))
         mexErrMsgIdAndTxt(MR_ID ":share", "share_primary must be a scalar.");
-    const int share = mxGetScalar(prhs[6]) != 0.0;
+    const int share = mxGetScalar(mx_share) != 0.0;
 
     /* ---- Arrays --------------------------------------------------------- */
     const mxGPUArray *g_SEs  = mxGPUCreateFromMxArray(prhs[1]);
-    const mxGPUArray *g_toep = mxGPUCreateFromMxArray(prhs[2]);
+    const mxGPUArray *g_toep = NULL;       /* create      */
+    const mxGPUArray *g_phi2 = NULL;       /* create_gram */
+    const mxGPUArray *g_traj = NULL;       /* create_gram */
     const mxGPUArray *g_mask = NULL;
+    int64_t Ntrajs = 0, Nkx = 0;
 
     mr_mex_check_complex_single(g_SEs,  "SEs",       MR_ID);
-    mr_mex_check_complex_single(g_toep, "phi2_toep", MR_ID);
+    if (gram) {
+        g_phi2 = mxGPUCreateFromMxArray(prhs[2]);
+        g_traj = mxGPUCreateFromMxArray(prhs[3]);
+        mr_mex_check_complex_single(g_phi2, "phi2", MR_ID);
+        mr_mex_check_traj(g_traj, &cfg, &Ntrajs, &Nkx, MR_ID ":traj");
+    } else {
+        g_toep = mxGPUCreateFromMxArray(prhs[2]);
+        mr_mex_check_complex_single(g_toep, "phi2_toep", MR_ID);
+    }
     mr_op_infer_n_coils(g_SEs, &cfg, user_coils);
 
     if (cfg.is_masked) {
-        if (mxIsEmpty(prhs[4]))
+        if (mxIsEmpty(mx_mask))
             mexErrMsgIdAndTxt(MR_ID ":missingMask",
                               "config.is_masked is true, so a mask must be "
                               "supplied.");
-        g_mask = mxGPUCreateFromMxArray(prhs[4]);
+        g_mask = mxGPUCreateFromMxArray(mx_mask);
         if (mxGPUGetClassID(g_mask) != mxINT64_CLASS)
             mexErrMsgIdAndTxt(MR_ID ":mask",
                               "mask must be an int64 gpuArray of 0-based linear "
@@ -322,7 +343,7 @@ static void mr_op_create(int nlhs, mxArray *plhs[], int nrhs,
                               "%lld.",
                               (long long)mxGPUGetNumberOfElements(g_mask),
                               (long long)cfg.num_masked);
-    } else if (!mxIsEmpty(prhs[4])) {
+    } else if (!mxIsEmpty(mx_mask)) {
         mexWarnMsgIdAndTxt(MR_ID ":unusedMask",
                            "A mask was supplied but config.is_masked is false; "
                            "the mask is ignored.");
@@ -331,7 +352,12 @@ static void mr_op_create(int nlhs, mxArray *plhs[], int nrhs,
     int rc = mr_config_validate(&cfg);
     if (rc != MR_SUCCESS) mr_mex_fail(MR_ID, rc);
     mr_mex_check_numel(g_SEs,  mr_se_size(&cfg),        "SEs",       MR_ID);
-    mr_mex_check_numel(g_toep, mr_phi2_toep_size(&cfg), "phi2_toep", MR_ID);
+    if (gram) {
+        const int64_t nkz = (cfg.traj_type == MR_TRAJ_STACK) ? cfg.phi2_dim[2] : 1;
+        mr_mex_check_numel(g_phi2, Ntrajs * nkz * cfg.L * cfg.L, "phi2", MR_ID);
+    } else {
+        mr_mex_check_numel(g_toep, mr_phi2_toep_size(&cfg), "phi2_toep", MR_ID);
+    }
 
     int primary = -1;
     if (cudaGetDevice(&primary) != cudaSuccess)
@@ -340,15 +366,28 @@ static void mr_op_create(int nlhs, mxArray *plhs[], int nrhs,
 
     /* ---- Plan ----------------------------------------------------------- */
     mr_mgpu_plan plan = NULL;
-    rc = mr_mgpu_plan_create(
-        &cfg, devices.empty() ? NULL : devices.data(), (int)devices.size(),
-        (const mr_complex *)mxGPUGetDataReadOnly(g_SEs),
-        (const mr_complex *)mxGPUGetDataReadOnly(g_toep),
-        g_mask ? (const int64_t *)mxGPUGetDataReadOnly(g_mask) : NULL,
-        share ? MR_MGPU_SHARE_PRIMARY : 0, &plan);
+    const int *dev_p = devices.empty() ? NULL : devices.data();
+    const int64_t *mask_p =
+        g_mask ? (const int64_t *)mxGPUGetDataReadOnly(g_mask) : NULL;
+    if (gram)
+        rc = mr_mgpu_plan_create_gram(
+            &cfg, dev_p, (int)devices.size(),
+            (const mr_complex *)mxGPUGetDataReadOnly(g_SEs),
+            (const mr_complex *)mxGPUGetDataReadOnly(g_phi2),
+            (const float *)mxGPUGetDataReadOnly(g_traj), Ntrajs, Nkx, mask_p,
+            share ? MR_MGPU_SHARE_PRIMARY : 0, &plan);
+    else
+        rc = mr_mgpu_plan_create(
+            &cfg, dev_p, (int)devices.size(),
+            (const mr_complex *)mxGPUGetDataReadOnly(g_SEs),
+            (const mr_complex *)mxGPUGetDataReadOnly(g_toep), mask_p,
+            share ? MR_MGPU_SHARE_PRIMARY : 0, &plan);
+    /* The Gram blocks and the trajectory are only needed during creation. */
+    if (g_phi2) mxGPUDestroyGPUArray(g_phi2);
+    if (g_traj) mxGPUDestroyGPUArray(g_traj);
     if (rc != MR_SUCCESS) {
         mxGPUDestroyGPUArray(g_SEs);
-        mxGPUDestroyGPUArray(g_toep);
+        if (g_toep) mxGPUDestroyGPUArray(g_toep);
         if (g_mask) mxGPUDestroyGPUArray(g_mask);
         mr_mex_fail(MR_ID, rc);
     }
@@ -378,7 +417,7 @@ static void mr_op_create(int nlhs, mxArray *plhs[], int nrhs,
     } else {
         /* The plan holds its own copies; the references can go. */
         mxGPUDestroyGPUArray(g_SEs);
-        mxGPUDestroyGPUArray(g_toep);
+        if (g_toep) mxGPUDestroyGPUArray(g_toep);
         if (g_mask) mxGPUDestroyGPUArray(g_mask);
     }
 
@@ -474,7 +513,10 @@ static void mr_op_info(int nlhs, mxArray *plhs[], int nrhs,
     static const char *names[] = {
         "n_devices", "devices", "coil_begin", "coil_count", "group",
         "n_split_coils", "peer_access", "peer_bandwidth_gbs", "primary",
-        "n_coils", "share_primary", "valid"};
+        "n_coils", "share_primary", "valid", "toep_source", "toep_devices",
+        "toep_ms", "toep_component_ms", "toep_gather_gbs"};
+    static const char *sources[] = {"supplied", "broadcast", "split",
+                                    "replicate"};
     mxArray *s = mxCreateStructMatrix(1, 1, sizeof(names) / sizeof(names[0]),
                                       names);
     const int n = in.n_devices;
@@ -500,7 +542,58 @@ static void mr_op_info(int nlhs, mxArray *plhs[], int nrhs,
     mxSetField(s, 0, "n_coils", mxCreateDoubleScalar((double)e->cfg.n_coils));
     mxSetField(s, 0, "share_primary", mxCreateLogicalScalar(e->shared != 0));
     mxSetField(s, 0, "valid", mxCreateLogicalScalar(mr_op_device_valid(e)));
+    mxSetField(s, 0, "toep_source",
+               mxCreateString((in.toep_source >= 0 && in.toep_source <= 3)
+                                  ? sources[in.toep_source]
+                                  : "unknown"));
+    mxSetField(s, 0, "toep_devices", mxCreateDoubleScalar((double)in.toep_devices));
+    mxSetField(s, 0, "toep_ms", mxCreateDoubleScalar(in.toep_ms));
+    mxSetField(s, 0, "toep_component_ms",
+               mxCreateDoubleScalar(in.toep_component_ms));
+    mxSetField(s, 0, "toep_gather_gbs", mxCreateDoubleScalar(in.toep_gather_gbs));
     plhs[0] = s;
+}
+
+/**
+ * @brief `Om = mr_aha_op_mex('kernel', h)`: a copy of the plan's
+ *        `phi2_toep` on the primary device, shaped like `calc_toep`'s output.
+ *
+ * A copy (not a view): MATLAB cannot wrap memory it does not own in a
+ * gpuArray. Refuses to run when the primary device was reset or deselected.
+ */
+static void mr_op_kernel(int nlhs, mxArray *plhs[], int nrhs,
+                         const mxArray *prhs[])
+{
+    if (nrhs != 2)
+        mexErrMsgIdAndTxt(MR_ID ":usage", "Usage: Om = mr_aha_op_mex('kernel', h).");
+    if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID ":usage", "Too many outputs.");
+    mr_op_entry *e = mr_op_lookup(prhs[1], "kernel");
+    int cur = -1;
+    if (cudaGetDevice(&cur) != cudaSuccess || cur != e->primary ||
+        !mr_op_device_valid(e))
+        mexErrMsgIdAndTxt(MR_ID ":deviceReset",
+                          "kernel: gpuDevice(%d), the operator's primary GPU, is "
+                          "not selected or has been reset since the operator "
+                          "was created.",
+                          e->primary + 1);
+    const mr_complex *src = NULL;
+    const int rc = mr_mgpu_plan_kernel(e->plan, 0, &src);
+    if (rc != MR_SUCCESS) mr_mex_fail(MR_ID, rc);
+    mwSize dims[4];
+    const mwSize nd = mr_mex_toep_dims(&e->cfg, dims);
+    mxGPUArray *g = mxGPUCreateGPUArray(nd, dims, mxSINGLE_CLASS, mxCOMPLEX,
+                                        MX_GPU_DO_NOT_INITIALIZE);
+    const size_t bytes = (size_t)mr_phi2_toep_size(&e->cfg) * sizeof(mr_complex);
+    /* Legacy default stream: ordered after MATLAB's work and the plan's. */
+    const cudaError_t ce = cudaMemcpy(mxGPUGetData(g), src, bytes,
+                                      cudaMemcpyDeviceToDevice);
+    if (ce != cudaSuccess) {
+        mxGPUDestroyGPUArray(g);
+        mexErrMsgIdAndTxt(MR_ID ":cuda", "kernel: copy failed: %s",
+                          cudaGetErrorString(ce));
+    }
+    plhs[0] = mxGPUCreateMxArrayOnGPU(g);
+    mxGPUDestroyGPUArray(g);
 }
 
 /**
@@ -535,7 +628,8 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     if (nrhs < 1 || !mxIsChar(prhs[0]))
         mexErrMsgIdAndTxt(MR_ID ":usage",
                           "The first argument must be a command: 'create', "
-                          "'apply', 'info', 'destroy' or 'count'.");
+                          "'create_gram', 'apply', 'info', 'kernel', "
+                          "'destroy' or 'count'.");
     char cmd[16];
     if (mxGetString(prhs[0], cmd, sizeof(cmd)) != 0)
         mexErrMsgIdAndTxt(MR_ID ":usage", "Unknown command.");
@@ -548,12 +642,16 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     /* mxInitGPU must run before any other MathWorks GPU API call. */
     mxInitGPU();
 
-    if (strcmp(cmd, "create") == 0)       mr_op_create(nlhs, plhs, nrhs, prhs);
+    if (strcmp(cmd, "create") == 0)       mr_op_create(nlhs, plhs, nrhs, prhs, 0);
+    else if (strcmp(cmd, "create_gram") == 0)
+        mr_op_create(nlhs, plhs, nrhs, prhs, 1);
+    else if (strcmp(cmd, "kernel") == 0)  mr_op_kernel(nlhs, plhs, nrhs, prhs);
     else if (strcmp(cmd, "apply") == 0)   mr_op_apply(nlhs, plhs, nrhs, prhs);
     else if (strcmp(cmd, "info") == 0)    mr_op_info(nlhs, plhs, nrhs, prhs);
     else if (strcmp(cmd, "destroy") == 0) mr_op_destroy(nlhs, plhs, nrhs, prhs);
     else
         mexErrMsgIdAndTxt(MR_ID ":usage",
-                          "Unknown command '%s': expected 'create', 'apply', "
-                          "'info', 'destroy' or 'count'.", cmd);
+                          "Unknown command '%s': expected 'create', "
+                          "'create_gram', 'apply', 'info', 'kernel', "
+                          "'destroy' or 'count'.", cmd);
 }

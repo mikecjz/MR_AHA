@@ -51,4 +51,91 @@ static void mr_mex_check_numel(const mxGPUArray *a, int64_t expected,
                           name, (long long)n, (long long)expected);
 }
 
+/**
+ * @brief Verify the trajectory of ::mr_calc_toep and read its sizes.
+ *
+ * `traj` must be a real single gpuArray `[Ntrajs, Nkx, ndim]` with `ndim` = 3
+ * for ::MR_TRAJ_3D and 2 otherwise.
+ *
+ * @param[in]  g_traj The trajectory.
+ * @param[in]  cfg    Parsed configuration (selects `ndim`).
+ * @param[out] Ntrajs Number of trajectories.
+ * @param[out] Nkx    Samples per trajectory.
+ * @param[in]  id     Error identifier.
+ */
+static void mr_mex_check_traj(const mxGPUArray *g_traj, const mr_config *cfg,
+                              int64_t *Ntrajs, int64_t *Nkx, const char *id)
+{
+    if (mxGPUGetClassID(g_traj) != mxSINGLE_CLASS ||
+        mxGPUGetComplexity(g_traj) != mxREAL)
+        mexErrMsgIdAndTxt(id, "traj must be a real single-precision gpuArray.");
+    const int     ndim_traj = (cfg->traj_type == MR_TRAJ_3D) ? 3 : 2;
+    const mwSize  nd        = mxGPUGetNumberOfDimensions(g_traj);
+    const mwSize *dt        = mxGPUGetDimensions(g_traj);
+    if ((int)nd != 3) {
+        mxFree((void *)dt);
+        mexErrMsgIdAndTxt(id, "traj must be a 3-D array [Ntrajs, Nkx, %d].",
+                          ndim_traj);
+    }
+    *Ntrajs = (int64_t)dt[0];
+    *Nkx    = (int64_t)dt[1];
+    const int ndim_in = (int)dt[2];
+    mxFree((void *)dt);
+    if (ndim_in != ndim_traj)
+        mexErrMsgIdAndTxt(id,
+                          "traj's third dimension is %d but %d coordinates are "
+                          "required for config.traj_type.",
+                          ndim_in, ndim_traj);
+}
+
+/**
+ * @brief Read a device list: an `int32` vector of **CUDA ordinals** (the `.m`
+ *        wrappers convert 1-based `gpuDevice` indices), or `[]`.
+ * @param[in]  mx  The MATLAB array.
+ * @param[out] out Receives up to ::MR_MGPU_MAX_DEVICES ordinals.
+ * @param[in]  id  Error identifier.
+ * @return Number of ordinals (0 for `[]`).
+ */
+static int mr_mex_devices(const mxArray *mx, int *out, const char *id)
+{
+    if (mxIsEmpty(mx)) return 0;
+    if (!mxIsInt32(mx) || mxIsComplex(mx))
+        mexErrMsgIdAndTxt(id, "devices must be an int32 vector of CUDA ordinals "
+                              "(the .m wrappers convert gpuDevice indices).");
+    const mwSize n = mxGetNumberOfElements(mx);
+    if (n > MR_MGPU_MAX_DEVICES)
+        mexErrMsgIdAndTxt(id, "at most %d devices are supported.",
+                          MR_MGPU_MAX_DEVICES);
+    const int32_t *d = mxGetInt32s(mx);
+    for (mwSize k = 0; k < n; ++k) out[k] = (int)d[k];
+    return (int)n;
+}
+
+/**
+ * @brief MATLAB shape of `phi2_toep` (see ::mr_calc_toep):
+ *        `[Mx, My, T]` (2D), `[Mx, My, Mz, T]` (3D / stack) or
+ *        `[num_masked, T]` (masked), `T = (L^2+L)/2`.
+ * @param[in]  cfg  Validated configuration.
+ * @param[out] dims Receives up to 4 extents.
+ * @return Number of dimensions.
+ */
+static mwSize mr_mex_toep_dims(const mr_config *cfg, mwSize dims[4])
+{
+    const int64_t ntri = mr_num_tri(cfg->L);
+    if (cfg->is_masked) {
+        dims[0] = (mwSize)cfg->num_masked;
+        dims[1] = (mwSize)ntri;
+        return 2;
+    }
+    dims[0] = (mwSize)cfg->phi2_dim[0];
+    dims[1] = (mwSize)cfg->phi2_dim[1];
+    if (cfg->n_spatial == 3) {
+        dims[2] = (mwSize)cfg->phi2_dim[2];
+        dims[3] = (mwSize)ntri;
+        return 4;
+    }
+    dims[2] = (mwSize)ntri;
+    return 3;
+}
+
 #endif /* MR_AHA_MR_MEX_UTIL_H */

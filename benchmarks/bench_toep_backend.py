@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import sys
 import time
@@ -111,7 +112,8 @@ def main() -> None:
         print(f"{name:5s} calc_toep first {ts[0]:7.2f} s  best {min(ts):7.2f} s",
               flush=True)
 
-    out_dir = ROOT / "benchmarks" / "results" / host
+    out_dir = Path(os.environ.get("MR_AHA_BENCH_RESULTS",
+                           ROOT / "benchmarks" / "results")) / host
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"toep_{backend}.json"
     out.write_text(json.dumps(dict(backend=backend, host=host, results=results),

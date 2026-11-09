@@ -178,6 +178,10 @@ MGPU_MAX_DEVICES = 16
 #: Mirror of ``MR_MGPU_SHARE_PRIMARY``.
 MGPU_SHARE_PRIMARY = 1
 
+#: Names of the ``mr_mgpu_info.toep_source`` values (``MR_MGPU_TOEP_*``): how
+#: a multi-GPU plan obtained ``phi2_toep``.
+MGPU_TOEP_SOURCES = {0: "supplied", 1: "broadcast", 2: "split", 3: "replicate"}
+
 
 class MRMgpuInfo(ctypes.Structure):
     """``ctypes`` mirror of the C ``mr_mgpu_info`` struct (CUDA backend).
@@ -195,6 +199,11 @@ class MRMgpuInfo(ctypes.Structure):
         ("n_split_coils", ctypes.c_int),
         ("peer_access", ctypes.c_int),
         ("peer_bandwidth_gbs", ctypes.c_double),
+        ("toep_source", ctypes.c_int),
+        ("toep_devices", ctypes.c_int),
+        ("toep_ms", ctypes.c_double),
+        ("toep_component_ms", ctypes.c_double),
+        ("toep_gather_gbs", ctypes.c_double),
     ]
 
 
@@ -335,6 +344,22 @@ if hasattr(lib, "mr_mgpu_plan_create"):  # CUDA backend only
     lib.mr_mgpu_plan_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(MRMgpuInfo)]
     lib.mr_mgpu_plan_destroy.restype = ctypes.c_int
     lib.mr_mgpu_plan_destroy.argtypes = [ctypes.c_void_p]
+
+if hasattr(lib, "mr_mgpu_plan_create_gram"):  # CUDA backend only
+    lib.mr_mgpu_plan_create_gram.restype = ctypes.c_int
+    lib.mr_mgpu_plan_create_gram.argtypes = [
+        _cfg_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int, _c_ptr, _c_ptr,
+        _c_ptr, ctypes.c_int64, ctypes.c_int64, _c_ptr, ctypes.c_int,
+        ctypes.POINTER(ctypes.c_void_p)]
+    lib.mr_mgpu_plan_kernel.restype = ctypes.c_int
+    lib.mr_mgpu_plan_kernel.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+
+if hasattr(lib, "mr_calc_toep_mgpu"):  # CUDA backend only
+    lib.mr_calc_toep_mgpu.restype = ctypes.c_int
+    lib.mr_calc_toep_mgpu.argtypes = [
+        _cfg_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int, _c_ptr, _c_ptr,
+        ctypes.c_int64, ctypes.c_int64, _c_ptr, _c_ptr]
 
 lib.mr_calc_toep.restype = ctypes.c_int
 lib.mr_calc_toep.argtypes = [

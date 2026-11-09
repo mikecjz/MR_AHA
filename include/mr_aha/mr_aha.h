@@ -588,7 +588,37 @@ typedef struct mr_mgpu_info {
     /** Slowest measured primary <-> device copy bandwidth in GB/s, or 0 when
      *  it was not measured. */
     double peer_bandwidth_gbs;
+    /** How the plan obtained `phi2_toep`, one of ::MR_MGPU_TOEP_SUPPLIED,
+     *  ::MR_MGPU_TOEP_BROADCAST, ::MR_MGPU_TOEP_SPLIT and
+     *  ::MR_MGPU_TOEP_REPLICATE. */
+    int toep_source;
+    /** Devices that computed components of `phi2_toep` (0 when supplied). */
+    int toep_devices;
+    /** Wall time of computing `phi2_toep` and, for ::MR_MGPU_TOEP_SPLIT and
+     *  ::MR_MGPU_TOEP_REPLICATE, distributing it, in ms (0 when supplied). */
+    double toep_ms;
+    /** GPU time per triangular component measured by the pilot chunks, in ms
+     *  (0 when not measured). */
+    double toep_component_ms;
+    /** Concurrent receive bandwidth per device measured for the cost model of
+     *  the kernel exchange, in GB/s (0 when not measured). */
+    double toep_gather_gbs;
 } mr_mgpu_info;
+
+/** @brief ::mr_mgpu_info::toep_source: the caller supplied `phi2_toep`
+ *         (::mr_mgpu_plan_create). */
+#define MR_MGPU_TOEP_SUPPLIED  0
+/** @brief ::mr_mgpu_info::toep_source: the primary device computed
+ *         `phi2_toep` alone and copied it to the other devices
+ *         (`MR_AHA_TOEP_SPLIT=off`). */
+#define MR_MGPU_TOEP_BROADCAST 1
+/** @brief ::mr_mgpu_info::toep_source: every device computed a share of the
+ *         components and the shares were exchanged (all-gather); the copies
+ *         on all devices are bit-identical. */
+#define MR_MGPU_TOEP_SPLIT     2
+/** @brief ::mr_mgpu_info::toep_source: every device computed (nearly) the
+ *         whole kernel itself, without transfers. */
+#define MR_MGPU_TOEP_REPLICATE 3
 
 /**
  * @brief Create a multi-GPU @f$A^H A@f$ plan on several GPUs of one node.
@@ -646,6 +676,92 @@ MR_EXPORT int mr_mgpu_plan_create(const mr_config  *cfg,
                                   const int64_t    *d_mask,
                                   int               flags,
                                   mr_mgpu_plan     *plan_out);
+
+/**
+ * @brief Create a multi-GPU @f$A^H A@f$ plan from the Gram blocks, computing
+ *        `phi2_toep` on all devices at once.
+ *
+ * Same plan as ::mr_mgpu_plan_create, but instead of copying a kernel the
+ * caller computed on one device with ::mr_calc_toep (time
+ * @f$T_\mathrm{calc}@f$) to every other device (@f$(G-1)K@f$ bytes through
+ * the primary device's link, @f$K@f$ the kernel size), the plan
+ *  1. allocates a copy of the kernel on every device that will apply it,
+ *  2. gives every device (also the ones the plan will not use for coils) a
+ *     contiguous share of the @f$(L^2+L)/2@f$ independent triangular
+ *     components and computes it directly into its own copy, about
+ *     @f$T_\mathrm{calc}/G@f$,
+ *  3. exchanges the shares between the devices (all-gather), each device
+ *     receiving @f$(G-1)/G \cdot K@f$, overlapped chunk by chunk with the
+ *     computation.
+ * Every component is computed exactly once, so all copies are bit-identical.
+ * When the devices cannot exchange data quickly enough (no peer access,
+ * shared PCIe), every device computes the whole kernel itself instead
+ * (@f$T_\mathrm{calc}@f$, no transfer). The choice is made by a cost model
+ * fed with the GPU time of a timed first chunk on every device (useful work in
+ * either case) and a concurrent bandwidth probe: roughly, the exchange wins
+ * when a device receives a component faster than it computes one.
+ * `MR_AHA_TOEP_SPLIT=off|split|replicate|auto` (default `auto`) overrides it;
+ * `off` reproduces ::mr_calc_toep on the primary device followed by
+ * ::mr_mgpu_plan_create. ::mr_mgpu_plan_info reports what was done.
+ *
+ * Memory: every device using the plan holds a copy of the kernel (as with
+ * ::mr_mgpu_plan_create) plus, while computing, the transient buffers of
+ * ::mr_calc_toep, sized within ::mr_config::mem_fraction of the memory left
+ * after the copy. The primary device's copy belongs to the plan (see
+ * ::mr_mgpu_plan_kernel); ::MR_MGPU_SHARE_PRIMARY then only shares @p d_SEs
+ * and @p d_mask.
+ *
+ * Inputs on the primary device, which is ::mr_config::gpu_device_id or the
+ * current device when that is -1. On return the current device is the same
+ * as on entry.
+ *
+ * @param[in]  cfg       Validated configuration (as for ::mr_calc_toep and
+ *                       ::mr_aha_plan_create).
+ * @param[in]  devices   CUDA ordinals to use, or NULL for every visible
+ *                       device. Duplicates are ignored.
+ * @param[in]  n_devices Length of @p devices (0 with NULL), at most
+ *                       ::MR_MGPU_MAX_DEVICES.
+ * @param[in]  d_SEs     Sensitivity maps, see ::mr_aha_plan_execute.
+ * @param[in]  d_phi2    Gram blocks, see ::mr_calc_toep.
+ * @param[in]  d_traj    Trajectory, see ::mr_calc_toep.
+ * @param[in]  Ntrajs    Number of trajectories.
+ * @param[in]  Nkx       Samples per trajectory.
+ * @param[in]  d_mask    Mask (masked mode) or NULL.
+ * @param[in]  flags     0 or ::MR_MGPU_SHARE_PRIMARY.
+ * @param[out] plan_out  Receives the plan; NULL on failure.
+ * @return ::MR_SUCCESS or a negative ::mr_status. Errors on another device
+ *         name its ordinal in ::mr_last_error.
+ */
+MR_EXPORT int mr_mgpu_plan_create_gram(const mr_config  *cfg,
+                                       const int        *devices,
+                                       int               n_devices,
+                                       const mr_complex *d_SEs,
+                                       const mr_complex *d_phi2,
+                                       const float      *d_traj,
+                                       int64_t           Ntrajs,
+                                       int64_t           Nkx,
+                                       const int64_t    *d_mask,
+                                       int               flags,
+                                       mr_mgpu_plan     *plan_out);
+
+/**
+ * @brief The copy of `phi2_toep` a multi-GPU plan holds on one of its devices.
+ *
+ * For a plan from ::mr_mgpu_plan_create_gram this is how the caller reaches
+ * the kernel the plan computed (e.g. to save it, or to build a single-GPU plan
+ * on the primary device). The memory belongs to the plan: it is valid, and
+ * must not be modified, until ::mr_mgpu_plan_destroy.
+ *
+ * @param[in]  plan        Plan.
+ * @param[in]  k           Device index, `0 <= k < ` ::mr_mgpu_info::n_devices
+ *                         (0 is the primary device; the ordinal is
+ *                         ::mr_mgpu_info::devices[k]).
+ * @param[out] d_phi2_toep Receives the device pointer (::mr_phi2_toep_size
+ *                         elements on that device).
+ * @return ::MR_SUCCESS or ::MR_ERR_INVALID_ARG.
+ */
+MR_EXPORT int mr_mgpu_plan_kernel(mr_mgpu_plan plan, int k,
+                                  const mr_complex **d_phi2_toep);
 
 /**
  * @brief Apply @f$A^H A@f$ with a multi-GPU plan.
@@ -761,6 +877,61 @@ MR_EXPORT int mr_calc_toep(const mr_config  *cfg,
                            int64_t           Nkx,
                            const int64_t    *d_mask,
                            mr_complex       *d_phi2_toep);
+
+/**
+ * @brief ::mr_calc_toep on several GPUs of one node; the result on one GPU
+ *        (CUDA backend only).
+ *
+ * The @f$(L^2+L)/2@f$ triangular components of `phi2_toep` are independent
+ * (one type-1 NUFFT, inverse FFT and scaling each) and each fills a
+ * contiguous slab of the output. The components are split into contiguous,
+ * nearly equal ranges, one per device; the *primary* device computes the
+ * first range straight into @p d_phi2_toep, every other (*helper*) device
+ * computes its range into a buffer of that range only and copies each
+ * finished chunk into @p d_phi2_toep on the primary, overlapped with the
+ * next chunk. Set-up time drops from @f$T_\mathrm{calc}@f$ to about
+ * @f$T_\mathrm{calc}/G + (G-1)/G \cdot K / B@f$ (@f$K@f$ kernel bytes,
+ * @f$B@f$ receive bandwidth of the primary); measured on four PCIe L40S:
+ * 2.0 s to 1.4 s for 2D L = 72, 7.9 s to 3.5 s for a 160^3 kooshball with
+ * L = 12 (`docs/PERFORMANCE.md`, section 3.4).
+ *
+ * The result equals ::mr_calc_toep's up to cufinufft's run-to-run noise
+ * (~1e-7, atomic spreading). When the cost model (see
+ * ::mr_mgpu_plan_create_gram) predicts that the transfers would cost more than
+ * they save, the primary computes the remaining components alone.
+ * `MR_AHA_TOEP_SPLIT` overrides the choice (`split` forces the split; `off`
+ * and `replicate` use the primary only).
+ *
+ * Memory: the primary needs the whole output plus the transient buffers of
+ * ::mr_calc_toep; a helper only its range plus the transients. Every input
+ * and the output live on the primary device, which is
+ * ::mr_config::gpu_device_id or the current device when that is -1. The call
+ * is synchronous and restores the current device.
+ *
+ * @param[in]  cfg         Validated configuration, see ::mr_calc_toep.
+ * @param[in]  devices     CUDA ordinals to use, or NULL for every visible
+ *                         device. The primary always takes part; duplicates
+ *                         are ignored.
+ * @param[in]  n_devices   Length of @p devices (0 with NULL), at most
+ *                         ::MR_MGPU_MAX_DEVICES.
+ * @param[in]  d_phi2      Gram blocks, see ::mr_calc_toep.
+ * @param[in]  d_traj      Trajectory, see ::mr_calc_toep.
+ * @param[in]  Ntrajs      Number of trajectories.
+ * @param[in]  Nkx         Samples per trajectory.
+ * @param[in]  d_mask      Mask, or NULL when not masked.
+ * @param[out] d_phi2_toep Output, see ::mr_calc_toep.
+ * @return ::MR_SUCCESS or a negative ::mr_status. Errors on a helper name its
+ *         ordinal in ::mr_last_error.
+ */
+MR_EXPORT int mr_calc_toep_mgpu(const mr_config  *cfg,
+                                const int        *devices,
+                                int               n_devices,
+                                const mr_complex *d_phi2,
+                                const float      *d_traj,
+                                int64_t           Ntrajs,
+                                int64_t           Nkx,
+                                const int64_t    *d_mask,
+                                mr_complex       *d_phi2_toep);
 
 /**
  * @brief Finish `phi2_toep` from externally computed point-spread functions.

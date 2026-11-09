@@ -143,6 +143,7 @@ add_library(mr_aha STATIC
     src/cuda/mr_aha.cu
     src/cuda/mr_mgpu.cu
     src/cuda/mr_calc_toep.cu
+    src/cuda/mr_toep_mgpu.cu
     src/cuda/mr_calc_mask.cu
 )
 
@@ -161,8 +162,11 @@ target_compile_definitions(mr_aha PUBLIC MR_AHA_CUDA_COMPLEX)
 
 # CUDA::cuda_driver: the multi-GPU plan checks whether a device's primary
 # context still exists (cuDevicePrimaryCtxGetState) before releasing it.
+# Threads::Threads: the multi-GPU calc_toep drives each GPU from its own host
+# thread (std::thread, src/cuda/mr_toep_mgpu.cu).
+find_package(Threads REQUIRED)
 target_link_libraries(mr_aha
-    PUBLIC  CUDA::cudart CUDA::cufft CUDA::cuda_driver
+    PUBLIC  CUDA::cudart CUDA::cufft CUDA::cuda_driver Threads::Threads
     PRIVATE cufinufft
 )
 

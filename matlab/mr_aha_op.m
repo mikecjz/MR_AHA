@@ -3,6 +3,7 @@ classdef mr_aha_op < handle
 %
 %   op = MR_AHA_OP(SEs, phi2_toep, config)
 %   op = MR_AHA_OP(SEs, phi2_toep, config, 'Name', Value, ...)
+%   op = MR_AHA_OP.FROM_GRAM(SEs, phi2, traj, config, 'Name', Value, ...)
 %
 %   AhAx = op.apply(x);      % or  AhAx = op * x
 %   info = op.info();
@@ -17,6 +18,22 @@ classdef mr_aha_op < handle
 %   broadcasts x and gathers the partial results. Multi-GPU therefore makes
 %   the operator faster but does not raise the largest problem size: the
 %   whole kernel must fit on every GPU.
+%
+%   MR_AHA_OP.FROM_GRAM builds the same operator from the Gram blocks and the
+%   trajectory instead of a finished kernel, and is several times faster
+%   than CALC_TOEP followed by MR_AHA_OP: every GPU computes a share of the
+%   (L^2+L)/2 independent triangular components of phi2_toep directly into
+%   its own copy, and the GPUs then exchange their shares (overlapped with
+%   the computation), instead of one GPU computing the whole kernel and
+%   copying it to every other GPU. Every component is computed once, so the
+%   copies on all GPUs are identical. When the GPUs cannot exchange data
+%   quickly (no peer access), each computes the whole kernel itself; a cost
+%   model measured at creation decides, and the environment variable
+%   MR_AHA_TOEP_SPLIT ('auto' default, 'split', 'replicate', 'off'; SETENV
+%   before creating) overrides it. INFO reports the choice (toep_source).
+%   Arguments: SEs, config, 'devices', 'mask' and 'share_primary' as below;
+%   phi2 and traj as for CALC_TOEP. With config.is_masked and no 'mask', the
+%   mask is derived from traj with CALC_MASK, as CALC_TOEP does.
 %
 %   The PRIMARY GPU is MATLAB's current gpuDevice when the operator is
 %   created. It holds the inputs and outputs (gpuArrays) and always takes
@@ -64,6 +81,10 @@ classdef mr_aha_op < handle
 %                          [Nx, Ny, Nz, L] ('3D', 'stack') on the primary GPU
 %                          (host arrays are moved there); AhAx is a gpuArray
 %                          of the same shape. op * x is the same.
+%     Om = kernel(op)      A copy of the operator's phi2_toep on the
+%                          primary GPU (complex single gpuArray, shaped like
+%                          CALC_TOEP's output), e.g. to save the kernel built
+%                          by FROM_GRAM. Costs one more kernel's memory.
 %     info = info(op)      Struct describing how the work is distributed:
 %                            n_devices           GPUs actually used
 %                            devices             their gpuDevice indices
@@ -86,6 +107,20 @@ classdef mr_aha_op < handle
 %                            share_primary       see above
 %                            valid               false once the primary GPU
 %                                                was reset or deselected
+%                            toep_source         how phi2_toep was obtained:
+%                                                'supplied' (constructor),
+%                                                'split' (shares computed on
+%                                                all GPUs and exchanged),
+%                                                'replicate' (every GPU
+%                                                computed it), 'broadcast'
+%                                                (the primary computed it and
+%                                                copied it)
+%                            toep_devices        GPUs that computed it
+%                            toep_ms             time of computing and
+%                                                distributing it (ms)
+%                            toep_component_ms   GPU time per component (ms)
+%                            toep_gather_gbs     measured concurrent receive
+%                                                bandwidth (GB/s)
 %     delete(op)           Release all GPU memory of the operator on every
 %                          GPU. Also happens automatically when the last
 %                          reference to op is cleared.
@@ -119,6 +154,9 @@ classdef mr_aha_op < handle
 %     disp(op.info())
 %     delete(op)
 %
+%     % Faster set-up: compute the kernel on all GPUs at once.
+%     op = mr_aha_op.from_gram(SEs, phi2, traj, config, 'devices', 1:4);
+%
 %   See also AHA_TOEPLITZ, CALC_TOEP, MR_DEFAULT_CONFIG, GPUDEVICE.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
@@ -137,6 +175,9 @@ classdef mr_aha_op < handle
     methods
         function op = mr_aha_op(SEs, phi2_toep, config, varargin)
             %MR_AHA_OP  Construct the operator; see the class help.
+            if nargin == 0
+                return      % empty object, filled in by FROM_GRAM
+            end
             narginchk(3, inf);
             if strcmp(mr_backend(), 'metal')
                 error('MR_AHA:mr_aha_op:backend', ...
@@ -154,41 +195,8 @@ classdef mr_aha_op < handle
             SEs       = mr_op_complex_single(SEs,       'SEs');
             phi2_toep = mr_op_complex_single(phi2_toep, 'phi2_toep');
             config    = mr_op_fill_n_coils(config, SEs);
-
-            % 1-based gpuDevice indices -> 0-based CUDA ordinals.
-            devices = opt.devices;
-            if isempty(devices)
-                devices = int32([]);             % every visible GPU
-            else
-                devices = double(devices(:)).';
-                n_gpu = gpuDeviceCount();
-                if any(devices ~= round(devices)) || any(devices < 1) || ...
-                        any(devices > n_gpu)
-                    error('MR_AHA:mr_aha_op:devices', ...
-                          ['devices must be gpuDevice indices between 1 ' ...
-                           'and %d.'], n_gpu);
-                end
-                devices = int32(devices - 1);
-            end
-
-            % Mask: identical handling to AhA_Toeplitz.m.
-            mask = opt.mask;
-            if isempty(mask)
-                if isfield(config, 'is_masked') && config.is_masked
-                    error('MR_AHA:mr_aha_op:missingMask', ...
-                          'config.is_masked is true, so a mask must be supplied.');
-                end
-                mask = [];
-            else
-                % The library indexes from 0; MATLAB indexes from 1. The
-                % subtraction is done in double (exact for any grid below
-                % 2^53 points) because gpuArray does not support 64-bit
-                % integer arithmetic in every MATLAB release (R2022b:
-                % "Input arguments of type 'int64' are not supported for
-                % 'minus'").
-                mask = int64(double(gpuArray(mask(:))) - 1);
-                config.num_masked = numel(mask);
-            end
+            devices   = mr_op_ordinals(opt.devices);
+            [mask, config] = mr_op_mask(opt.mask, config);
 
             op.Handle = mr_aha_op_mex('create', SEs, phi2_toep, config, ...
                                       mask, devices, ...
@@ -223,7 +231,16 @@ classdef mr_aha_op < handle
             s = orderfields(s, {'n_devices', 'devices', 'cuda_devices', ...
                 'primary', 'coil_begin', 'coil_count', 'group', ...
                 'n_split_coils', 'peer_access', 'peer_bandwidth_gbs', ...
-                'n_coils', 'share_primary', 'valid'});
+                'n_coils', 'share_primary', 'valid', 'toep_source', ...
+                'toep_devices', 'toep_ms', 'toep_component_ms', ...
+                'toep_gather_gbs'});
+        end
+
+        function Om = kernel(op)
+            %KERNEL  Copy of the operator's phi2_toep on the primary GPU;
+            %   see the class help.
+            op.check_alive();
+            Om = mr_aha_op_mex('kernel', op.Handle);
         end
 
         function tf = is_alive(op)
@@ -247,6 +264,51 @@ classdef mr_aha_op < handle
         end
     end
 
+    methods (Static)
+        function op = from_gram(SEs, phi2, traj, config, varargin)
+            %FROM_GRAM  Build the operator from the Gram blocks, computing
+            %   phi2_toep on all GPUs at once; see the class help.
+            %
+            %   op = mr_aha_op.from_gram(SEs, phi2, traj, config)
+            %   op = mr_aha_op.from_gram(..., 'devices', 1:4, 'mask', mask, ...
+            %                            'share_primary', false)
+            narginchk(4, inf);
+            if strcmp(mr_backend(), 'metal')
+                error('MR_AHA:mr_aha_op:backend', ...
+                      'mr_aha_op requires the CUDA backend.');
+            end
+            p = inputParser();
+            p.FunctionName = 'mr_aha_op.from_gram';
+            p.addParameter('devices', []);
+            p.addParameter('mask', []);
+            p.addParameter('share_primary', false);
+            p.parse(varargin{:});
+            opt = p.Results;
+
+            % Same conversions as calc_toep.m and AhA_Toeplitz.m.
+            SEs    = mr_op_complex_single(SEs,  'SEs');
+            phi2   = mr_op_complex_single(phi2, 'phi2');
+            if ~isa(traj, 'gpuArray'), traj = gpuArray(traj); end
+            if ~strcmp(underlyingType(traj), 'single'), traj = single(traj); end
+            if ~isreal(traj)
+                error('MR_AHA:mr_aha_op:complexTraj', 'traj must be real-valued.');
+            end
+            config  = mr_op_fill_n_coils(config, SEs);
+            devices = mr_op_ordinals(opt.devices);
+            mask = opt.mask;
+            if isempty(mask) && isfield(config, 'is_masked') && config.is_masked
+                mask = calc_mask(traj, config);   % as calc_toep.m does
+            end
+            [mask, config] = mr_op_mask(mask, config);
+
+            op = mr_aha_op();
+            op.Handle = mr_aha_op_mex('create_gram', SEs, phi2, traj, ...
+                                      config, mask, devices, ...
+                                      logical(opt.share_primary));
+            op.Config = config;
+        end
+    end
+
     methods (Access = private)
         function check_alive(op)
             %CHECK_ALIVE  Error if the operator was deleted or not created
@@ -257,6 +319,42 @@ classdef mr_aha_op < handle
             end
         end
     end
+end
+
+function devices = mr_op_ordinals(devices)
+%MR_OP_ORDINALS  1-based gpuDevice indices -> int32 CUDA ordinals; [] (every
+%   visible GPU) stays [].
+    if isempty(devices)
+        devices = int32([]);
+        return
+    end
+    devices = double(devices(:)).';
+    n_gpu = gpuDeviceCount();
+    if any(devices ~= round(devices)) || any(devices < 1) || any(devices > n_gpu)
+        error('MR_AHA:mr_aha_op:devices', ...
+              'devices must be gpuDevice indices between 1 and %d.', n_gpu);
+    end
+    devices = int32(devices - 1);
+end
+
+function [mask, config] = mr_op_mask(mask, config)
+%MR_OP_MASK  Mask handling identical to AhA_Toeplitz.m: required in masked
+%   mode, converted to 0-based int64 indices (config.num_masked filled in).
+    if isempty(mask)
+        if isfield(config, 'is_masked') && config.is_masked
+            error('MR_AHA:mr_aha_op:missingMask', ...
+                  'config.is_masked is true, so a mask must be supplied.');
+        end
+        mask = [];
+        return
+    end
+    % The library indexes from 0; MATLAB indexes from 1. The subtraction is
+    % done in double (exact for any grid below 2^53 points) because gpuArray
+    % does not support 64-bit integer arithmetic in every MATLAB release
+    % (R2022b: "Input arguments of type 'int64' are not supported for
+    % 'minus'").
+    mask = int64(double(gpuArray(mask(:))) - 1);
+    config.num_masked = numel(mask);
 end
 
 function a = mr_op_complex_single(a, name)

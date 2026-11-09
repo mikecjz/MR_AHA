@@ -63,6 +63,7 @@ from ._lib import (
     DEFAULT_MASK_RADIUS,
     DEFAULT_MASK_THRESHOLD,
     MGPU_SHARE_PRIMARY,
+    MGPU_TOEP_SOURCES,
     MaskMethod,
     MRConfig,
     MRError,
@@ -559,8 +560,61 @@ def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
     return mask
 
 
+def _check_gram(cfg: MRConfig, phi2, traj, mask):
+    """Validate the inputs of :func:`calc_toep` and complete ``cfg``.
+
+    Checks the sizes of ``phi2`` and ``traj`` against ``cfg`` and, in masked
+    mode, that a mask is given; fills in ``cfg.num_masked`` from the mask when
+    it is still 0.
+
+    Args:
+        cfg: Configuration; ``num_masked`` may be updated.
+        phi2: Gram blocks, see :func:`calc_toep`.
+        traj: Trajectory, see :func:`calc_toep`.
+        mask: Mask or ``None``.
+
+    Returns:
+        ``(Ntrajs, Nkx)``.
+
+    Raises:
+        ValueError: If an array has the wrong size or a mask is missing.
+    """
+    Ntrajs, Nkx = _check_traj(cfg, traj)
+    nkz = cfg.phi2_dim[2] if cfg.traj_type == TrajType.STACK else 1
+    _check_size(phi2, cfg.L * cfg.L * nkz * Ntrajs, "phi2")
+    if cfg.is_masked:
+        if mask is None:
+            raise ValueError("cfg.is_masked is set, so a mask is required")
+        if cfg.num_masked == 0:
+            cfg.num_masked = int(mask.size)
+            check(lib.mr_config_validate(ctypes.byref(cfg)), "mr_config_validate")
+        elif int(mask.size) != int(cfg.num_masked):
+            raise ValueError(
+                f"mask has {mask.size} elements but cfg.num_masked is "
+                f"{cfg.num_masked}"
+            )
+    return Ntrajs, Nkx
+
+
+def _device_array(devices):
+    """Convert a device list to the ``(int*, n)`` pair of the C API.
+
+    Args:
+        devices: Sequence of CUDA ordinals, or ``None`` for every visible
+            device.
+
+    Returns:
+        ``(ctypes array or None, length)``.
+    """
+    if devices is None:
+        return None, 0
+    devices = [int(d) for d in devices]
+    return (ctypes.c_int * max(len(devices), 1))(*devices), len(devices)
+
+
 def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
-              nufft: Optional[str] = None):
+              nufft: Optional[str] = None,
+              devices: Optional[Sequence[int]] = None):
     """Pre-compute the block-diagonal Toeplitz operator ``phi2_toep``.
 
     Args:
@@ -587,6 +641,16 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
             then the C library finishes; see :mod:`mr_aha._psf`).
             ``'finufft'`` uses CPU FINUFFT for the same two-stage path, for
             validation.
+        devices: CUDA backend only. CUDA ordinals of further GPUs that help
+            compute the kernel (``mr_calc_toep_mgpu``): the
+            ``(L^2+L)/2`` independent triangular components are split over
+            the current device and these, each helper copies its finished
+            components into ``out`` on the current device, overlapped with
+            its computation. The result equals the single-GPU one up to
+            cufinufft's run-to-run noise (~1e-7). ``None`` (default) computes
+            on the current device only. The environment variable
+            ``MR_AHA_TOEP_SPLIT`` (``auto`` default, ``split``, ``off``)
+            overrides the library's choice of whether splitting pays off.
 
     Returns:
         The ``complex64`` array ``phi2_toep`` (CuPy on CUDA, NumPy on Metal),
@@ -597,22 +661,7 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
         MRError: If the library reports a failure.
     """
     xp = _xp()
-    Ntrajs, Nkx = _check_traj(cfg, traj)
-
-    nkz = cfg.phi2_dim[2] if cfg.traj_type == TrajType.STACK else 1
-    _check_size(phi2, cfg.L * cfg.L * nkz * Ntrajs, "phi2")
-
-    if cfg.is_masked:
-        if mask is None:
-            raise ValueError("cfg.is_masked is set, so a mask is required")
-        if cfg.num_masked == 0:
-            cfg.num_masked = int(mask.size)
-            check(lib.mr_config_validate(ctypes.byref(cfg)), "mr_config_validate")
-        elif int(mask.size) != int(cfg.num_masked):
-            raise ValueError(
-                f"mask has {mask.size} elements but cfg.num_masked is "
-                f"{cfg.num_masked}"
-            )
+    Ntrajs, Nkx = _check_gram(cfg, phi2, traj, mask)
 
     shape = phi2_toep_shape(cfg)
     expected = int(lib.mr_phi2_toep_size(ctypes.byref(cfg)))
@@ -623,6 +672,27 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
 
     if nufft is None:
         nufft = "library" if backend() == "cuda" else "mlx"
+    if devices is not None:
+        if not hasattr(lib, "mr_calc_toep_mgpu"):
+            raise RuntimeError("calc_toep(devices=...) requires the CUDA backend")
+        if nufft != "library":
+            raise ValueError("calc_toep(devices=...) requires nufft='library'")
+        devs, n = _device_array(devices)
+        check(
+            lib.mr_calc_toep_mgpu(
+                ctypes.byref(cfg),
+                devs,
+                n,
+                _ptr(phi2, "phi2", "complex64"),
+                _ptr(traj, "traj", "float32"),
+                ctypes.c_int64(int(Ntrajs)),
+                ctypes.c_int64(int(Nkx)),
+                _ptr(mask, "mask", "int64", allow_none=True),
+                _ptr(out, "out", "complex64"),
+            ),
+            "mr_calc_toep_mgpu",
+        )
+        return out
     if nufft != "library":
         # Validate the pointers' types up front, then run the two stages.
         _ptr(phi2, "phi2", "complex64")
@@ -785,6 +855,12 @@ class MultiGPUPlan:
     Inputs and outputs live on the current CuPy device, which becomes the
     primary device; it always takes part.
 
+    :meth:`from_gram` builds the same plan from the Gram blocks instead of a
+    finished kernel: every GPU computes a share of ``phi2_toep`` and the
+    shares are exchanged, which is several times faster than
+    :func:`calc_toep` on one GPU followed by copying its result to every
+    other GPU.
+
     Args:
         cfg: Configuration from :func:`make_config`.
         SEs: ``complex64`` CuPy sensitivity maps, see :meth:`AhAPlan.apply`.
@@ -814,6 +890,7 @@ class MultiGPUPlan:
             raise RuntimeError("MultiGPUPlan requires the CUDA backend")
         self._handle = ctypes.c_void_p()
         self._cfg = cfg
+        self._keep = ()
         _check_size(SEs, int(lib.mr_se_size(ctypes.byref(cfg))), "SEs")
         _check_size(
             phi2_toep, int(lib.mr_phi2_toep_size(ctypes.byref(cfg))), "phi2_toep"
@@ -822,12 +899,7 @@ class MultiGPUPlan:
             raise ValueError("cfg.is_masked is set, so a mask is required")
         # Arrays used in place must outlive the plan.
         self._keep = (SEs, phi2_toep, mask) if share_primary else ()
-        devs = None
-        n = 0
-        if devices is not None:
-            devices = [int(d) for d in devices]
-            n = len(devices)
-            devs = (ctypes.c_int * max(n, 1))(*devices)
+        devs, n = _device_array(devices)
         check(
             lib.mr_mgpu_plan_create(
                 ctypes.byref(cfg),
@@ -842,10 +914,109 @@ class MultiGPUPlan:
             "mr_mgpu_plan_create",
         )
 
+    @classmethod
+    def from_gram(cls, cfg: MRConfig, SEs, phi2, traj, mask=None,
+                  devices: Optional[Sequence[int]] = None,
+                  share_primary: bool = False) -> "MultiGPUPlan":
+        """Build the plan from the Gram blocks, computing ``phi2_toep`` on
+        every GPU at once (``mr_mgpu_plan_create_gram``).
+
+        Equivalent to ``MultiGPUPlan(cfg, SEs, calc_toep(cfg, phi2, traj,
+        mask), mask, devices)`` but faster: every GPU computes a contiguous
+        share of the ``(L^2+L)/2`` independent triangular components directly
+        into its own copy of the kernel, and the GPUs then exchange their
+        shares (overlapped with the computation), instead of one GPU computing
+        everything and copying it to all others. Every component is computed
+        once, so the copies on all GPUs are identical. When the GPUs cannot
+        exchange data fast enough (no peer access), each computes the whole
+        kernel itself. ``MR_AHA_TOEP_SPLIT=off|split|replicate|auto``
+        overrides the choice; :attr:`info` reports it (``toep_source``).
+
+        Args:
+            cfg: Configuration from :func:`make_config`.
+            SEs: Sensitivity maps, see :meth:`AhAPlan.apply`.
+            phi2: Gram blocks, see :func:`calc_toep`.
+            traj: Trajectory, see :func:`calc_toep`.
+            mask: Mask, see :func:`calc_toep`; required when ``cfg.is_masked``.
+            devices: CUDA device ordinals to use, or ``None`` for every
+                visible device.
+            share_primary: Use ``SEs`` and ``mask`` in place on the primary
+                device instead of copying them. (The kernel always belongs
+                to the plan, see :meth:`kernel`.)
+
+        Returns:
+            The plan.
+
+        Raises:
+            RuntimeError: On the Metal backend.
+            ValueError: If an array has the wrong size or a mask is missing.
+            MRError: If the plan cannot be created.
+        """
+        if not hasattr(lib, "mr_mgpu_plan_create_gram"):
+            raise RuntimeError("MultiGPUPlan.from_gram requires the CUDA backend")
+        self = cls.__new__(cls)
+        self._handle = ctypes.c_void_p()
+        self._cfg = cfg
+        self._keep = ()
+        _check_size(SEs, int(lib.mr_se_size(ctypes.byref(cfg))), "SEs")
+        Ntrajs, Nkx = _check_gram(cfg, phi2, traj, mask)
+        self._keep = (SEs, mask) if share_primary else ()
+        devs, n = _device_array(devices)
+        check(
+            lib.mr_mgpu_plan_create_gram(
+                ctypes.byref(cfg),
+                devs,
+                n,
+                _ptr(SEs, "SEs", "complex64"),
+                _ptr(phi2, "phi2", "complex64"),
+                _ptr(traj, "traj", "float32"),
+                ctypes.c_int64(int(Ntrajs)),
+                ctypes.c_int64(int(Nkx)),
+                _ptr(mask, "mask", "int64", allow_none=True),
+                MGPU_SHARE_PRIMARY if share_primary else 0,
+                ctypes.byref(self._handle),
+            ),
+            "mr_mgpu_plan_create_gram",
+        )
+        return self
+
     @property
     def config(self) -> MRConfig:
         """The configuration this plan was built from."""
         return self._cfg
+
+    def kernel(self, k: int = 0):
+        """The plan's copy of ``phi2_toep`` on its ``k``-th device.
+
+        For a plan from :meth:`from_gram` this is the kernel the plan
+        computed, e.g. to save it or to build an :class:`AhAPlan` on the
+        primary device. The array is a *view* of memory owned by the plan:
+        it keeps the plan object alive, but becomes invalid when the plan is
+        closed, and must not be modified.
+
+        Args:
+            k: Device index, ``0 <= k < len(info['devices'])``; 0 is the
+                primary device. The array lives on device
+                ``info['devices'][k]``.
+
+        Returns:
+            A ``complex64`` CuPy array shaped like :func:`phi2_toep_shape`.
+
+        Raises:
+            RuntimeError: If the plan has already been closed.
+            MRError: If ``k`` is out of range.
+        """
+        if not self._handle:
+            raise RuntimeError("this MultiGPUPlan has already been closed")
+        cp = _cupy()
+        ptr = ctypes.c_void_p()
+        check(lib.mr_mgpu_plan_kernel(self._handle, int(k), ctypes.byref(ptr)),
+              "mr_mgpu_plan_kernel")
+        dev = self.info["devices"][int(k)]
+        size = int(lib.mr_phi2_toep_size(ctypes.byref(self._cfg)))
+        mem = cp.cuda.UnownedMemory(ptr.value, size * 8, self, device_id=dev)
+        return cp.ndarray(phi2_toep_shape(self._cfg), dtype=cp.complex64,
+                          memptr=cp.cuda.MemoryPointer(mem, 0))
 
     @property
     def info(self) -> dict:
@@ -855,8 +1026,15 @@ class MultiGPUPlan:
             A dictionary with ``devices`` (CUDA ordinals, primary first),
             ``coil_begin`` / ``coil_count`` (whole coils per device),
             ``group`` (coils per group on each device), ``n_split_coils``
-            (remainder coils split by rank), ``peer_access`` and
-            ``peer_bandwidth_gbs``.
+            (remainder coils split by rank), ``peer_access``,
+            ``peer_bandwidth_gbs`` and, describing how the plan obtained
+            ``phi2_toep``: ``toep_source`` (``'supplied'``, ``'broadcast'``:
+            one GPU computed it and copied it to the others, ``'split'``:
+            every GPU computed a share and the shares were exchanged,
+            ``'replicate'``: every GPU computed it itself), ``toep_devices``,
+            ``toep_ms`` (time of computing and distributing it),
+            ``toep_component_ms`` (GPU time per triangular component) and
+            ``toep_gather_gbs`` (measured concurrent receive bandwidth).
         """
         if not self._handle:
             raise RuntimeError("this MultiGPUPlan has already been closed")
@@ -872,6 +1050,11 @@ class MultiGPUPlan:
             n_split_coils=int(inf.n_split_coils),
             peer_access=bool(inf.peer_access),
             peer_bandwidth_gbs=float(inf.peer_bandwidth_gbs),
+            toep_source=MGPU_TOEP_SOURCES.get(int(inf.toep_source), "unknown"),
+            toep_devices=int(inf.toep_devices),
+            toep_ms=float(inf.toep_ms),
+            toep_component_ms=float(inf.toep_component_ms),
+            toep_gather_gbs=float(inf.toep_gather_gbs),
         )
 
     def apply(self, x, out=None):

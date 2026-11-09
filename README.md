@@ -58,6 +58,10 @@ Turns the non-Cartesian Gram blocks $\Phi_2 = \Phi\Phi^H$ (MR-Multitasking's
 $L \times L$ matrix per trajectory, into the Cartesian block-diagonal multiplier used by the
 operator. Internally: pack each block into a
 triangle, type-1 cufinufft onto the upsampled grid, centred inverse FFT, optional mask gather.
+The $(L^2+L)/2$ triangular components are independent, so on the CUDA backend
+`calc_toep(..., 'devices', 1:4)` (MATLAB) / `calc_toep(..., devices=[0, 1, 2, 3])` (Python) /
+`mr_calc_toep_mgpu` (C) spreads them over several GPUs and gathers the result on the current one
+(see [Multi-GPU](#multi-gpu-cuda)).
 
 ### `AhA_Toeplitz` — the hot loop
 
@@ -415,8 +419,65 @@ mr_mgpu_plan_destroy(op);
   unload it under a live operator. After `reset(gpuDevice)` or selecting another GPU, `apply`
   raises an error instead of computing; delete the operator and create a new one.
 
+### Set-up: computing `phi2_toep` on all GPUs
+
+Building a multi-GPU operator from a kernel that `calc_toep` computed on one GPU costs
+$T_\mathrm{calc}$ on that GPU while the others are idle, plus copying the kernel from the primary
+to each of the other $G-1$ GPUs, all through the primary's own link. For 2D radial with L = 72
+(an 8.6 GB kernel) on 4 L40S over PCIe the set-up took 3.7 s, four times as long as 10 CG
+iterations. Building the operator from the Gram blocks instead avoids most of this. On the same
+4 GPUs the set-up drops to 1.9 s, which is faster than `calc_toep` alone on one GPU (2.0 s). For
+a 160³ kooshball (L = 12) it drops from 12.1 s to 4.3 s. See
+[docs/PERFORMANCE.md §3.4](docs/PERFORMANCE.md) for the mechanism and all measurements.
+
+```matlab
+op = mr_aha_op.from_gram(SEs, phi2, traj, config, 'devices', 1:4);  % no calc_toep call
+Om = op.kernel();                                                   % optional: a copy of the kernel
+```
+
+```python
+op = mr_aha.MultiGPUPlan.from_gram(cfg, SEs, phi2, traj, mask, devices=[0, 1, 2, 3])
+Om = op.kernel(0)                     # view of the plan's kernel on the primary GPU
+```
+
+```c
+mr_mgpu_plan_create_gram(&cfg, devices, n, d_SEs, d_phi2, d_traj, Ntrajs, Nkx, d_mask, 0, &op);
+```
+
+Each GPU computes a contiguous share of the components directly into its own copy of the kernel.
+The GPUs then exchange their shares (an all-gather), chunk by chunk, overlapped with the
+computation. Each GPU sends one copy at a time, to the others in rotated order, so every link
+carries about one transfer at a time. Letting every GPU send to all the others at once was
+several times slower on PCIe nodes whose GPUs sit on different NUMA nodes. Each GPU computes about $T_\mathrm{calc}/G$ and receives $(G-1)/G$ of the kernel over
+its own link, instead of the primary sending $(G-1)$ whole kernels. Every component is computed
+once, so the copies on all GPUs are bit-identical.
+
+* **When it pays off.** Computing $1/G$ and exchanging is faster than every GPU computing the
+  whole kernel itself when a GPU can receive one component faster than it can compute one. That
+  needs only a few GB/s (about 4 GB/s for the 2D L = 72 kernel), well below PCIe peer-to-peer and
+  far below NVLink.
+* **Cost model.** At creation every GPU computes and times the first chunk of its share (useful
+  work in either case). All GPUs then copy 64 MB to every receiver *at the same time*, with the
+  schedule of the exchange, to measure the bandwidth each gets when they share links. The library then picks the exchange
+  (`toep_source = 'split'`) or lets every GPU compute the kernel itself (`'replicate'`, e.g.
+  without peer access).
+* **Overrides.** `MR_AHA_TOEP_SPLIT=split|replicate|off|auto` (default `auto`). `off`
+  reproduces the old path: the primary computes the kernel and copies it to the others.
+  `MR_AHA_TOEP_CHUNKS` (default 4) is the minimum number of chunks per GPU; 1 disables the
+  overlap and is for benchmarking only.
+* **Report.** `info` gives `toep_source`, `toep_devices`, `toep_ms`, `toep_component_ms` and
+  `toep_gather_gbs`.
+* **Single-GPU consumers.** `calc_toep` with `devices` (`mr_calc_toep_mgpu`) uses the same engine
+  with only the primary receiving. Helper GPUs then need memory for their share only.
+* **Memory.** Every GPU that applies the operator holds a copy of the kernel, as before, plus the
+  transient buffers of `calc_toep` while computing. These are sized within `mem_fraction` of the
+  memory left after the copy. GPUs the operator does not use for coils (e.g. the 5th of 5 GPUs
+  with 12 coils) still help compute the kernel.
+
 `tests/check_mgpu.py` and `tests/check_mgpu_matlab.m` compare the multi-GPU and single-GPU
-operators; `benchmarks/bench_mgpu.py` measures the scaling.
+operators, and `tests/check_toep_mgpu.py` compares the multi-GPU pre-computation with the
+single-GPU one. `benchmarks/bench_mgpu.py` measures the scaling of the operator, and
+`benchmarks/bench_toep_mgpu.py` measures the set-up.
 
 ---
 

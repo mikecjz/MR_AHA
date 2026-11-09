@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import sys
 import time
@@ -149,7 +150,8 @@ def main() -> None:
                 if xp is not np:
                     xp.get_default_memory_pool().free_all_blocks()
 
-    out_dir = ROOT / "benchmarks" / "results" / host
+    out_dir = Path(os.environ.get("MR_AHA_BENCH_RESULTS",
+                           ROOT / "benchmarks" / "results")) / host
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"aha_{backend}.json"
     out.write_text(json.dumps(dict(backend=backend, device=device, host=host,

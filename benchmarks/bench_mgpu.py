@@ -147,7 +147,8 @@ def main() -> None:
             results += run_case(name, masked, gpus, args.split, args.reps,
                                 args.coils)
 
-    out_dir = ROOT / "benchmarks" / "results" / host
+    out_dir = Path(os.environ.get("MR_AHA_BENCH_RESULTS",
+                           ROOT / "benchmarks" / "results")) / host
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / (args.out or "mgpu_cuda.json")
     out.write_text(json.dumps(dict(device=device, n_visible=n_vis, host=host,
