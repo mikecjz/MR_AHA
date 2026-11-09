@@ -89,23 +89,38 @@ static void mr_mex_check_traj(const mxGPUArray *g_traj, const mr_config *cfg,
 }
 
 /**
- * @brief Read a device list: an `int32` vector of **CUDA ordinals** (the `.m`
- *        wrappers convert 1-based `gpuDevice` indices), or `[]`.
+ * @brief Read the device list of `mr_aha_op_mex('create', ...)` for
+ *        ::mr_op_options::devices.
+ *
+ * Accepts an `int32` vector of **CUDA ordinals** (0-based; `mr_aha_op.m`
+ * converts the 1-based `gpuDevice` indices of its `'devices'` argument), the
+ * character vector `'all'` (every visible device) or `[]` (the primary
+ * device only).
+ *
  * @param[in]  mx  The MATLAB array.
- * @param[out] out Receives up to ::MR_MGPU_MAX_DEVICES ordinals.
+ * @param[out] out Receives up to ::MR_OP_MAX_DEVICES ordinals.
  * @param[in]  id  Error identifier.
- * @return Number of ordinals (0 for `[]`).
+ * @return Number of ordinals for ::mr_op_options::n_devices: 0 for `[]`,
+ *         ::MR_OP_ALL_DEVICES for `'all'` (with nothing written to @p out).
  */
 static int mr_mex_devices(const mxArray *mx, int *out, const char *id)
 {
     if (mxIsEmpty(mx)) return 0;
+    if (mxIsChar(mx)) {
+        char buf[8];
+        if (mxGetString(mx, buf, sizeof(buf)) != 0 ||
+            !(strcmp(buf, "all") == 0 || strcmp(buf, "ALL") == 0))
+            mexErrMsgIdAndTxt(id, "devices must be 'all', [] or an int32 vector "
+                                  "of CUDA ordinals.");
+        return MR_OP_ALL_DEVICES;
+    }
     if (!mxIsInt32(mx) || mxIsComplex(mx))
         mexErrMsgIdAndTxt(id, "devices must be an int32 vector of CUDA ordinals "
                               "(the .m wrappers convert gpuDevice indices).");
     const mwSize n = mxGetNumberOfElements(mx);
-    if (n > MR_MGPU_MAX_DEVICES)
+    if (n > MR_OP_MAX_DEVICES)
         mexErrMsgIdAndTxt(id, "at most %d devices are supported.",
-                          MR_MGPU_MAX_DEVICES);
+                          MR_OP_MAX_DEVICES);
     const int32_t *d = mxGetInt32s(mx);
     for (mwSize k = 0; k < n; ++k) out[k] = (int)d[k];
     return (int)n;

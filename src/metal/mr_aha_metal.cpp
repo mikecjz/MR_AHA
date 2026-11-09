@@ -34,7 +34,9 @@
 
 #include "mr_metal_internal.h"
 
+#include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <new>
 #include <vector>
@@ -482,3 +484,152 @@ extern "C" int mr_aha_toeplitz(const mr_config *cfg, const mr_complex *d_x,
     const int rc_destroy = mr_aha_plan_destroy(plan);
     return (rc != MR_SUCCESS) ? rc : rc_destroy;
 }
+
+/* ------------------------------------------------------------------------ */
+/* The operator object (single device, Toeplitz, supplied kernel)           */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * @brief Metal state of an ::mr_op: a single-device Toeplitz operator around
+ *        an ::mr_aha_plan.
+ *
+ * The Metal backend computes the kernel partly outside the library (the
+ * type-1 NUFFT runs through mlx-nufft in Python, see ::mr_calc_toep_from_psf),
+ * so ::mr_op_create here requires the finished kernel in
+ * ::mr_op_inputs::d_phi2_toep and supports one device only; the Python
+ * binding (`mr_aha.create_op`) computes the kernel and passes it in, and
+ * implements the NUFFT method itself (MLX + mlx-nufft). With
+ * ::MR_OP_SHARE_PRIMARY the caller's arrays are used in place (unified
+ * memory); otherwise they are copied into host buffers owned by the operator.
+ */
+struct mr_op_s {
+    mr_config               cfg;   /**< Copy of the configuration.            */
+    mr_aha_plan             plan;  /**< The single-device plan.               */
+    const mr_complex       *SEs;   /**< Maps used by every execution.         */
+    const mr_complex       *toep;  /**< Kernel used by every execution.       */
+    const int64_t          *mask;  /**< Mask, or NULL.                        */
+    std::vector<mr_complex> SEs_own;  /**< Copies when not sharing.           */
+    std::vector<mr_complex> toep_own;
+    std::vector<int64_t>    mask_own;
+    mr_op_info_t            info;  /**< What ::mr_op_info reports.            */
+};
+
+extern "C" int mr_op_options_defaults(mr_op_options *opt)
+{
+    mr_clear_error();
+    MR_REQUIRE(opt != NULL, "mr_op_options_defaults: opt is NULL");
+    memset(opt, 0, sizeof(*opt));
+    opt->method = MR_OP_TOEPLITZ;
+    opt->toep_dist = MR_TOEP_DIST_AUTO;
+    opt->flags = MR_OP_SHARE_PRIMARY;
+    return MR_SUCCESS;
+}
+
+extern "C" int mr_op_create(const mr_config *cfg, const mr_op_inputs *in,
+                            const mr_op_options *opt, mr_op *op_out)
+{
+    mr_clear_error();
+    MR_REQUIRE(op_out != NULL, "mr_op_create: op_out is NULL");
+    *op_out = NULL;
+    MR_REQUIRE(cfg != NULL && in != NULL, "mr_op_create: cfg or in is NULL");
+    mr_op_options o;
+    if (opt) o = *opt;
+    else mr_op_options_defaults(&o);
+    const int status = mr_config_validate(cfg);
+    if (status != MR_SUCCESS) return status;
+    if (o.method != MR_OP_TOEPLITZ)
+        MR_FAIL(MR_ERR_UNSUPPORTED,
+                "mr_op_create: the Metal backend implements the Toeplitz method in "
+                "the library; the NUFFT method is provided by the Python binding");
+    const int one_device =
+        (o.devices == NULL && (o.n_devices == 0 || o.n_devices == MR_OP_ALL_DEVICES)) ||
+        (o.devices != NULL && o.n_devices == 1 && o.devices[0] == 0);
+    if (!one_device)
+        MR_FAIL(MR_ERR_UNSUPPORTED,
+                "mr_op_create: the Metal backend has a single GPU (device 0)");
+    MR_REQUIRE(in->d_SEs != NULL, "mr_op_create: d_SEs is NULL");
+    if (in->d_phi2_toep == NULL)
+        MR_FAIL(MR_ERR_UNSUPPORTED,
+                "mr_op_create: the Metal backend needs the finished kernel in "
+                "d_phi2_toep (computed by mr_aha.calc_toep)");
+    if (cfg->is_masked)
+        MR_REQUIRE(in->d_mask != NULL,
+                   "mr_op_create: d_mask is required when is_masked is set");
+
+    const auto t0 = std::chrono::steady_clock::now();
+    mr_op p = new (std::nothrow) mr_op_s();
+    if (!p) MR_FAIL(MR_ERR_ALLOC, "failed to allocate the operator struct");
+    p->cfg = *cfg;
+    const int rc = mr_aha_plan_create(cfg, &p->plan);
+    if (rc != MR_SUCCESS) {
+        delete p;
+        return rc;
+    }
+    if (o.flags & MR_OP_SHARE_PRIMARY) {
+        p->SEs = in->d_SEs;
+        p->toep = in->d_phi2_toep;
+        p->mask = cfg->is_masked ? in->d_mask : NULL;
+    } else {
+        const size_t nse = (size_t)mr_se_size(cfg);
+        const size_t ntoep = (size_t)mr_phi2_toep_size(cfg);
+        try {
+            p->SEs_own.assign(in->d_SEs, in->d_SEs + nse);
+            p->toep_own.assign(in->d_phi2_toep, in->d_phi2_toep + ntoep);
+            if (cfg->is_masked)
+                p->mask_own.assign(in->d_mask, in->d_mask + cfg->num_masked);
+        } catch (...) {
+            mr_aha_plan_destroy(p->plan);
+            delete p;
+            MR_FAIL(MR_ERR_ALLOC, "failed to copy the operator's inputs");
+        }
+        p->SEs = p->SEs_own.data();
+        p->toep = p->toep_own.data();
+        p->mask = cfg->is_masked ? p->mask_own.data() : NULL;
+    }
+    memset(&p->info, 0, sizeof(p->info));
+    p->info.method = MR_OP_TOEPLITZ;
+    p->info.n_devices = 1;
+    p->info.coil_count[0] = cfg->n_coils;
+    p->info.group[0] = 1;
+    p->info.toep_source = MR_OP_TOEP_SUPPLIED;
+    p->info.create_ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+    *op_out = p;
+    return MR_SUCCESS;
+}
+
+extern "C" int mr_op_execute(mr_op op, const mr_complex *d_x, mr_complex *d_AhAx)
+{
+    mr_clear_error();
+    MR_REQUIRE(op != NULL, "mr_op_execute: op is NULL");
+    return mr_aha_plan_execute(op->plan, d_x, op->SEs, op->toep, op->mask, d_AhAx);
+}
+
+extern "C" int mr_op_info(mr_op op, mr_op_info_t *info)
+{
+    mr_clear_error();
+    MR_REQUIRE(op != NULL && info != NULL, "mr_op_info: op or info is NULL");
+    *info = op->info;
+    return MR_SUCCESS;
+}
+
+extern "C" int mr_op_kernel(mr_op op, int k, const mr_complex **d_phi2_toep)
+{
+    mr_clear_error();
+    MR_REQUIRE(op != NULL && d_phi2_toep != NULL, "mr_op_kernel: NULL argument");
+    MR_REQUIRE(k == 0, "mr_op_kernel: device index %d outside [0, 1)", k);
+    *d_phi2_toep = op->toep;
+    return MR_SUCCESS;
+}
+
+extern "C" int mr_op_destroy(mr_op op)
+{
+    mr_clear_error();
+    if (op == NULL) return MR_SUCCESS;
+    mr_aha_plan_destroy(op->plan);
+    delete op;
+    return MR_SUCCESS;
+}
+
+extern "C" int mr_op_abandon(mr_op op) { return mr_op_destroy(op); }

@@ -3,8 +3,9 @@
 For every dataset and every threshold this records
 
 * the fraction of the upsampled grid that is retained,
-* the time of ``calc_mask``, of the masked ``calc_toep`` and of one masked
-  ``AhA`` application,
+* the time of ``calc_mask``, of the masked kernel ``calc_toep`` (computed
+  inside :func:`mr_aha.create_op`, see :func:`common.toeplitz_op`) and of one
+  masked ``AhA`` application,
 * the relative difference between the solution of 20 CG iterations (from
   zero) with the masked Toeplitz operator and with the NUFFT operator,
 * the relative error of the masked Toeplitz ``AhA`` against the NUFFT
@@ -32,7 +33,7 @@ import math
 import sys
 
 from common import (RESULTS, cg, cp, gpu_info, load, make_cfg, mr_aha, rel,
-                    save_json, sync, timed_once, timeit)
+                    save_json, sync, timed_once, timeit, toeplitz_op)
 
 THRESHOLDS = [1.0, 0.3, 0.1, 0.05, 0.03, 0.01, 0.003, 0.0]
 N_ITER = 20
@@ -87,17 +88,15 @@ def run(name):
             rows.append(row)
             del mask
             continue
-        Om, row["calc_toep_s"] = timed_once(
-            lambda: mr_aha.calc_toep(c, d["phi2"], d["traj"], mask=mask))
-        with mr_aha.AhAPlan(c) as p:
-            row["err_img"] = rel(p.apply(x_img, d["SEs"], Om, mask=mask), ref_img)
-            row["err_rand"] = rel(p.apply(x_rnd, d["SEs"], Om, mask=mask), ref_rnd)
-            row["aha_s"] = timeit(lambda: p.apply(x_img, d["SEs"], Om, mask=mask),
-                                  n=3, warmup=1)["median"]
-            u, _ = cg(lambda v: p.apply(v, d["SEs"], Om, mask=mask), d["b"], N_ITER)
+        p, row["calc_toep_s"], _ = toeplitz_op(c, d["SEs"], d["phi2"], d["traj"], mask)
+        with p:
+            row["err_img"] = rel(p(x_img), ref_img)
+            row["err_rand"] = rel(p(x_rnd), ref_rnd)
+            row["aha_s"] = timeit(lambda: p(x_img), n=3, warmup=1)["median"]
+            u, _ = cg(p, d["b"], N_ITER)
             row["err_cg"] = rel(u, u_ref)
             del u
-        del Om, mask
+        del p, mask
         print(f"{str(th):>9} {row['kept_fraction']:7.4f} {row['err_img']:9.2e} "
               f"{row['err_rand']:9.2e} {row['err_cg']:9.2e} {row['mask_s']:7.3f} "
               f"{row['calc_toep_s']:7.2f} {row['aha_s']:7.3f}")

@@ -1,8 +1,9 @@
 # Benchmarks: Toeplitz vs. NUFFT $A^HA$
 
 This folder benchmarks the speed and accuracy of the Toeplitz-embedded operator of MR_AHA
-(`mr_aha.AhAPlan`, Python) against the "vanilla" operator that applies type-2 and type-1 cufinufft
-transforms in every call (`mr_aha.AhANufftPlan` in Python, `AhA_cufinufft.m` in MATLAB). It also
+(`mr_aha.create_op`, Python; `mr_aha.AhAPlan` when these runs were made) against the "vanilla"
+operator that applies type-2 and type-1 cufinufft transforms in every call (`mr_aha.AhANufftPlan` in
+Python, `AhA_cufinufft.m` in MATLAB; inside the library: `create_op(..., method='nufft')`). It also
 documents the experiment behind the threshold of the automatic k-space mask (`calc_mask`).
 
 > **Mask default changed after these runs.** `calc_mask` now defaults to the neighbourhood mask
@@ -89,7 +90,8 @@ the reconstruction is only physically right with the shift.
     on the 3D data) and `einsum` in CuPy.
 * **Tuning.** "Tuned" picks the fastest (type-1, type-2) `gpu_method` pair out of {1, 2}² for each
   dataset and machine.
-* **Toeplitz operator.** `mr_aha.calc_toep` once, then `AhAPlan.apply`. "Masked" uses
+* **Toeplitz operator.** `mr_aha.calc_toep` once, then the then `AhAPlan.apply` (today:
+  `mr_aha.create_op`, which computes the same kernel inside). "Masked" uses
   `mr_aha.calc_mask` with the threshold method at 0.05, which was the default at the time.
 * **Timing.** Wall time with device synchronisation, after a warm-up call. The median of 20 (2D)
   or 5 (stack, 3D) calls is reported.
@@ -243,7 +245,7 @@ Findings:
 
 * **The kernel is no longer the main allocation once masked.** For the stack at 0.05, the device
   memory of the operator is about 1.1 GB of kernel plus 2.8 GB measured while creating the
-  `AhAPlan` and applying it once. That 2.8 GB is mostly the padded `[Mx·My·Mz, L]` work buffer
+  the operator (then `AhAPlan`) and applying it once. That 2.8 GB is mostly the padded `[Mx·My·Mz, L]` work buffer
   (2.1 GB) plus the output; masking does not shrink it. Unmasked, the same operator would need about
   13.3 + 2.6 ≈ 16 GB, so masking cuts the total about 4×.
 * **`calc_toep` uses whatever memory it is given.** Its chunk size scales with `mem_fraction`
@@ -278,7 +280,8 @@ made to the CUDA $A^HA$, following `.claude/optimization.md` and `.claude/multi-
   `phi2_toep` read once), an in-place masked path through an `int32` index map (this was the
   "faster masked execute path" recommended below), and coil groups of 4 that read `phi2_toep` once
   per group. The results are bitwise identical to the previous kernels.
-* **Multi-GPU** (`mr_aha.MultiGPUPlan`, `mr_aha_op`): coils distributed over the GPUs of a node,
+* **Multi-GPU** (then `mr_aha.MultiGPUPlan` / `mr_aha_op`, now `create_op(..., devices=...)`):
+  coils distributed over the GPUs of a node,
   with an optional rank split of the remaining coils over NVLink.
 
 Inputs are constant arrays, timing is the median of 5 (single GPU) or 10 (multi-GPU) calls

@@ -24,8 +24,8 @@ Part 2, accuracy and measured memory (synthetic problems, ``L = 12``,
     (and unmasked, when it fits) the script records the device bytes held by
     ``phi2_toep`` and the mask, the peak device memory during ``calc_toep``
     (with the default ``mem_fraction = 0.5`` and with ``0.02``) and during
-    ``AhAPlan`` creation plus one ``AhA`` (sampled by a polling thread, so a
-    lower bound), the
+    the creation of the operator plus one ``AhA`` (sampled by a polling
+    thread, so a lower bound), the
     relative error of one ``AhA`` against the NUFFT operator for the image and
     for white noise, and the difference between 20 CG iterations (from zero)
     with the masked Toeplitz and with the NUFFT operator, for
@@ -271,22 +271,24 @@ def accuracy(kind, traj, nc):
                 lambda: mr_aha.calc_toep(c, P, traj, mask=mask))
         row["peak_calc_toep_bytes"] = pm.peak
         row["kernel_bytes"] = Om.nbytes + (mask.nbytes if mask is not None else 0)
-        # Plan creation allocates the per-coil work buffers, so it is inside
-        # the measurement; the peak includes the output array (x.nbytes).
+        # Operator creation allocates the per-coil work buffers, so it is
+        # inside the measurement; the peak includes the output array
+        # (x.nbytes). The kernel just measured is handed to the operator
+        # (private ``_phi2_toep``, used in place), so that this peak covers
+        # the operator alone, as before the kernel moved into create_op.
         with PeakMemory() as pm:
-            p = mr_aha.AhAPlan(c)
-            y = p.apply(x, S, Om, mask=mask)
+            p = mr_aha.create_op(c, S, P, traj, mask, _phi2_toep=Om)
+            y = p(x)
         row["peak_aha_bytes"] = pm.peak
         with p:
             row["err_img"] = rel(y, b)
             del y
-            row["err_rand"] = rel(p.apply(x_rnd, S, Om, mask=mask), ref_rnd)
-            row["aha_s"] = timeit(lambda: p.apply(x, S, Om, mask=mask),
-                                  n=3, warmup=1)["median"]
-            u, _ = cg(lambda v: p.apply(v, S, Om, mask=mask), b, N_ITER)
+            row["err_rand"] = rel(p(x_rnd), ref_rnd)
+            row["aha_s"] = timeit(lambda: p(x), n=3, warmup=1)["median"]
+            u, _ = cg(p, b, N_ITER)
             row["err_cg"] = rel(u, u_ref)
             del u
-        del Om, mask
+        del p, Om, mask
         print(f"{str(th):>9} {n / pad:7.4f} {row['kernel_bytes'] / 2**20:10.1f} "
               f"{row['peak_calc_toep_bytes'] / 2**20:8.0f} "
               f"{row['peak_calc_toep_low_bytes'] / 2**20:8.0f} "

@@ -538,277 +538,395 @@ MR_EXPORT int mr_aha_toeplitz(const mr_config  *cfg,
                               mr_complex       *d_AhAx);
 
 /* ------------------------------------------------------------------------ */
-/* Multi-GPU A^H A (CUDA backend only)                                      */
+/* The A^H A operator object (single or multiple GPUs)                       */
 /* ------------------------------------------------------------------------ */
 
-/** @brief Most devices a multi-GPU plan can use. */
-#define MR_MGPU_MAX_DEVICES 16
+/**
+ * @defgroup mr_op The A^H A operator object
+ * @brief One stateful operator, created from the Gram blocks, on one GPU or
+ *        on several GPUs of one node.
+ *
+ * ::mr_op_create builds the complete operator
+ * @f$x \mapsto A^H A x@f$ from the trajectory, the Gram blocks and the
+ * sensitivity maps, and ::mr_op_execute applies it. The object owns (or, with
+ * ::MR_OP_SHARE_PRIMARY, references) everything it needs, so an application
+ * only takes @f$x@f$. Two methods evaluate the same operator:
+ *
+ * - ::MR_OP_TOEPLITZ (default): the Toeplitz embedding. The object computes
+ *   the kernel `phi2_toep` (::mr_calc_toep) at creation and applies it with
+ *   ::mr_aha_plan_execute; no non-uniform FFT is needed per application.
+ * - ::MR_OP_NUFFT: the direct route, per coil a type-2 NUFFT (image to
+ *   trajectory), the block-diagonal Gram multiplication on the samples
+ *   (MR-Multitasking convention, see @ref mr_gram) and a type-1 NUFFT back,
+ *   with cufinufft. No kernel; less memory, more time per application. This
+ *   is the baseline the Toeplitz method is compared against.
+ *
+ * @section mr_op_devices Devices
+ *
+ * The *primary* device is ::mr_config::gpu_device_id, or the current device
+ * when that is -1 (MATLAB gpuArray and CuPy callers). Every array argument of
+ * ::mr_op_create and ::mr_op_execute lives there. ::mr_op_options::devices
+ * selects further devices of the same node; the primary always takes part.
+ * By default (no devices) the operator runs on the primary device only, with
+ * no overhead over the single-GPU primitives: no worker streams, no peer
+ * probes, no copy of @f$x@f$.
+ *
+ * On several devices, @f$A^H A x = \sum_c (\ldots)@f$ is split by **coils**:
+ * each device applies its own contiguous range of whole coils and the partial
+ * results are summed on the primary device. With @f$C@f$ coils and @f$G@f$
+ * candidate devices the operator uses the smallest @f$G' \le G@f$ with the
+ * same @f$\lceil C/G' \rceil@f$ coils per device (12 coils on 5 GPUs use 4),
+ * and only the primary for problems too small to gain (fewer than
+ * `MR_AHA_MGPU_MIN_WORK` upsampled values per coil, default @f$2^{22}@f$;
+ * the environment variable overrides it, 0 disables the check).
+ * ::mr_op_info reports the choice.
+ *
+ * Toeplitz on several devices: every device that applies the operator holds
+ * the whole kernel. How the copies are produced is ::mr_op_options::toep_dist
+ * (see ::mr_toep_dist). With the Toeplitz method the coils that do not divide
+ * evenly over the devices can also be split by rank
+ * (`MR_AHA_MGPU_SPLIT=auto|on|off`, default `auto`: only when a cost model
+ * fed with the measured peer bandwidth predicts a gain, i.e. with NVLink).
+ *
+ * NUFFT on several devices: every device holds its own cufinufft plans, its
+ * copy of the (reordered) Gram blocks and trajectory and its coils' maps; no
+ * kernel, so the per-device memory is far below the Toeplitz method's.
+ *
+ * @section mr_op_backends Backends
+ *
+ * CUDA implements everything. The Metal backend implements ::MR_OP_TOEPLITZ
+ * on a single device with a supplied kernel (::mr_op_inputs::d_phi2_toep):
+ * its kernel pre-computation runs partly outside the library (see
+ * ::mr_calc_toep_from_psf), so its Python binding computes the kernel and
+ * passes it in. Anything else returns ::MR_ERR_UNSUPPORTED on Metal.
+ * @{
+ */
+
+/** @brief Most devices one operator can use. */
+#define MR_OP_MAX_DEVICES 16
+
+/** @brief ::mr_op_options::n_devices value selecting every visible device
+ *         (with ::mr_op_options::devices NULL). */
+#define MR_OP_ALL_DEVICES (-1)
 
 /**
- * @brief Flag of ::mr_mgpu_plan_create: on the primary device, use the
- *        caller's `d_SEs`, `d_phi2_toep` and `d_mask` in place instead of
- *        copying them.
+ * @brief ::mr_op_options::flags bit: on the primary device, use the caller's
+ *        input arrays in place instead of copying them.
  *
- * Saves one copy of the Toeplitz kernel on the primary device (where the
- * caller's copy already lives). The caller must then keep these arrays alive
- * and unchanged until ::mr_mgpu_plan_destroy.
+ * The primary device then reads the caller's `d_SEs`, `d_mask` and, when
+ * supplied, `d_phi2_toep` directly; the other devices always receive copies
+ * (the data must be moved there anyway). This keeps the single-device memory
+ * equal to the stateless primitives (no second copy of the maps). The
+ * caller must keep these arrays alive and unchanged until ::mr_op_destroy.
+ * Set by ::mr_op_options_defaults.
+ *
+ * Arrays the operator transforms at creation (the kernel it computes, the
+ * NUFFT method's reordered Gram blocks and trajectory) always belong to the
+ * operator, so `d_phi2` and `d_traj` may be released after ::mr_op_create
+ * returns whatever this flag says.
  */
-#define MR_MGPU_SHARE_PRIMARY 1
+#define MR_OP_SHARE_PRIMARY 1
 
-/** @brief Opaque multi-GPU @f$A^H A@f$ plan. Create with
- *         ::mr_mgpu_plan_create. */
-typedef struct mr_mgpu_plan_s *mr_mgpu_plan;
+/** @brief How the operator evaluates @f$A^H A@f$. */
+typedef enum mr_op_method {
+    MR_OP_TOEPLITZ = 0, /**< Toeplitz embedding with a pre-computed kernel. */
+    MR_OP_NUFFT    = 1  /**< Type-2 NUFFT, Gram multiplication, type-1 NUFFT
+                             per coil (cufinufft); no kernel.               */
+} mr_op_method;
 
 /**
- * @brief How a multi-GPU plan distributes the work (::mr_mgpu_plan_info).
+ * @brief How a multi-device Toeplitz operator puts the kernel on every device
+ *        (::mr_op_options::toep_dist).
  *
- * Device 0 is the primary device: the caller's device, which holds the input
- * and output arrays and reduces the partial results.
+ * The @f$(L^2+L)/2@f$ triangular components of `phi2_toep` are independent
+ * (one type-1 NUFFT, inverse FFT and scaling each) and each fills a
+ * contiguous slab, so they can be computed on any device and moved with one
+ * copy per range. Without the operator's own choice, the environment
+ * variable `MR_AHA_TOEP_SPLIT=auto|split|replicate|broadcast` overrides this
+ * option (`off` is accepted as a synonym of `broadcast`); any other value is
+ * an error. With one device all modes compute the kernel in place.
  */
-typedef struct mr_mgpu_info {
+typedef enum mr_toep_dist {
+    /** Cost model: ::MR_TOEP_DIST_SPLIT or ::MR_TOEP_DIST_REPLICATE, fed with
+     *  a timed first chunk on every device (useful work either way) and a
+     *  concurrent bandwidth probe; roughly, the exchange wins when a device
+     *  receives a component faster than it computes one. */
+    MR_TOEP_DIST_AUTO      = 0,
+    /** Every device computes a contiguous share of the components into its
+     *  own copy, then the shares are exchanged (all-gather), overlapped chunk
+     *  by chunk with the computation. Every component is computed once, so
+     *  all copies are bit-identical. */
+    MR_TOEP_DIST_SPLIT     = 1,
+    /** Every device computes the whole kernel itself, without transfers
+     *  (best when the devices cannot exchange data quickly). The copies agree
+     *  to cufinufft's run-to-run noise (~1e-7). */
+    MR_TOEP_DIST_REPLICATE = 2,
+    /** The primary device computes the kernel alone and copies it to every
+     *  other device (the slowest; kept for comparison). */
+    MR_TOEP_DIST_BROADCAST = 3
+} mr_toep_dist;
+
+/**
+ * @brief Inputs of ::mr_op_create. All arrays live on the primary device (see
+ *        @ref mr_op_devices) and use the layouts of ::mr_calc_toep and
+ *        ::mr_aha_plan_execute.
+ */
+typedef struct mr_op_inputs {
+    /** Sensitivity maps `[Nx, Ny, Nz, Ncoils]` (`[Nx, Ny, Ncoils]` in 2D),
+     *  ::mr_config::n_coils of them. Required. */
+    const mr_complex *d_SEs;
+    /** Gram blocks `[Ntrajs, L, L]` (`[Ntrajs, Nkz, L, L]` for
+     *  ::MR_TRAJ_STACK), see ::mr_calc_toep. Required, except for
+     *  ::MR_OP_TOEPLITZ with @ref d_phi2_toep given. */
+    const mr_complex *d_phi2;
+    /** Trajectory `[Ntrajs, Nkx, ndim]` in radians, see ::mr_calc_toep.
+     *  Required whenever @ref d_phi2 is. */
+    const float      *d_traj;
+    /** Number of trajectories (readouts). */
+    int64_t           Ntrajs;
+    /** Samples per trajectory. */
+    int64_t           Nkx;
+    /** Mask of ::mr_config::num_masked 0-based indices into the centred
+     *  upsampled grid when ::mr_config::is_masked (::MR_OP_TOEPLITZ only),
+     *  else NULL. */
+    const int64_t    *d_mask;
+    /** Optional finished kernel (::mr_phi2_toep_size elements, as from
+     *  ::mr_calc_toep) for ::MR_OP_TOEPLITZ; NULL to let the operator compute
+     *  it from @ref d_phi2 and @ref d_traj. Meant for the Metal backend (whose
+     *  kernel pre-computation runs partly outside the library) and for tests
+     *  that inject a reference kernel; the language bindings do not expose it
+     *  publicly. With ::MR_OP_SHARE_PRIMARY the primary device uses it in
+     *  place; otherwise, and on every other device, it is copied
+     *  (::mr_op_info_t::toep_source is ::MR_OP_TOEP_SUPPLIED). */
+    const mr_complex *d_phi2_toep;
+} mr_op_inputs;
+
+/**
+ * @brief Options of ::mr_op_create. Fill with ::mr_op_options_defaults, then
+ *        override fields; new fields are added at the end with defaults that
+ *        keep the previous behaviour.
+ */
+typedef struct mr_op_options {
+    /** Method, ::MR_OP_TOEPLITZ by default. */
+    mr_op_method method;
+    /** CUDA ordinals of further devices, or NULL. With NULL, @ref n_devices
+     *  0 means the primary device only (default) and ::MR_OP_ALL_DEVICES
+     *  every visible device (at most ::MR_OP_MAX_DEVICES). Duplicates and
+     *  the primary itself are ignored; the primary always takes part. */
+    const int   *devices;
+    /** Length of @ref devices, at most ::MR_OP_MAX_DEVICES; see there. */
+    int          n_devices;
+    /** Kernel distribution of a multi-device ::MR_OP_TOEPLITZ operator,
+     *  ::MR_TOEP_DIST_AUTO by default. See ::mr_toep_dist. */
+    mr_toep_dist toep_dist;
+    /** Bit set of ::MR_OP_SHARE_PRIMARY; the defaults set it. */
+    int          flags;
+    /** ::MR_OP_NUFFT: cufinufft upsampling factor, 0 for the default 2.0
+     *  (the setting of the reference operators). The tolerance is
+     *  ::mr_config::eps. */
+    double       nufft_upsampfac;
+    /** ::MR_OP_NUFFT: cufinufft `gpu_method` (1: non-uniform points driven,
+     *  2: shared memory), 0 for cufinufft's default. */
+    int          nufft_gpu_method;
+} mr_op_options;
+
+/** @brief Opaque @f$A^H A@f$ operator. Create with ::mr_op_create. */
+typedef struct mr_op_s *mr_op;
+
+/** @brief ::mr_op_info_t::toep_source: the caller supplied the kernel
+ *         (::mr_op_inputs::d_phi2_toep). */
+#define MR_OP_TOEP_SUPPLIED  0
+/** @brief ::mr_op_info_t::toep_source: the primary device computed the kernel
+ *         alone (and copied it to the other devices, if any). Always the
+ *         case on one device. */
+#define MR_OP_TOEP_BROADCAST 1
+/** @brief ::mr_op_info_t::toep_source: every device computed a share of the
+ *         components and the shares were exchanged (::MR_TOEP_DIST_SPLIT). */
+#define MR_OP_TOEP_SPLIT     2
+/** @brief ::mr_op_info_t::toep_source: every device computed the kernel
+ *         itself (::MR_TOEP_DIST_REPLICATE). */
+#define MR_OP_TOEP_REPLICATE 3
+/** @brief ::mr_op_info_t::toep_source: no kernel (::MR_OP_NUFFT). */
+#define MR_OP_TOEP_NONE      4
+
+/**
+ * @brief How an operator was built and how it distributes the work
+ *        (::mr_op_info). Device 0 is the primary device: it holds the input
+ *        and output arrays and reduces the partial results.
+ */
+typedef struct mr_op_info_t {
+    /** ::mr_op_method of the operator. */
+    int    method;
     /** Number of devices actually used (<= the number requested, see
-     *  ::mr_mgpu_plan_create). */
-    int n_devices;
+     *  @ref mr_op_devices). */
+    int    n_devices;
     /** CUDA ordinals of the devices used; `devices[0]` is the primary. */
-    int devices[MR_MGPU_MAX_DEVICES];
+    int    devices[MR_OP_MAX_DEVICES];
     /** First whole coil processed by each device. */
-    int coil_begin[MR_MGPU_MAX_DEVICES];
+    int    coil_begin[MR_OP_MAX_DEVICES];
     /** Number of whole coils processed by each device. */
-    int coil_count[MR_MGPU_MAX_DEVICES];
-    /** Coils per group of each device's single-GPU plan (see
-     *  ::mr_aha_plan_create). */
-    int group[MR_MGPU_MAX_DEVICES];
-    /** Number of remainder coils split by rank across all devices (0 when the
-     *  remainder split is off). */
-    int n_split_coils;
+    int    coil_count[MR_OP_MAX_DEVICES];
+    /** Coils per group of each device (::MR_OP_TOEPLITZ, see
+     *  ::mr_aha_plan_create; 1 for ::MR_OP_NUFFT, which transforms one coil
+     *  at a time). */
+    int    group[MR_OP_MAX_DEVICES];
+    /** Number of remainder coils split by rank across all devices
+     *  (::MR_OP_TOEPLITZ only; 0 when the remainder split is off). */
+    int    n_split_coils;
     /** Non-zero when direct peer access is enabled between the primary and
      *  every other device used (otherwise copies are staged through the
-     *  host by the CUDA runtime). */
-    int peer_access;
+     *  host by the CUDA runtime). 0 on one device. */
+    int    peer_access;
     /** Slowest measured primary <-> device copy bandwidth in GB/s, or 0 when
-     *  it was not measured. */
+     *  it was not measured (it is measured only for the cost model of the
+     *  remainder split, i.e. a Toeplitz operator with C % G != 0 and
+     *  ``MR_AHA_MGPU_SPLIT`` unset or ``auto``). */
     double peer_bandwidth_gbs;
-    /** How the plan obtained `phi2_toep`, one of ::MR_MGPU_TOEP_SUPPLIED,
-     *  ::MR_MGPU_TOEP_BROADCAST, ::MR_MGPU_TOEP_SPLIT and
-     *  ::MR_MGPU_TOEP_REPLICATE. */
-    int toep_source;
-    /** Devices that computed components of `phi2_toep` (0 when supplied). */
-    int toep_devices;
-    /** Wall time of computing `phi2_toep` and, for ::MR_MGPU_TOEP_SPLIT and
-     *  ::MR_MGPU_TOEP_REPLICATE, distributing it, in ms (0 when supplied). */
+    /** How the kernel was obtained: ::MR_OP_TOEP_SUPPLIED,
+     *  ::MR_OP_TOEP_BROADCAST, ::MR_OP_TOEP_SPLIT, ::MR_OP_TOEP_REPLICATE or
+     *  ::MR_OP_TOEP_NONE. */
+    int    toep_source;
+    /** Devices that computed components of the kernel (0 when supplied or
+     *  ::MR_OP_NUFFT). */
+    int    toep_devices;
+    /** Wall time of computing the kernel and, on several devices,
+     *  distributing it, in ms (0 when supplied or ::MR_OP_NUFFT). */
     double toep_ms;
-    /** GPU time per triangular component measured by the pilot chunks, in ms
-     *  (0 when not measured). */
+    /** GPU time per triangular component measured by the pilot chunks of
+     *  ::MR_TOEP_DIST_AUTO / ::MR_TOEP_DIST_SPLIT / ::MR_TOEP_DIST_REPLICATE,
+     *  in ms (0 when not measured). */
     double toep_component_ms;
-    /** Concurrent receive bandwidth per device measured for the cost model of
-     *  the kernel exchange, in GB/s (0 when not measured). */
+    /** Concurrent receive bandwidth per device measured for the cost model
+     *  of the kernel exchange, in GB/s (0 when not measured). */
     double toep_gather_gbs;
-} mr_mgpu_info;
-
-/** @brief ::mr_mgpu_info::toep_source: the caller supplied `phi2_toep`
- *         (::mr_mgpu_plan_create). */
-#define MR_MGPU_TOEP_SUPPLIED  0
-/** @brief ::mr_mgpu_info::toep_source: the primary device computed
- *         `phi2_toep` alone and copied it to the other devices
- *         (`MR_AHA_TOEP_SPLIT=off`). */
-#define MR_MGPU_TOEP_BROADCAST 1
-/** @brief ::mr_mgpu_info::toep_source: every device computed a share of the
- *         components and the shares were exchanged (all-gather); the copies
- *         on all devices are bit-identical. */
-#define MR_MGPU_TOEP_SPLIT     2
-/** @brief ::mr_mgpu_info::toep_source: every device computed (nearly) the
- *         whole kernel itself, without transfers. */
-#define MR_MGPU_TOEP_REPLICATE 3
+    /** Wall time of the whole ::mr_op_create, in ms. */
+    double create_ms;
+} mr_op_info_t;
 
 /**
- * @brief Create a multi-GPU @f$A^H A@f$ plan on several GPUs of one node.
- *
- * @f$A^H A x = \sum_c (\ldots)@f$ is a sum over coils, and every coil's
- * pipeline (pad, FFT, block-diagonal, inverse FFT, crop) is independent. The
- * plan therefore gives each device a subset of the coils and sums the partial
- * results on the primary device. The constants are uploaded once, here:
- * every device receives a copy of `phi2_toep` (and the mask) and the
- * sensitivity maps of its own coils. Each application then only broadcasts
- * `x` and gathers the partial outputs. Multi-GPU therefore speeds up the
- * operator but does not raise the largest problem size: the whole kernel must
- * fit on every device.
- *
- * Device choice. With @f$C@f$ coils and @f$G@f$ usable devices, the time of
- * one application is set by @f$\lceil C/G \rceil@f$ coils; the plan uses the
- * smallest @f$G' \le G@f$ with the same @f$\lceil C/G' \rceil@f$ (e.g. 12
- * coils on 5 GPUs use 4) and leaves the others idle. Problems too small to
- * benefit (fewer than `MR_AHA_MGPU_MIN_WORK` upsampled values per coil,
- * default @f$2^{22}@f$; the environment variable overrides it, 0 disables
- * the check) use the primary device only. When @f$C@f$ is not a multiple of
- * @f$G'@f$, the remaining coils may additionally be split across all devices
- * by rank (`MR_AHA_MGPU_SPLIT=auto|on|off`, default `auto`: only when a cost
- * model fed with the measured peer bandwidth predicts a gain, which in
- * practice means NVLink). The cost model times the single-GPU operator on
- * the primary device at plan creation (a few applications).
- *
- * All arrays are device pointers on the primary device, which is
- * ::mr_config::gpu_device_id, or the current device when that is -1 (MATLAB
- * gpuArray / CuPy callers). The primary device always takes part, even when
- * it is not listed in @p devices. On return the current device is the same as
- * on entry.
- *
- * @param[in]  cfg         Validated configuration (as for
- *                         ::mr_aha_plan_create). ::mr_config::stream is the
- *                         primary device's stream on which
- *                         ::mr_mgpu_plan_execute is ordered.
- * @param[in]  devices     CUDA ordinals to use, or NULL for every visible
- *                         device. Duplicates are ignored.
- * @param[in]  n_devices   Length of @p devices (0 with NULL), at most
- *                         ::MR_MGPU_MAX_DEVICES.
- * @param[in]  d_SEs       Sensitivity maps, see ::mr_aha_plan_execute.
- * @param[in]  d_phi2_toep Packed Toeplitz kernel, see ::mr_aha_plan_execute.
- * @param[in]  d_mask      Mask (masked mode) or NULL.
- * @param[in]  flags       0 or ::MR_MGPU_SHARE_PRIMARY.
- * @param[out] plan_out    Receives the plan; NULL on failure.
- * @return ::MR_SUCCESS or a negative ::mr_status. Errors on another device
- *         name its ordinal in ::mr_last_error.
- */
-MR_EXPORT int mr_mgpu_plan_create(const mr_config  *cfg,
-                                  const int        *devices,
-                                  int               n_devices,
-                                  const mr_complex *d_SEs,
-                                  const mr_complex *d_phi2_toep,
-                                  const int64_t    *d_mask,
-                                  int               flags,
-                                  mr_mgpu_plan     *plan_out);
-
-/**
- * @brief Create a multi-GPU @f$A^H A@f$ plan from the Gram blocks, computing
- *        `phi2_toep` on all devices at once.
- *
- * Same plan as ::mr_mgpu_plan_create, but instead of copying a kernel the
- * caller computed on one device with ::mr_calc_toep (time
- * @f$T_\mathrm{calc}@f$) to every other device (@f$(G-1)K@f$ bytes through
- * the primary device's link, @f$K@f$ the kernel size), the plan
- *  1. allocates a copy of the kernel on every device that will apply it,
- *  2. gives every device (also the ones the plan will not use for coils) a
- *     contiguous share of the @f$(L^2+L)/2@f$ independent triangular
- *     components and computes it directly into its own copy, about
- *     @f$T_\mathrm{calc}/G@f$,
- *  3. exchanges the shares between the devices (all-gather), each device
- *     receiving @f$(G-1)/G \cdot K@f$, overlapped chunk by chunk with the
- *     computation.
- * Every component is computed exactly once, so all copies are bit-identical.
- * When the devices cannot exchange data quickly enough (no peer access,
- * shared PCIe), every device computes the whole kernel itself instead
- * (@f$T_\mathrm{calc}@f$, no transfer). The choice is made by a cost model
- * fed with the GPU time of a timed first chunk on every device (useful work in
- * either case) and a concurrent bandwidth probe: roughly, the exchange wins
- * when a device receives a component faster than it computes one.
- * `MR_AHA_TOEP_SPLIT=off|split|replicate|auto` (default `auto`) overrides it;
- * `off` reproduces ::mr_calc_toep on the primary device followed by
- * ::mr_mgpu_plan_create. ::mr_mgpu_plan_info reports what was done.
- *
- * Memory: every device using the plan holds a copy of the kernel (as with
- * ::mr_mgpu_plan_create) plus, while computing, the transient buffers of
- * ::mr_calc_toep, sized within ::mr_config::mem_fraction of the memory left
- * after the copy. The primary device's copy belongs to the plan (see
- * ::mr_mgpu_plan_kernel); ::MR_MGPU_SHARE_PRIMARY then only shares @p d_SEs
- * and @p d_mask.
- *
- * Inputs on the primary device, which is ::mr_config::gpu_device_id or the
- * current device when that is -1. On return the current device is the same
- * as on entry.
- *
- * @param[in]  cfg       Validated configuration (as for ::mr_calc_toep and
- *                       ::mr_aha_plan_create).
- * @param[in]  devices   CUDA ordinals to use, or NULL for every visible
- *                       device. Duplicates are ignored.
- * @param[in]  n_devices Length of @p devices (0 with NULL), at most
- *                       ::MR_MGPU_MAX_DEVICES.
- * @param[in]  d_SEs     Sensitivity maps, see ::mr_aha_plan_execute.
- * @param[in]  d_phi2    Gram blocks, see ::mr_calc_toep.
- * @param[in]  d_traj    Trajectory, see ::mr_calc_toep.
- * @param[in]  Ntrajs    Number of trajectories.
- * @param[in]  Nkx       Samples per trajectory.
- * @param[in]  d_mask    Mask (masked mode) or NULL.
- * @param[in]  flags     0 or ::MR_MGPU_SHARE_PRIMARY.
- * @param[out] plan_out  Receives the plan; NULL on failure.
- * @return ::MR_SUCCESS or a negative ::mr_status. Errors on another device
- *         name its ordinal in ::mr_last_error.
- */
-MR_EXPORT int mr_mgpu_plan_create_gram(const mr_config  *cfg,
-                                       const int        *devices,
-                                       int               n_devices,
-                                       const mr_complex *d_SEs,
-                                       const mr_complex *d_phi2,
-                                       const float      *d_traj,
-                                       int64_t           Ntrajs,
-                                       int64_t           Nkx,
-                                       const int64_t    *d_mask,
-                                       int               flags,
-                                       mr_mgpu_plan     *plan_out);
-
-/**
- * @brief The copy of `phi2_toep` a multi-GPU plan holds on one of its devices.
- *
- * For a plan from ::mr_mgpu_plan_create_gram this is how the caller reaches
- * the kernel the plan computed (e.g. to save it, or to build a single-GPU plan
- * on the primary device). The memory belongs to the plan: it is valid, and
- * must not be modified, until ::mr_mgpu_plan_destroy.
- *
- * @param[in]  plan        Plan.
- * @param[in]  k           Device index, `0 <= k < ` ::mr_mgpu_info::n_devices
- *                         (0 is the primary device; the ordinal is
- *                         ::mr_mgpu_info::devices[k]).
- * @param[out] d_phi2_toep Receives the device pointer (::mr_phi2_toep_size
- *                         elements on that device).
+ * @brief Fill @p opt with the defaults: ::MR_OP_TOEPLITZ, the primary device
+ *        only, ::MR_TOEP_DIST_AUTO, ::MR_OP_SHARE_PRIMARY, cufinufft's NUFFT
+ *        defaults with an upsampling factor of 2.
+ * @param[out] opt Options to initialise. Must be non-NULL.
  * @return ::MR_SUCCESS or ::MR_ERR_INVALID_ARG.
  */
-MR_EXPORT int mr_mgpu_plan_kernel(mr_mgpu_plan plan, int k,
-                                  const mr_complex **d_phi2_toep);
+MR_EXPORT int mr_op_options_defaults(mr_op_options *opt);
 
 /**
- * @brief Apply @f$A^H A@f$ with a multi-GPU plan.
+ * @brief Create an @f$A^H A@f$ operator from the Gram blocks.
+ *
+ * Validates @p cfg, selects the devices (see @ref mr_op_devices) and builds,
+ * on every device used, the constants and the per-device engine:
+ *
+ * - ::MR_OP_TOEPLITZ: the kernel `phi2_toep` (computed with ::mr_calc_toep,
+ *   distributed per ::mr_op_options::toep_dist, or the supplied
+ *   ::mr_op_inputs::d_phi2_toep), the device's maps and mask, and a
+ *   ::mr_aha_plan for its coils (coil groups, cuFFT plans, specialised
+ *   block-diagonal kernels). Memory per device: the kernel
+ *   (::mr_phi2_toep_size values) plus the plan's buffers, sized within
+ *   ::mr_config::mem_fraction; while it is computed, also the transients of
+ *   ::mr_calc_toep.
+ * - ::MR_OP_NUFFT: one type-2 (sign -1) and one type-1 (sign +1) cufinufft
+ *   plan with ::mr_config::eps, centred modes `n_dim` and `L` transforms
+ *   (`L*Nz` for ::MR_TRAJ_STACK, with a cuFFT along z), the points set once,
+ *   the Gram blocks reordered for a batched GEMM (cuBLAS), and buffers of
+ *   one coil: the image (`Nx*Ny*Nz*L` values) and twice the samples
+ *   (`Ntrajs*Nkx*L*Nkz` values). Masked configurations are rejected
+ *   (::MR_ERR_INVALID_ARG): the NUFFT route has no kernel to mask.
+ *
+ * The call is synchronous: it waits for ::mr_config::stream first (inputs
+ * produced there are complete) and returns once the operator is ready. On
+ * return the current device is the same as on entry.
+ *
+ * @param[in]  cfg    Validated configuration; copied. ::mr_config::stream
+ *                    (on the primary device) is the stream ::mr_op_execute
+ *                    is ordered on. ::mr_config::n_coils maps are used.
+ * @param[in]  in     Input arrays, see ::mr_op_inputs.
+ * @param[in]  opt    Options, or NULL for ::mr_op_options_defaults.
+ * @param[out] op_out Receives the operator; NULL on failure.
+ * @return ::MR_SUCCESS or a negative ::mr_status. A failure on another device
+ *         names its ordinal in ::mr_last_error.
+ */
+MR_EXPORT int mr_op_create(const mr_config     *cfg,
+                           const mr_op_inputs  *in,
+                           const mr_op_options *opt,
+                           mr_op               *op_out);
+
+/**
+ * @brief Apply the operator: @p d_AhAx @f$= A^H A@f$ @p d_x.
  *
  * Asynchronous with respect to the host, like ::mr_aha_plan_execute: the work
- * is ordered after everything previously issued on ::mr_config::stream (of the
- * primary device) and the result is complete once that stream reaches the
- * point of return.
+ * is ordered after everything previously issued on ::mr_config::stream (of
+ * the primary device) and the result is complete once that stream reaches the
+ * point of return. On several devices, @p d_x is copied to every other
+ * device, each applies its coils, and the partial results are summed into
+ * @p d_AhAx on the primary device.
  *
- * @param[in]  plan   Plan from ::mr_mgpu_plan_create.
- * @param[in]  d_x    Spatial coefficients on the primary device.
- * @param[out] d_AhAx Output on the primary device, same size as @p d_x; must
- *                    not alias it.
+ * @param[in]  op     Operator from ::mr_op_create.
+ * @param[in]  d_x    Spatial coefficients on the primary device,
+ *                    `[Nx, Ny, L]` (2D) or `[Nx, Ny, Nz, L]` (3D/stack).
+ * @param[out] d_AhAx Output on the primary device, same size as @p d_x;
+ *                    fully overwritten. Must not alias @p d_x.
  * @return ::MR_SUCCESS or a negative ::mr_status.
  */
-MR_EXPORT int mr_mgpu_plan_execute(mr_mgpu_plan      plan,
-                                   const mr_complex *d_x,
-                                   mr_complex       *d_AhAx);
+MR_EXPORT int mr_op_execute(mr_op op, const mr_complex *d_x, mr_complex *d_AhAx);
 
 /**
- * @brief Describe how a multi-GPU plan distributes the work.
- * @param[in]  plan Plan from ::mr_mgpu_plan_create.
+ * @brief Describe how an operator was built and distributes the work.
+ * @param[in]  op   Operator.
  * @param[out] info Receives the description.
  * @return ::MR_SUCCESS or ::MR_ERR_INVALID_ARG.
  */
-MR_EXPORT int mr_mgpu_plan_info(mr_mgpu_plan plan, mr_mgpu_info *info);
+MR_EXPORT int mr_op_info(mr_op op, mr_op_info_t *info);
 
 /**
- * @brief Release a multi-GPU plan and everything it allocated on every device.
- * @param[in] plan Plan from ::mr_mgpu_plan_create, or NULL (no-op).
- * @return ::MR_SUCCESS or a negative ::mr_status.
+ * @brief The copy of `phi2_toep` a Toeplitz operator holds on one of its
+ *        devices.
+ *
+ * This is how a caller reaches the kernel the operator computed (e.g. to
+ * save it). The memory belongs to the operator (or is the caller's supplied
+ * kernel shared on the primary): it stays valid, and must not be modified,
+ * until ::mr_op_destroy.
+ *
+ * @param[in]  op          Operator.
+ * @param[in]  k           Device index, `0 <= k < ` ::mr_op_info_t::n_devices
+ *                         (0 is the primary; the ordinal is
+ *                         ::mr_op_info_t::devices[k]).
+ * @param[out] d_phi2_toep Receives the pointer (::mr_phi2_toep_size elements
+ *                         on that device).
+ * @return ::MR_SUCCESS, ::MR_ERR_INVALID_ARG, or ::MR_ERR_UNSUPPORTED for an
+ *         ::MR_OP_NUFFT operator (which has no kernel).
  */
-MR_EXPORT int mr_mgpu_plan_destroy(mr_mgpu_plan plan);
+MR_EXPORT int mr_op_kernel(mr_op op, int k, const mr_complex **d_phi2_toep);
 
 /**
- * @brief Release a multi-GPU plan whose primary device was reset.
+ * @brief Release an operator and everything it allocated on every device.
  *
- * After `cudaDeviceReset` on the primary device (e.g. MATLAB's
- * `reset(gpuDevice)`), the plan's streams, events and buffers there no longer
- * exist and ::mr_mgpu_plan_destroy would use dead handles. This variant frees
- * everything the plan holds on the *other* devices and skips the primary
- * device, whose resources the reset has already released.
+ * Waits for work still in flight on the operator's streams (and on
+ * ::mr_config::stream) first.
  *
- * @param[in] plan Plan from ::mr_mgpu_plan_create, or NULL (no-op).
+ * @param[in] op Operator, or NULL (no-op).
  * @return ::MR_SUCCESS.
  */
-MR_EXPORT int mr_mgpu_plan_abandon(mr_mgpu_plan plan);
+MR_EXPORT int mr_op_destroy(mr_op op);
+
+/**
+ * @brief Release an operator whose primary device was reset.
+ *
+ * After `cudaDeviceReset` on the primary device (e.g. MATLAB's
+ * `reset(gpuDevice)`), the operator's streams, events, plans and buffers there
+ * no longer exist and ::mr_op_destroy would use dead handles. This variant
+ * frees everything the operator holds on the *other* devices and skips the
+ * primary, whose resources the reset has already released. Devices whose
+ * context was re-created since (detected through the context ID) are skipped
+ * as well by both functions.
+ *
+ * @param[in] op Operator, or NULL (no-op).
+ * @return ::MR_SUCCESS.
+ */
+MR_EXPORT int mr_op_abandon(mr_op op);
+
+/** @} */
 
 /* ------------------------------------------------------------------------ */
 /* Toeplitz kernel pre-computation                                          */
@@ -877,61 +995,6 @@ MR_EXPORT int mr_calc_toep(const mr_config  *cfg,
                            int64_t           Nkx,
                            const int64_t    *d_mask,
                            mr_complex       *d_phi2_toep);
-
-/**
- * @brief ::mr_calc_toep on several GPUs of one node; the result on one GPU
- *        (CUDA backend only).
- *
- * The @f$(L^2+L)/2@f$ triangular components of `phi2_toep` are independent
- * (one type-1 NUFFT, inverse FFT and scaling each) and each fills a
- * contiguous slab of the output. The components are split into contiguous,
- * nearly equal ranges, one per device; the *primary* device computes the
- * first range straight into @p d_phi2_toep, every other (*helper*) device
- * computes its range into a buffer of that range only and copies each
- * finished chunk into @p d_phi2_toep on the primary, overlapped with the
- * next chunk. Set-up time drops from @f$T_\mathrm{calc}@f$ to about
- * @f$T_\mathrm{calc}/G + (G-1)/G \cdot K / B@f$ (@f$K@f$ kernel bytes,
- * @f$B@f$ receive bandwidth of the primary); measured on four PCIe L40S:
- * 2.0 s to 1.4 s for 2D L = 72, 7.9 s to 3.5 s for a 160^3 kooshball with
- * L = 12 (`docs/PERFORMANCE.md`, section 3.4).
- *
- * The result equals ::mr_calc_toep's up to cufinufft's run-to-run noise
- * (~1e-7, atomic spreading). When the cost model (see
- * ::mr_mgpu_plan_create_gram) predicts that the transfers would cost more than
- * they save, the primary computes the remaining components alone.
- * `MR_AHA_TOEP_SPLIT` overrides the choice (`split` forces the split; `off`
- * and `replicate` use the primary only).
- *
- * Memory: the primary needs the whole output plus the transient buffers of
- * ::mr_calc_toep; a helper only its range plus the transients. Every input
- * and the output live on the primary device, which is
- * ::mr_config::gpu_device_id or the current device when that is -1. The call
- * is synchronous and restores the current device.
- *
- * @param[in]  cfg         Validated configuration, see ::mr_calc_toep.
- * @param[in]  devices     CUDA ordinals to use, or NULL for every visible
- *                         device. The primary always takes part; duplicates
- *                         are ignored.
- * @param[in]  n_devices   Length of @p devices (0 with NULL), at most
- *                         ::MR_MGPU_MAX_DEVICES.
- * @param[in]  d_phi2      Gram blocks, see ::mr_calc_toep.
- * @param[in]  d_traj      Trajectory, see ::mr_calc_toep.
- * @param[in]  Ntrajs      Number of trajectories.
- * @param[in]  Nkx         Samples per trajectory.
- * @param[in]  d_mask      Mask, or NULL when not masked.
- * @param[out] d_phi2_toep Output, see ::mr_calc_toep.
- * @return ::MR_SUCCESS or a negative ::mr_status. Errors on a helper name its
- *         ordinal in ::mr_last_error.
- */
-MR_EXPORT int mr_calc_toep_mgpu(const mr_config  *cfg,
-                                const int        *devices,
-                                int               n_devices,
-                                const mr_complex *d_phi2,
-                                const float      *d_traj,
-                                int64_t           Ntrajs,
-                                int64_t           Nkx,
-                                const int64_t    *d_mask,
-                                mr_complex       *d_phi2_toep);
 
 /**
  * @brief Finish `phi2_toep` from externally computed point-spread functions.

@@ -29,6 +29,13 @@ piece by piece while it is being ported:
     The NUFFT reference operator :class:`mr_aha.AhANufftPlan` (cufinufft on
     CUDA, mlx-nufft on Metal) on the stored inputs, compared to the stored
     cufinufft ``AhAx_nufft``.
+``op``
+    The operator object :func:`mr_aha.create_op` on the stored inputs, with
+    both methods: ``method='toeplitz'`` (the kernel computed by the operator,
+    every triangulation and mask) against the stored ``AhAx_*``, and
+    ``method='nufft'`` against the stored ``AhAx_nufft`` (the reference made
+    by the independent :class:`mr_aha.AhANufftPlan`) and against the
+    Toeplitz ``AhAx_lower``, which agree to the NUFFT tolerance.
 
 Usage (from the repository root)::
 
@@ -54,7 +61,7 @@ import mr_aha  # noqa: E402
 
 TRIS = ("lower", "upper")
 MASKS = ("neighbour", "threshold")
-STAGES = ("aha", "toep", "mask", "nufft")
+STAGES = ("aha", "toep", "mask", "nufft", "op")
 
 
 def rel(a: np.ndarray, b: np.ndarray) -> float:
@@ -214,6 +221,35 @@ def check_nufft(z, bk: Backend, c: dict, tol: float) -> list:
     return [("AhAx_nufft", rel(out, z["AhAx_nufft"]), tol)]
 
 
+def check_op(z, bk: Backend, c: dict, tol: float, tol_methods: float) -> list:
+    """Stage ``op``: :func:`mr_aha.create_op` with both methods.
+
+    Toeplitz: the operator computes its own kernel from ``phi2`` and ``traj``
+    (for every triangulation and stored mask) and is compared with the stored
+    ``AhAx_*``. NUFFT: compared with the stored ``AhAx_nufft`` at ``tol`` and
+    with the Toeplitz ``AhAx_lower`` at ``tol_methods``.
+    """
+    rows = []
+    x, SEs = bk.put(z["x"]), bk.put(z["SEs"])
+    phi2, traj = bk.put(z["phi2"]), bk.put(z["traj"])
+    for suf, tri, m in variants():
+        mask = None
+        if m is None:
+            cfg = make_cfg(c, triangulation=tri)
+        else:
+            cfg = make_cfg(c, triangulation=tri, is_masked=True)
+            mask = bk.put(z[f"mask_{m}"])
+        with mr_aha.create_op(cfg, SEs, phi2, traj, mask) as op:
+            rows.append((f"op toeplitz AhAx_{suf}", rel(bk.get(op(x)), z[f"AhAx_{suf}"]),
+                         tol))
+    with mr_aha.create_op(make_cfg(c), SEs, phi2, traj, method="nufft") as op:
+        out = bk.get(op(x))
+    if "AhAx_nufft" in z.files:
+        rows.append(("op nufft AhAx_nufft", rel(out, z["AhAx_nufft"]), tol))
+    rows.append(("op nufft vs AhAx_lower", rel(out, z["AhAx_lower"]), tol_methods))
+    return rows
+
+
 def main() -> int:
     """Run the requested stages on the requested reference files."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -261,6 +297,8 @@ def main() -> int:
                                args.nufft)
         if "nufft" in args.stages:
             rows += check_nufft(z, bk, c, args.tol_aha)
+        if "op" in args.stages:
+            rows += check_op(z, bk, c, args.tol_aha, 1e-4)
         bad = [r for r in rows if not r[1] <= r[2]]
         failed += len(bad)
         worst = max(rows, key=lambda r: r[1] / r[2] if r[2] else r[1])

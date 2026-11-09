@@ -57,17 +57,23 @@ swapped.
 from __future__ import annotations
 
 import ctypes
+import numbers
 from typing import Optional, Sequence
 
 from ._lib import (
     DEFAULT_MASK_RADIUS,
     DEFAULT_MASK_THRESHOLD,
-    MGPU_SHARE_PRIMARY,
-    MGPU_TOEP_SOURCES,
+    OP_ALL_DEVICES,
+    OP_SHARE_PRIMARY,
+    OP_TOEP_SOURCES,
     MaskMethod,
     MRConfig,
     MRError,
-    MRMgpuInfo,
+    MROpInfo,
+    MROpInputs,
+    MROpOptions,
+    OpMethod,
+    ToepDist,
     TrajType,
     Triangulation,
     backend,
@@ -91,8 +97,8 @@ __all__ = [
     "calc_mask",
     "calc_toep",
     "aha_toeplitz",
-    "AhAPlan",
-    "MultiGPUPlan",
+    "AhAOp",
+    "create_op",
 ]
 
 
@@ -485,9 +491,8 @@ def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
         cfg  = mr_aha.make_config('3D', (160,) * 3, L=12, n_coils=12,
                                   is_masked=True)
         mask = mr_aha.calc_mask(cfg, traj)
-        Om   = mr_aha.calc_toep(cfg, phi2, traj, mask=mask)  # sets num_masked
-        with mr_aha.AhAPlan(cfg) as plan:
-            y = plan.apply(x, SEs, Om, mask=mask)
+        with mr_aha.create_op(cfg, SEs, phi2, traj, mask) as op:  # sets num_masked
+            y = op(x)
 
     Args:
         cfg: Configuration from :func:`make_config`. Not modified.
@@ -596,25 +601,8 @@ def _check_gram(cfg: MRConfig, phi2, traj, mask):
     return Ntrajs, Nkx
 
 
-def _device_array(devices):
-    """Convert a device list to the ``(int*, n)`` pair of the C API.
-
-    Args:
-        devices: Sequence of CUDA ordinals, or ``None`` for every visible
-            device.
-
-    Returns:
-        ``(ctypes array or None, length)``.
-    """
-    if devices is None:
-        return None, 0
-    devices = [int(d) for d in devices]
-    return (ctypes.c_int * max(len(devices), 1))(*devices), len(devices)
-
-
 def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
-              nufft: Optional[str] = None,
-              devices: Optional[Sequence[int]] = None):
+              nufft: Optional[str] = None):
     """Pre-compute the block-diagonal Toeplitz operator ``phi2_toep``.
 
     Args:
@@ -641,17 +629,6 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
             then the C library finishes; see :mod:`mr_aha._psf`).
             ``'finufft'`` uses CPU FINUFFT for the same two-stage path, for
             validation.
-        devices: CUDA backend only. CUDA ordinals of further GPUs that help
-            compute the kernel (``mr_calc_toep_mgpu``): the
-            ``(L^2+L)/2`` independent triangular components are split over
-            the current device and these, each helper copies its finished
-            components into ``out`` on the current device, overlapped with
-            its computation. The result equals the single-GPU one up to
-            cufinufft's run-to-run noise (~1e-7). ``None`` (default) computes
-            on the current device only. The environment variable
-            ``MR_AHA_TOEP_SPLIT`` (``auto`` default, ``split``, ``off``)
-            overrides the library's choice of whether splitting pays off.
-
     Returns:
         The ``complex64`` array ``phi2_toep`` (CuPy on CUDA, NumPy on Metal),
         shaped as described by :func:`phi2_toep_shape`.
@@ -672,27 +649,6 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
 
     if nufft is None:
         nufft = "library" if backend() == "cuda" else "mlx"
-    if devices is not None:
-        if not hasattr(lib, "mr_calc_toep_mgpu"):
-            raise RuntimeError("calc_toep(devices=...) requires the CUDA backend")
-        if nufft != "library":
-            raise ValueError("calc_toep(devices=...) requires nufft='library'")
-        devs, n = _device_array(devices)
-        check(
-            lib.mr_calc_toep_mgpu(
-                ctypes.byref(cfg),
-                devs,
-                n,
-                _ptr(phi2, "phi2", "complex64"),
-                _ptr(traj, "traj", "float32"),
-                ctypes.c_int64(int(Ntrajs)),
-                ctypes.c_int64(int(Nkx)),
-                _ptr(mask, "mask", "int64", allow_none=True),
-                _ptr(out, "out", "complex64"),
-            ),
-            "mr_calc_toep_mgpu",
-        )
-        return out
     if nufft != "library":
         # Validate the pointers' types up front, then run the two stages.
         _ptr(phi2, "phi2", "complex64")
@@ -716,333 +672,378 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
     return out
 
 
-class AhAPlan:
-    """Reusable :math:`A^H A` operator.
-
-    Creating a plan allocates the padded working buffers and the cuFFT plan
-    once, so an iterative reconstruction can apply the operator many times
-    without re-planning. Use it as a context manager, or call :meth:`close`.
-
-    Args:
-        cfg: Configuration from :func:`make_config`.
-
-    Raises:
-        MRError: If the plan cannot be created.
-    """
-
-    def __init__(self, cfg: MRConfig):
-        self._cfg = cfg
-        self._handle = ctypes.c_void_p()
-        check(
-            lib.mr_aha_plan_create(ctypes.byref(cfg), ctypes.byref(self._handle)),
-            "mr_aha_plan_create",
-        )
-
-    @property
-    def config(self) -> MRConfig:
-        """The configuration this plan was built from."""
-        return self._cfg
-
-    def apply(self, x, SEs, phi2_toep, mask=None, out=None):
-        """Apply :math:`A^H A` to a set of spatial coefficients.
-
-        Args:
-            x: ``complex64`` CuPy array shaped ``(L, Ny, Nx)`` (2D) or
-                ``(L, Nz, Ny, Nx)`` (3D/stack).
-            SEs: ``complex64`` CuPy array of sensitivity maps shaped
-                ``(Ncoils, Nz, Ny, Nx)``, or ``(Ncoils, Ny, Nx)`` in 2D. One
-                map per coil, shared by every rank.
-            phi2_toep: ``complex64`` CuPy array from :func:`calc_toep`.
-            mask: ``int64`` CuPy array of 0-based linear indices; required when
-                ``cfg.is_masked``.
-            out: Optional pre-allocated ``complex64`` output shaped like ``x``.
-
-        Returns:
-            The ``complex64`` CuPy array ``AhAx``, shaped like ``x``.
-
-        Raises:
-            RuntimeError: If the plan has already been closed.
-            ValueError: If an array has the wrong size or a mask is missing.
-            MRError: If the library reports a failure.
-        """
-        if not self._handle:
-            raise RuntimeError("this AhAPlan has already been closed")
-        xp = _xp()
-        cfg = self._cfg
-
-        _check_size(x, int(lib.mr_x_size(ctypes.byref(cfg))), "x")
-        _check_size(SEs, int(lib.mr_se_size(ctypes.byref(cfg))), "SEs")
-        _check_size(
-            phi2_toep, int(lib.mr_phi2_toep_size(ctypes.byref(cfg))), "phi2_toep"
-        )
-        if cfg.is_masked and mask is None:
-            raise ValueError("cfg.is_masked is set, so a mask is required")
-
-        if out is None:
-            out = xp.empty(x.shape, dtype=xp.complex64)
-        else:
-            _check_size(out, x.size, "out")
-
-        check(
-            lib.mr_aha_plan_execute(
-                self._handle,
-                _ptr(x, "x", "complex64"),
-                _ptr(SEs, "SEs", "complex64"),
-                _ptr(phi2_toep, "phi2_toep", "complex64"),
-                _ptr(mask, "mask", "int64", allow_none=True),
-                _ptr(out, "out", "complex64"),
-            ),
-            "mr_aha_plan_execute",
-        )
-        return out
-
-    def close(self) -> None:
-        """Release the plan's cuFFT plan and device buffers. Idempotent."""
-        if self._handle:
-            lib.mr_aha_plan_destroy(self._handle)
-            self._handle = ctypes.c_void_p()
-
-    def __enter__(self) -> "AhAPlan":
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:  # pragma: no cover - interpreter shutdown
-            pass
-
-
 def aha_toeplitz(cfg: MRConfig, x, SEs, phi2_toep, mask=None, out=None):
-    """One-shot :math:`A^H A` application.
+    """One-shot, stateless Toeplitz :math:`A^H A` (``mr_aha_toeplitz``).
 
-    Convenience wrapper that creates an :class:`AhAPlan`, applies it once and
-    destroys it. Prefer the plan inside an iterative loop.
+    The low-level primitive: applies a finished kernel once, on the current
+    device, creating and destroying the working buffers on every call. Use
+    :func:`create_op` for anything applied more than once (it builds the
+    kernel from the Gram blocks, keeps every buffer and can use several GPUs).
 
     Args:
         cfg: Configuration from :func:`make_config`.
-        x: See :meth:`AhAPlan.apply`.
-        SEs: See :meth:`AhAPlan.apply`.
-        phi2_toep: See :meth:`AhAPlan.apply`.
-        mask: See :meth:`AhAPlan.apply`.
-        out: See :meth:`AhAPlan.apply`.
+        x: ``complex64`` array shaped ``(L, Ny, Nx)`` (2D) or
+            ``(L, Nz, Ny, Nx)`` (3D/stack).
+        SEs: ``complex64`` sensitivity maps shaped ``(Ncoils, Nz, Ny, Nx)``,
+            or ``(Ncoils, Ny, Nx)`` in 2D. One map per coil, shared by every
+            rank.
+        phi2_toep: ``complex64`` kernel from :func:`calc_toep`.
+        mask: ``int64`` 0-based linear indices; required when
+            ``cfg.is_masked``.
+        out: Optional pre-allocated ``complex64`` output shaped like ``x``.
 
     Returns:
-        The ``complex64`` CuPy array ``AhAx``, shaped like ``x``.
-    """
-    with AhAPlan(cfg) as plan:
-        return plan.apply(x, SEs, phi2_toep, mask=mask, out=out)
-
-
-class MultiGPUPlan:
-    """:math:`A^H A` on several GPUs of one node (CUDA backend).
-
-    The operator is a sum over coils; the plan gives each GPU a share of the
-    coils and sums the partial results on the current (primary) device.
-    ``phi2_toep`` and the mask are copied to every GPU once, here, together
-    with each GPU's own sensitivity maps, so :meth:`apply` only takes ``x``.
-    Multi-GPU makes the operator faster but does not raise the largest problem
-    size: the whole kernel must fit on every GPU.
-
-    The library chooses how many of the given GPUs to use: with ``C`` coils
-    and ``G`` GPUs, the smallest number with the same ``ceil(C / G)`` coils
-    per GPU (e.g. 12 coils on 5 GPUs use 4), and only the primary device for
-    problems too small to benefit (see ``mr_mgpu_plan_create`` in
-    ``mr_aha.h``). :attr:`info` reports the choice.
-
-    Inputs and outputs live on the current CuPy device, which becomes the
-    primary device; it always takes part.
-
-    :meth:`from_gram` builds the same plan from the Gram blocks instead of a
-    finished kernel: every GPU computes a share of ``phi2_toep`` and the
-    shares are exchanged, which is several times faster than
-    :func:`calc_toep` on one GPU followed by copying its result to every
-    other GPU.
-
-    Args:
-        cfg: Configuration from :func:`make_config`.
-        SEs: ``complex64`` CuPy sensitivity maps, see :meth:`AhAPlan.apply`.
-        phi2_toep: ``complex64`` CuPy kernel from :func:`calc_toep`.
-        mask: ``int64`` CuPy mask; required when ``cfg.is_masked``.
-        devices: CUDA device ordinals to use, or ``None`` for every visible
-            device.
-        share_primary: Use ``SEs``, ``phi2_toep`` and ``mask`` in place on the
-            primary device instead of copying them (saves one copy of the
-            kernel there). The plan then keeps references to these arrays,
-            which must not be modified while it is open.
+        The ``complex64`` array ``AhAx`` (CuPy on CUDA, NumPy on Metal),
+        shaped like ``x``.
 
     Raises:
-        RuntimeError: On the Metal backend.
         ValueError: If an array has the wrong size or a mask is missing.
-        MRError: If the plan cannot be created.
+        MRError: If the library reports a failure.
+    """
+    xp = _xp()
+    _check_size(x, int(lib.mr_x_size(ctypes.byref(cfg))), "x")
+    _check_size(SEs, int(lib.mr_se_size(ctypes.byref(cfg))), "SEs")
+    _check_size(phi2_toep, int(lib.mr_phi2_toep_size(ctypes.byref(cfg))),
+                "phi2_toep")
+    if cfg.is_masked and mask is None:
+        raise ValueError("cfg.is_masked is set, so a mask is required")
+    if out is None:
+        out = xp.empty(x.shape, dtype=xp.complex64)
+    else:
+        _check_size(out, x.size, "out")
+    check(
+        lib.mr_aha_toeplitz(
+            ctypes.byref(cfg),
+            _ptr(x, "x", "complex64"),
+            _ptr(SEs, "SEs", "complex64"),
+            _ptr(phi2_toep, "phi2_toep", "complex64"),
+            _ptr(mask, "mask", "int64", allow_none=True),
+            _ptr(out, "out", "complex64"),
+        ),
+        "mr_aha_toeplitz",
+    )
+    return out
 
-    Example:
-        >>> with mr_aha.MultiGPUPlan(cfg, SEs, Om, devices=[0, 1, 2, 3]) as op:
-        ...     y = op.apply(x)                          # doctest: +SKIP
+
+def _devices_arg(devices):
+    """Convert the ``devices`` argument of :func:`create_op` for the C API.
+
+    Args:
+        devices: ``None`` (the current device only), ``'all'`` (every visible
+            device), an ``int`` ordinal or a sequence of ordinals.
+
+    Returns:
+        ``(ctypes int array or None, n_devices)`` for ``mr_op_options``.
+
+    Raises:
+        ValueError: If ``devices`` is a string other than ``'all'``.
+    """
+    if devices is None:
+        return None, 0
+    if isinstance(devices, str):
+        if devices.lower() != "all":
+            raise ValueError(f"devices must be None, 'all', an int or a list; "
+                             f"got {devices!r}")
+        return None, OP_ALL_DEVICES
+    if isinstance(devices, numbers.Integral):  # also NumPy integer scalars
+        devices = [devices]
+    devices = [int(d) for d in devices]
+    if not devices:
+        return None, 0
+    return (ctypes.c_int * len(devices))(*devices), len(devices)
+
+
+#: Options accepted in ``nufft_opts`` of :func:`create_op`.
+_NUFFT_OPTS = ("upsampfac", "gpu_method")
+
+
+class AhAOp:
+    """The :math:`A^H A` operator: one object, built from the Gram blocks.
+
+    Create it with :meth:`create_op` (or the module-level :func:`create_op`),
+    then call :meth:`apply` (or the object itself) as often as needed:
+
+    >>> with mr_aha.create_op(cfg, SEs, phi2, traj) as op:   # doctest: +SKIP
+    ...     y = op(x)
+
+    The operator holds everything it needs: the sensitivity maps and either
+    the Toeplitz kernel (``method='toeplitz'``, computed at creation) or the
+    NUFFT plans and Gram blocks (``method='nufft'``). Whether it runs on one
+    GPU or several is decided at creation (``devices``); on several GPUs the
+    coils are split over the GPUs and the partial results summed on the
+    current (primary) device. Inputs and outputs live on the primary device.
+
+    Use it as a context manager, or call :meth:`close`, to release the GPU
+    memory promptly.
     """
 
-    def __init__(self, cfg: MRConfig, SEs, phi2_toep, mask=None,
-                 devices: Optional[Sequence[int]] = None,
-                 share_primary: bool = False):
-        if not hasattr(lib, "mr_mgpu_plan_create"):
-            raise RuntimeError("MultiGPUPlan requires the CUDA backend")
-        self._handle = ctypes.c_void_p()
-        self._cfg = cfg
-        self._keep = ()
-        _check_size(SEs, int(lib.mr_se_size(ctypes.byref(cfg))), "SEs")
-        _check_size(
-            phi2_toep, int(lib.mr_phi2_toep_size(ctypes.byref(cfg))), "phi2_toep"
-        )
-        if cfg.is_masked and mask is None:
-            raise ValueError("cfg.is_masked is set, so a mask is required")
-        # Arrays used in place must outlive the plan.
-        self._keep = (SEs, phi2_toep, mask) if share_primary else ()
-        devs, n = _device_array(devices)
-        check(
-            lib.mr_mgpu_plan_create(
-                ctypes.byref(cfg),
-                devs,
-                n,
-                _ptr(SEs, "SEs", "complex64"),
-                _ptr(phi2_toep, "phi2_toep", "complex64"),
-                _ptr(mask, "mask", "int64", allow_none=True),
-                MGPU_SHARE_PRIMARY if share_primary else 0,
-                ctypes.byref(self._handle),
-            ),
-            "mr_mgpu_plan_create",
+    def __init__(self, *args, **kwargs):
+        raise TypeError(
+            "AhAOp is created with mr_aha.create_op(cfg, SEs, phi2, traj, ...) "
+            "(or AhAOp.create_op), not by calling the class"
         )
 
     @classmethod
-    def from_gram(cls, cfg: MRConfig, SEs, phi2, traj, mask=None,
-                  devices: Optional[Sequence[int]] = None,
-                  share_primary: bool = False) -> "MultiGPUPlan":
-        """Build the plan from the Gram blocks, computing ``phi2_toep`` on
-        every GPU at once (``mr_mgpu_plan_create_gram``).
-
-        Equivalent to ``MultiGPUPlan(cfg, SEs, calc_toep(cfg, phi2, traj,
-        mask), mask, devices)`` but faster: every GPU computes a contiguous
-        share of the ``(L^2+L)/2`` independent triangular components directly
-        into its own copy of the kernel, and the GPUs then exchange their
-        shares (overlapped with the computation), instead of one GPU computing
-        everything and copying it to all others. Every component is computed
-        once, so the copies on all GPUs are identical. When the GPUs cannot
-        exchange data fast enough (no peer access), each computes the whole
-        kernel itself. ``MR_AHA_TOEP_SPLIT=off|split|replicate|auto``
-        overrides the choice; :attr:`info` reports it (``toep_source``).
+    def create_op(cls, cfg: MRConfig, SEs, phi2, traj, mask=None, *,
+                  method: str = "toeplitz", devices=None,
+                  toep_dist: str = "auto", share_primary: bool = True,
+                  nufft_opts: Optional[dict] = None,
+                  _phi2_toep=None) -> "AhAOp":
+        """Create the :math:`A^H A` operator (``mr_op_create``).
 
         Args:
-            cfg: Configuration from :func:`make_config`.
-            SEs: Sensitivity maps, see :meth:`AhAPlan.apply`.
-            phi2: Gram blocks, see :func:`calc_toep`.
-            traj: Trajectory, see :func:`calc_toep`.
-            mask: Mask, see :func:`calc_toep`; required when ``cfg.is_masked``.
-            devices: CUDA device ordinals to use, or ``None`` for every
-                visible device.
+            cfg: Configuration from :func:`make_config`. ``n_coils`` maps are
+                used; ``cfg.stream`` is the stream :meth:`apply` is ordered
+                on. ``cfg.num_masked`` is filled in from ``mask`` when 0.
+            SEs: ``complex64`` sensitivity maps ``(Ncoils, Nz, Ny, Nx)``, or
+                ``(Ncoils, Ny, Nx)`` in 2D; one map per coil, shared by every
+                rank.
+            phi2: ``complex64`` Gram blocks :math:`\\Phi_2 = \\Phi\\Phi^H`
+                (rank x time :math:`\\Phi`), ``(L, L, Ntrajs)`` or, for a
+                stack, ``(L, L, Nkz, Ntrajs)``; see :func:`calc_toep`.
+            traj: ``float32`` trajectory ``(ndim, Nkx, Ntrajs)`` in radians;
+                see :func:`calc_toep`.
+            mask: ``int64`` mask from :func:`calc_mask`; required when
+                ``cfg.is_masked`` (Toeplitz method only).
+            method: ``'toeplitz'`` (default): the kernel ``phi2_toep`` is
+                computed here and every application is FFT + block-diagonal
+                multiplication. ``'nufft'``: every application runs, per coil,
+                a type-2 NUFFT, the Gram multiplication on the samples and a
+                type-1 NUFFT (cufinufft); no kernel, so far less memory but
+                more time per application. Both evaluate the same operator
+                (to within the NUFFT tolerance ``cfg.eps``). ``'nufft'``
+                rejects masked configurations.
+            devices: ``None`` (default): the current device only. ``'all'``:
+                every visible GPU. An ``int`` or a list of CUDA ordinals: those
+                GPUs (the current device always takes part). The library may
+                use fewer: with ``C`` coils on ``G`` GPUs, the smallest number
+                with the same ``ceil(C/G)`` coils per GPU, and one GPU for
+                problems too small to gain; :attr:`info` reports the choice.
+                On Metal only ``None``, ``0``, ``[0]`` and ``'all'`` (the one
+                GPU) are accepted.
+            toep_dist: Toeplitz on several GPUs: how every GPU gets its copy
+                of the kernel. ``'auto'`` (default) chooses between
+                ``'split'`` (every GPU computes a share, the shares are
+                exchanged) and ``'replicate'`` (every GPU computes the whole
+                kernel, no transfers) with a cost model; ``'broadcast'``: the
+                primary computes it and copies it to the others. The
+                environment variable ``MR_AHA_TOEP_SPLIT`` overrides it.
             share_primary: Use ``SEs`` and ``mask`` in place on the primary
-                device instead of copying them. (The kernel always belongs
-                to the plan, see :meth:`kernel`.)
+                device instead of copying them (default; saves a copy of the
+                maps). The operator then keeps references to these arrays,
+                which must not be modified in place while it is open.
+            nufft_opts: ``method='nufft'`` only: ``{'upsampfac': 2.0,
+                'gpu_method': 0}`` (cufinufft's upsampling factor, default 2,
+                and ``gpu_method``, 0 for cufinufft's default).
+            _phi2_toep: Private: a finished kernel to use instead of
+                computing one (tests, benchmarks, and the Metal backend
+                internally). ``phi2`` and ``traj`` may then be ``None``.
 
         Returns:
-            The plan.
+            The operator.
 
         Raises:
-            RuntimeError: On the Metal backend.
-            ValueError: If an array has the wrong size or a mask is missing.
-            MRError: If the plan cannot be created.
+            ValueError: On inconsistent arguments (sizes, method, devices,
+                masked NUFFT).
+            MRError: If the library reports a failure.
         """
-        if not hasattr(lib, "mr_mgpu_plan_create_gram"):
-            raise RuntimeError("MultiGPUPlan.from_gram requires the CUDA backend")
         self = cls.__new__(cls)
         self._handle = ctypes.c_void_p()
-        self._cfg = cfg
         self._keep = ()
+        self._impl = None
+        self._method = OpMethod._TO_STR[OpMethod.parse(method)]
+        is_nufft = self._method == "nufft"
+        if is_nufft and cfg.is_masked:
+            raise ValueError("method='nufft' has no kernel to mask; build the "
+                             "configuration with is_masked=False")
+        nufft_opts = dict(nufft_opts or {})
+        if not is_nufft and nufft_opts:
+            raise ValueError("nufft_opts is only used with method='nufft'")
+        unknown = set(nufft_opts) - set(_NUFFT_OPTS)
+        if unknown:
+            raise ValueError(f"unknown nufft_opts {sorted(unknown)}; accepted: "
+                             f"{list(_NUFFT_OPTS)}")
         _check_size(SEs, int(lib.mr_se_size(ctypes.byref(cfg))), "SEs")
-        Ntrajs, Nkx = _check_gram(cfg, phi2, traj, mask)
-        self._keep = (SEs, mask) if share_primary else ()
-        devs, n = _device_array(devices)
-        check(
-            lib.mr_mgpu_plan_create_gram(
-                ctypes.byref(cfg),
-                devs,
-                n,
-                _ptr(SEs, "SEs", "complex64"),
-                _ptr(phi2, "phi2", "complex64"),
-                _ptr(traj, "traj", "float32"),
-                ctypes.c_int64(int(Ntrajs)),
-                ctypes.c_int64(int(Nkx)),
-                _ptr(mask, "mask", "int64", allow_none=True),
-                MGPU_SHARE_PRIMARY if share_primary else 0,
-                ctypes.byref(self._handle),
-            ),
-            "mr_mgpu_plan_create_gram",
+        if _phi2_toep is not None and phi2 is None and traj is None and not is_nufft:
+            # Injected kernel: the Gram blocks are not needed.
+            Ntrajs, Nkx = 0, 0
+            if cfg.is_masked:
+                if mask is None:
+                    raise ValueError("cfg.is_masked is set, so a mask is required")
+                if cfg.num_masked == 0:
+                    cfg.num_masked = int(mask.size)
+        else:
+            if phi2 is None or traj is None:
+                raise ValueError("phi2 and traj are required (the operator is built "
+                                 "from the Gram blocks)")
+            Ntrajs, Nkx = _check_gram(cfg, phi2, traj, mask)
+        if _phi2_toep is not None:
+            if is_nufft:
+                raise ValueError("_phi2_toep is only used with method='toeplitz'")
+            _check_size(_phi2_toep, int(lib.mr_phi2_toep_size(ctypes.byref(cfg))),
+                        "_phi2_toep")
+        devs, ndev = _devices_arg(devices)
+        # The operator's own copy of the (now complete) configuration: a later
+        # change to the caller's cfg must not change this operator's sizes.
+        self._cfg = MRConfig.from_buffer_copy(cfg)
+
+        if backend() != "cuda":
+            self._create_metal(cfg, SEs, phi2, traj, mask, devices, ndev,
+                               nufft_opts, _phi2_toep, share_primary)
+            return self
+
+        opt = MROpOptions()
+        check(lib.mr_op_options_defaults(ctypes.byref(opt)), "mr_op_options_defaults")
+        opt.method = OpMethod.parse(method)
+        opt.devices = ctypes.cast(devs, ctypes.POINTER(ctypes.c_int)) if devs else None
+        opt.n_devices = ndev
+        opt.toep_dist = ToepDist.parse(toep_dist)
+        opt.flags = OP_SHARE_PRIMARY if share_primary else 0
+        opt.nufft_upsampfac = float(nufft_opts.get("upsampfac", 0.0))
+        opt.nufft_gpu_method = int(nufft_opts.get("gpu_method", 0))
+        inp = MROpInputs(
+            _ptr(SEs, "SEs", "complex64"),
+            _ptr(phi2, "phi2", "complex64", allow_none=_phi2_toep is not None),
+            _ptr(traj, "traj", "float32", allow_none=_phi2_toep is not None),
+            int(Ntrajs), int(Nkx),
+            _ptr(mask, "mask", "int64", allow_none=True),
+            _ptr(_phi2_toep, "_phi2_toep", "complex64", allow_none=True),
         )
+        # Arrays used in place must outlive the operator.
+        if share_primary:
+            self._keep = (SEs, mask, _phi2_toep)
+        check(lib.mr_op_create(ctypes.byref(cfg), ctypes.byref(inp),
+                               ctypes.byref(opt), ctypes.byref(self._handle)),
+              "mr_op_create")
         return self
+
+    def _create_metal(self, cfg, SEs, phi2, traj, mask, devices, ndev,
+                      nufft_opts, phi2_toep, share_primary):
+        """Metal backend: one GPU; the kernel or the NUFFT run through MLX.
+
+        Toeplitz: the kernel is computed by :func:`calc_toep` (mlx-nufft +
+        the library) unless supplied, and handed to the library's
+        ``mr_op_create``. NUFFT: the MLX implementation of the reference
+        operator (:mod:`mr_aha.nufft`) behind the same interface.
+        """
+        single = (ndev in (0, OP_ALL_DEVICES)) or \
+            (ndev == 1 and list(devices if not isinstance(devices, numbers.Integral)
+                                else [devices]) == [0])
+        if not single:
+            raise ValueError(f"the {backend()} backend has a single GPU; devices "
+                             f"must be None, 0, [0] or 'all', got {devices!r}")
+        if self._method == "nufft":
+            from .nufft import _MlxNufft  # noqa: PLC0415
+            self._impl = _MlxNufft(cfg, traj, cfg.eps)
+            self._keep = (SEs, phi2)
+            self._info = dict(method="nufft", devices=[0], coil_begin=[0],
+                              coil_count=[int(cfg.n_coils)], group=[1],
+                              n_split_coils=0, peer_access=False,
+                              peer_bandwidth_gbs=0.0, toep_source="none",
+                              toep_devices=0, toep_ms=0.0,
+                              toep_component_ms=0.0, toep_gather_gbs=0.0,
+                              create_ms=0.0)
+            return
+        self._toep_ms = 0.0
+        if phi2_toep is None:
+            # The library cannot time this part on Metal: time it here.
+            import time  # noqa: PLC0415
+            t0 = time.perf_counter()
+            phi2_toep = calc_toep(cfg, phi2, traj, mask)
+            self._toep_ms = (time.perf_counter() - t0) * 1e3
+        opt = MROpOptions()
+        check(lib.mr_op_options_defaults(ctypes.byref(opt)), "mr_op_options_defaults")
+        opt.flags = OP_SHARE_PRIMARY if share_primary else 0
+        inp = MROpInputs(_ptr(SEs, "SEs", "complex64"), None, None, 0, 0,
+                         _ptr(mask, "mask", "int64", allow_none=True),
+                         _ptr(phi2_toep, "phi2_toep", "complex64"))
+        self._keep = (SEs, mask, phi2_toep)
+        check(lib.mr_op_create(ctypes.byref(cfg), ctypes.byref(inp),
+                               ctypes.byref(opt), ctypes.byref(self._handle)),
+              "mr_op_create")
 
     @property
     def config(self) -> MRConfig:
-        """The configuration this plan was built from."""
+        """The configuration this operator was built from."""
         return self._cfg
 
-    def kernel(self, k: int = 0):
-        """The plan's copy of ``phi2_toep`` on its ``k``-th device.
+    @property
+    def method(self) -> str:
+        """``'toeplitz'`` or ``'nufft'``."""
+        return self._method
 
-        For a plan from :meth:`from_gram` this is the kernel the plan
-        computed, e.g. to save it or to build an :class:`AhAPlan` on the
-        primary device. The array is a *view* of memory owned by the plan:
-        it keeps the plan object alive, but becomes invalid when the plan is
-        closed, and must not be modified.
+    def _check_open(self) -> None:
+        """Raise :class:`RuntimeError` when the operator has been closed."""
+        if not self._handle and self._impl is None:
+            raise RuntimeError("this AhAOp has already been closed")
+
+    def apply(self, x, out=None):
+        """Apply :math:`A^H A` to a set of spatial coefficients.
 
         Args:
-            k: Device index, ``0 <= k < len(info['devices'])``; 0 is the
-                primary device. The array lives on device
-                ``info['devices'][k]``.
+            x: ``complex64`` array on the primary device, ``(L, Ny, Nx)``
+                (2D) or ``(L, Nz, Ny, Nx)`` (3D/stack).
+            out: Optional pre-allocated ``complex64`` output shaped like
+                ``x``; must not be ``x``.
 
         Returns:
-            A ``complex64`` CuPy array shaped like :func:`phi2_toep_shape`.
+            The ``complex64`` array ``AhAx`` (CuPy on CUDA, NumPy on Metal),
+            shaped like ``x``. On CUDA the result is ordered on
+            ``cfg.stream`` (complete once that stream reaches this point).
 
         Raises:
-            RuntimeError: If the plan has already been closed.
-            MRError: If ``k`` is out of range.
+            RuntimeError: If the operator has been closed.
+            ValueError: If ``x`` or ``out`` has the wrong size.
+            MRError: If the library reports a failure.
         """
-        if not self._handle:
-            raise RuntimeError("this MultiGPUPlan has already been closed")
-        cp = _cupy()
-        ptr = ctypes.c_void_p()
-        check(lib.mr_mgpu_plan_kernel(self._handle, int(k), ctypes.byref(ptr)),
-              "mr_mgpu_plan_kernel")
-        dev = self.info["devices"][int(k)]
-        size = int(lib.mr_phi2_toep_size(ctypes.byref(self._cfg)))
-        mem = cp.cuda.UnownedMemory(ptr.value, size * 8, self, device_id=dev)
-        return cp.ndarray(phi2_toep_shape(self._cfg), dtype=cp.complex64,
-                          memptr=cp.cuda.MemoryPointer(mem, 0))
+        self._check_open()
+        xp = _xp()
+        _check_size(x, int(lib.mr_x_size(ctypes.byref(self._cfg))), "x")
+        if out is not None:
+            _check_size(out, x.size, "out")
+        if self._impl is not None:
+            SEs, phi2 = self._keep
+            return self._impl.apply(x, SEs, phi2, out=out)
+        if out is None:
+            out = xp.empty(x.shape, dtype=xp.complex64)
+        check(
+            lib.mr_op_execute(self._handle, _ptr(x, "x", "complex64"),
+                              _ptr(out, "out", "complex64")),
+            "mr_op_execute",
+        )
+        return out
+
+    __call__ = apply
 
     @property
     def info(self) -> dict:
-        """How the work is distributed.
+        """How the operator was built and distributes the work.
 
         Returns:
-            A dictionary with ``devices`` (CUDA ordinals, primary first),
-            ``coil_begin`` / ``coil_count`` (whole coils per device),
-            ``group`` (coils per group on each device), ``n_split_coils``
-            (remainder coils split by rank), ``peer_access``,
-            ``peer_bandwidth_gbs`` and, describing how the plan obtained
-            ``phi2_toep``: ``toep_source`` (``'supplied'``, ``'broadcast'``:
-            one GPU computed it and copied it to the others, ``'split'``:
-            every GPU computed a share and the shares were exchanged,
-            ``'replicate'``: every GPU computed it itself), ``toep_devices``,
-            ``toep_ms`` (time of computing and distributing it),
-            ``toep_component_ms`` (GPU time per triangular component) and
-            ``toep_gather_gbs`` (measured concurrent receive bandwidth).
+            A dictionary with ``method``; ``devices`` (CUDA ordinals, primary
+            first), ``coil_begin`` / ``coil_count`` (whole coils per device),
+            ``group`` (Toeplitz: coils per group on each device; NUFFT: 1),
+            ``n_split_coils`` (Toeplitz remainder coils split by rank),
+            ``peer_access``, ``peer_bandwidth_gbs``; how the kernel was
+            obtained: ``toep_source`` (``'broadcast'``: the primary computed
+            it, and copied it to any other GPU, ``'split'``: every GPU
+            computed a share and the shares were exchanged, ``'replicate'``:
+            every GPU computed it itself, ``'supplied'``, or ``'none'`` for
+            the NUFFT method), ``toep_devices``, ``toep_ms`` (time of
+            computing and distributing it), ``toep_component_ms`` (GPU time
+            per triangular component), ``toep_gather_gbs`` (measured
+            concurrent receive bandwidth); and ``create_ms`` (whole
+            creation).
         """
-        if not self._handle:
-            raise RuntimeError("this MultiGPUPlan has already been closed")
-        inf = MRMgpuInfo()
-        check(lib.mr_mgpu_plan_info(self._handle, ctypes.byref(inf)),
-              "mr_mgpu_plan_info")
+        self._check_open()
+        if self._impl is not None:
+            return dict(self._info)
+        metal_ms = getattr(self, "_toep_ms", 0.0)
+        inf = MROpInfo()
+        check(lib.mr_op_info(self._handle, ctypes.byref(inf)), "mr_op_info")
         n = inf.n_devices
         return dict(
+            method=OpMethod._TO_STR.get(int(inf.method), "unknown"),
             devices=list(inf.devices[:n]),
             coil_begin=list(inf.coil_begin[:n]),
             coil_count=list(inf.coil_count[:n]),
@@ -1050,54 +1051,66 @@ class MultiGPUPlan:
             n_split_coils=int(inf.n_split_coils),
             peer_access=bool(inf.peer_access),
             peer_bandwidth_gbs=float(inf.peer_bandwidth_gbs),
-            toep_source=MGPU_TOEP_SOURCES.get(int(inf.toep_source), "unknown"),
-            toep_devices=int(inf.toep_devices),
-            toep_ms=float(inf.toep_ms),
+            toep_source=("broadcast" if metal_ms else
+                         OP_TOEP_SOURCES.get(int(inf.toep_source), "unknown")),
+            toep_devices=1 if metal_ms else int(inf.toep_devices),
+            toep_ms=metal_ms or float(inf.toep_ms),
             toep_component_ms=float(inf.toep_component_ms),
             toep_gather_gbs=float(inf.toep_gather_gbs),
+            create_ms=float(inf.create_ms),
         )
 
-    def apply(self, x, out=None):
-        """Apply :math:`A^H A` to a set of spatial coefficients.
+    def kernel(self, k: int = 0):
+        """The Toeplitz kernel ``phi2_toep`` the operator holds on its
+        ``k``-th device (``mr_op_kernel``).
+
+        The array is a read-only *view* of memory owned by the operator: it
+        keeps the operator object alive, but becomes invalid when the
+        operator is closed, and must not be modified. Copy it to keep it.
 
         Args:
-            x: ``complex64`` CuPy array on the primary device, see
-                :meth:`AhAPlan.apply`.
-            out: Optional pre-allocated ``complex64`` output shaped like ``x``.
+            k: Device index, ``0 <= k < len(info['devices'])``; 0 is the
+                primary device. The array lives on ``info['devices'][k]``.
 
         Returns:
-            The ``complex64`` CuPy array ``AhAx``, shaped like ``x``.
+            A ``complex64`` array shaped like :func:`phi2_toep_shape`.
 
         Raises:
-            RuntimeError: If the plan has already been closed.
-            MRError: If the library reports a failure.
+            RuntimeError: If the operator has been closed.
+            MRError: For a NUFFT operator (no kernel) or ``k`` out of range.
         """
-        if not self._handle:
-            raise RuntimeError("this MultiGPUPlan has already been closed")
-        xp = _xp()
-        _check_size(x, int(lib.mr_x_size(ctypes.byref(self._cfg))), "x")
-        if out is None:
-            out = xp.empty(x.shape, dtype=xp.complex64)
-        else:
-            _check_size(out, x.size, "out")
-        check(
-            lib.mr_mgpu_plan_execute(
-                self._handle, _ptr(x, "x", "complex64"), _ptr(out, "out", "complex64")
-            ),
-            "mr_mgpu_plan_execute",
-        )
-        return out
-
-    __call__ = apply
+        self._check_open()
+        if self._impl is not None:
+            raise MRError(-7, "mr_op_kernel: a NUFFT operator has no kernel")
+        ptr = ctypes.c_void_p()
+        check(lib.mr_op_kernel(self._handle, int(k), ctypes.byref(ptr)),
+              "mr_op_kernel")
+        shape = phi2_toep_shape(self._cfg)
+        size = int(lib.mr_phi2_toep_size(ctypes.byref(self._cfg)))
+        if backend() != "cuda":
+            import numpy  # noqa: PLC0415
+            buf = (ctypes.c_char * (size * 8)).from_address(ptr.value)
+            arr = numpy.frombuffer(buf, dtype=numpy.complex64).reshape(shape)
+            arr.flags.writeable = False
+            return arr
+        cp = _cupy()
+        dev = self.info["devices"][int(k)]
+        mem = cp.cuda.UnownedMemory(ptr.value, size * 8, self, device_id=dev)
+        return cp.ndarray(shape, dtype=cp.complex64,
+                          memptr=cp.cuda.MemoryPointer(mem, 0))
 
     def close(self) -> None:
-        """Release the plan and everything it holds on every GPU. Idempotent."""
+        """Release the operator and everything it holds on every GPU.
+        Idempotent."""
         if self._handle:
-            lib.mr_mgpu_plan_destroy(self._handle)
+            lib.mr_op_destroy(self._handle)
             self._handle = ctypes.c_void_p()
+        if self._impl is not None:
+            self._impl.close()
+            self._impl = None
         self._keep = ()
 
-    def __enter__(self) -> "MultiGPUPlan":
+    def __enter__(self) -> "AhAOp":
         return self
 
     def __exit__(self, *exc) -> None:
@@ -1108,3 +1121,21 @@ class MultiGPUPlan:
             self.close()
         except Exception:  # pragma: no cover - interpreter shutdown
             pass
+
+
+def create_op(cfg: MRConfig, SEs, phi2, traj, mask=None, **kwargs) -> AhAOp:
+    """Create the :math:`A^H A` operator; alias of :meth:`AhAOp.create_op`.
+
+    Args:
+        cfg: Configuration from :func:`make_config`.
+        SEs: Sensitivity maps, see :meth:`AhAOp.create_op`.
+        phi2: Gram blocks, see :meth:`AhAOp.create_op`.
+        traj: Trajectory, see :meth:`AhAOp.create_op`.
+        mask: Mask (Toeplitz, masked configurations only).
+        **kwargs: ``method``, ``devices``, ``toep_dist``, ``share_primary``,
+            ``nufft_opts``; see :meth:`AhAOp.create_op`.
+
+    Returns:
+        The operator, an :class:`AhAOp`.
+    """
+    return AhAOp.create_op(cfg, SEs, phi2, traj, mask, **kwargs)

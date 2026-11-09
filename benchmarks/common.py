@@ -2,8 +2,10 @@
 
 Loads the three benchmark problems into row-major arrays (the column-major
 shapes of the documentation, reversed), together with a ready
-:class:`mr_aha.MRConfig`, and provides a conjugate-gradient solver and timing
-utilities used by both ``bench_python.py`` and ``mask_threshold.py``.
+:class:`mr_aha.MRConfig`, and provides a conjugate-gradient solver, timing
+utilities and :func:`toeplitz_op` (create the Toeplitz operator of
+:func:`mr_aha.create_op`, timing its kernel and the rest separately), used by
+``bench_python.py``, ``rank_sweep.py``, ``mask_threshold.py`` and others.
 
 Backend-agnostic: the array module ``cp`` is CuPy for the CUDA backend and
 NumPy for the Metal backend (Apple silicon, unified memory), following
@@ -210,6 +212,46 @@ def timed_once(fn):
     r = fn()
     sync()
     return r, time.perf_counter() - t0
+
+
+def toeplitz_op(cfg, SEs, phi2, traj, mask=None):
+    """Create the Toeplitz :math:`A^H A` operator, timing its two parts.
+
+    The operator (:func:`mr_aha.create_op`, ``method='toeplitz'``, current
+    GPU only) computes its kernel ``phi2_toep`` at creation. The benchmarks
+    report the kernel computation (``calc_toep_s``) and the rest of the
+    creation (``plan_s``: work buffers, FFT plans) separately, as they did
+    with the former two-step ``calc_toep`` + plan API:
+
+    * CUDA: one :func:`mr_aha.create_op` call; the kernel time is the
+      operator's own ``info['toep_ms']`` and ``plan_s`` is the remaining
+      wall-clock time of the call.
+    * Metal: the library does not time the kernel there (it is computed by
+      the Python/MLX path and handed over), so :func:`mr_aha.calc_toep` is
+      timed on its own and the finished kernel is passed to
+      :func:`mr_aha.create_op` through its private ``_phi2_toep`` keyword
+      (the operator keeps it alive).
+
+    Args:
+        cfg: Configuration (masked or not).
+        SEs: Sensitivity maps.
+        phi2: Gram blocks.
+        traj: Trajectory.
+        mask: Mask from :func:`mr_aha.calc_mask` for a masked ``cfg``.
+
+    Returns:
+        ``(op, calc_toep_s, plan_s)``: the :class:`mr_aha.AhAOp` (close it, or
+        use it as a context manager) and the two times in seconds.
+    """
+    if BACKEND == "cuda":
+        op, t = timed_once(lambda: mr_aha.create_op(cfg, SEs, phi2, traj, mask))
+        t_kernel = op.info["toep_ms"] / 1e3
+        return op, t_kernel, t - t_kernel
+    Om, t_kernel = timed_once(lambda: mr_aha.calc_toep(cfg, phi2, traj, mask=mask))
+    op, t_plan = timed_once(
+        lambda: mr_aha.create_op(cfg, SEs, phi2, traj, mask, _phi2_toep=Om))
+    del Om
+    return op, t_kernel, t_plan
 
 
 def cg(op, b, n_iter=20):

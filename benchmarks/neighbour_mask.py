@@ -211,16 +211,16 @@ def evaluate(d, cfg, mask_bool, x_rnd, ref_img, ref_rnd, lam):
     if need > cp.cuda.runtime.memGetInfo()[0]:
         row["skipped"] = f"needs ~{need / 2**30:.1f} GB"
         return row
-    Om = mr_aha.calc_toep(c, d["phi2"], d["traj"], mask=mask)
     nx, nr = float(cp.linalg.norm(d["x"].ravel())), float(cp.linalg.norm(x_rnd.ravel()))
-    with mr_aha.AhAPlan(c) as p:
-        e = float(cp.linalg.norm((p.apply(d["x"], d["SEs"], Om, mask=mask) - ref_img).ravel()))
+    # The Toeplitz operator computes its kernel (with this mask) at creation.
+    with mr_aha.create_op(c, d["SEs"], d["phi2"], d["traj"], mask) as p:
+        e = float(cp.linalg.norm((p(d["x"]) - ref_img).ravel()))
         row["err_img_out"] = e / float(cp.linalg.norm(ref_img.ravel()))
         row["err_img_in"] = e / (lam * nx)
-        e = float(cp.linalg.norm((p.apply(x_rnd, d["SEs"], Om, mask=mask) - ref_rnd).ravel()))
+        e = float(cp.linalg.norm((p(x_rnd) - ref_rnd).ravel()))
         row["err_rnd_out"] = e / float(cp.linalg.norm(ref_rnd.ravel()))
         row["err_rnd_in"] = e / (lam * nr)
-    del Om, mask
+    del mask
     cp.get_default_memory_pool().free_all_blocks()
     return row
 

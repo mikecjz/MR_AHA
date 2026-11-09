@@ -143,7 +143,7 @@ __device__ __forceinline__ void mr_block_apply(const mr_complex (&v)[NC][L],
  * The kernel can also be restricted to a contiguous range of grid locations
  * (@p rg), with the data of that range stored compactly: this is how the
  * multi-GPU plan applies the block-diagonal stage to its slab of k-space when
- * a coil is split across devices by rank (`mr_mgpu.cu`).
+ * a coil is split across devices by rank (`mr_op.cu`).
  *
  * @tparam L     Rank.
  * @tparam PAIR  Process two coils per triangle walk.

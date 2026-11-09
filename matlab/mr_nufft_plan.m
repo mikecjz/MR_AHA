@@ -6,8 +6,14 @@ function plan = mr_nufft_plan(traj, config, varargin)
 %
 %   Creates one type-2 (image -> k-space, sign -1) and one type-1 (k-space ->
 %   image, sign +1) single-precision cufinufft plan for the trajectory and
-%   sorts the non-uniform points once. Pass the result to AHA_CUFINUFFT so an
-%   iterative reconstruction pays the planning cost only once.
+%   sorts the non-uniform points once. Pass the result to AHA_CUFINUFFT so
+%   repeated calls pay the planning cost only once.
+%
+%   ROLE: together with AHA_CUFINUFFT this is the independent REFERENCE of
+%   the NUFFT route, built on cufinufft's own MATLAB interface without any
+%   MR_AHA library code. The tests use it to validate
+%   MR_AHA_OP.CREATE_OP(..., 'method', 'nufft'), the library implementation
+%   of the same operator, which is what reconstructions should use.
 %
 %   Each plan transforms all L ranks of one coil in a single batched call; for
 %   a 'stack' trajectory the batch is L*Nz, one 2D transform per kz plane and
@@ -35,7 +41,7 @@ function plan = mr_nufft_plan(traj, config, varargin)
 %   Python reference operator mr_aha.AhANufftPlan (MLX + mlx-nufft) instead,
 %   and the cufinufft options are ignored.
 %
-%   See also AHA_CUFINUFFT, CUFINUFFT_PLAN.
+%   See also AHA_CUFINUFFT, MR_AHA_OP, CUFINUFFT_PLAN.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 

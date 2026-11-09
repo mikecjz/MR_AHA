@@ -53,7 +53,7 @@ round-trip error `||ifft(fft(x))/N − x|| / ||x||`:
 | 3d | 3.8e-7 | 3.8e-7 | 6.1e-7 | 8.7e-7 | 4.9e-7 |
 
 VkFFT plan creation (it generates and compiles its Metal kernels at run time) takes 2 ms (2d),
-240 ms (stack) and 305 ms (3d); a plan is built once per `AhAPlan`.
+240 ms (stack) and 305 ms (3d); a plan is built once per operator (`create_op`; `AhAPlan` at the time).
 
 **Conclusion.** VkFFT-Metal matches single-precision cuFFT accuracy and is 1.4–1.5× faster than
 cuFFT on the TITAN RTX for the two large grids, and about 1.9× faster than MLX's FFT there. It is the FFT

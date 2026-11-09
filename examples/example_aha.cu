@@ -4,12 +4,15 @@
  *
  * Demonstrates the whole pipeline without MATLAB or Python:
  *   1. build a synthetic stack-of-stars trajectory and Gram blocks,
- *   2. pre-compute the Toeplitz operator with ::mr_calc_toep,
- *   3. apply @f$A^H A@f$ with an ::mr_aha_plan reused across iterations.
+ *   2. create the @f$A^H A@f$ operator with ::mr_op_create (Toeplitz method:
+ *      the kernel is computed inside), on the current GPU,
+ *   3. apply it several times with ::mr_op_execute,
+ *   4. create the same operator with the NUFFT method and compare.
  *
  * The example also performs the standard Hermitian check
  * @f$\langle y, A^H A x\rangle = \langle A^H A y, x\rangle@f$, which is the
- * cheapest end-to-end sanity test of the operator.
+ * cheapest end-to-end sanity test of the operator. To use several GPUs, set
+ * ::mr_op_options::devices (or `n_devices = MR_OP_ALL_DEVICES`).
  *
  * Build with `-DMR_AHA_BUILD_EXAMPLES=ON`.
  *
@@ -114,7 +117,7 @@ int main(void)
 
     /* ---- Device buffers ------------------------------------------------- */
     float2 *d_x = NULL, *d_y = NULL, *d_se = NULL, *d_phi2 = NULL;
-    float2 *d_toep = NULL, *d_ax = NULL, *d_ay = NULL;
+    float2 *d_ax = NULL, *d_ay = NULL;
     float  *d_traj = NULL;
     cudaMalloc(&d_x,    x_elems * sizeof(float2));
     cudaMalloc(&d_y,    x_elems * sizeof(float2));
@@ -123,7 +126,6 @@ int main(void)
     cudaMalloc(&d_se,   se_elems * sizeof(float2));
     cudaMalloc(&d_phi2, h_phi2.size() * sizeof(float2));
     cudaMalloc(&d_traj, h_traj.size() * sizeof(float));
-    cudaMalloc(&d_toep, (size_t)mr_pad_size(&cfg) * ntri * sizeof(float2));
     cudaMemcpy(d_x, h_x.data(), x_elems * sizeof(float2), cudaMemcpyHostToDevice);
     cudaMemcpy(d_y, h_y.data(), x_elems * sizeof(float2), cudaMemcpyHostToDevice);
     cudaMemcpy(d_se, h_se.data(), se_elems * sizeof(float2), cudaMemcpyHostToDevice);
@@ -132,24 +134,29 @@ int main(void)
     cudaMemcpy(d_traj, h_traj.data(), h_traj.size() * sizeof(float),
                cudaMemcpyHostToDevice);
 
-    /* ---- 1. Pre-compute the Toeplitz operator --------------------------- */
-    CHECK(mr_calc_toep(&cfg, (const mr_complex *)d_phi2, d_traj, Ntrajs, Nkx,
-                       NULL, (mr_complex *)d_toep));
-    std::printf("calc_toep done: %lld x %lld Toeplitz coefficients\n",
-                (long long)mr_pad_size(&cfg), (long long)ntri);
+    /* ---- 1. Create the operator (Toeplitz: kernel computed inside) ----- */
+    mr_op_inputs in = {};
+    in.d_SEs  = (const mr_complex *)d_se;
+    in.d_phi2 = (const mr_complex *)d_phi2;
+    in.d_traj = d_traj;
+    in.Ntrajs = Ntrajs;
+    in.Nkx    = Nkx;
+    mr_op_options opt;
+    CHECK(mr_op_options_defaults(&opt)); /* Toeplitz, current GPU only */
+    mr_op op = NULL;
+    CHECK(mr_op_create(&cfg, &in, &opt, &op));
+    mr_op_info_t info;
+    CHECK(mr_op_info(op, &info));
+    std::printf("operator created in %.0f ms (kernel %.0f ms, %lld x %lld "
+                "Toeplitz coefficients) on %d GPU(s)\n",
+                info.create_ms, info.toep_ms, (long long)mr_pad_size(&cfg),
+                (long long)ntri, info.n_devices);
 
-    /* ---- 2. Apply AhA twice through a reusable plan --------------------- */
-    mr_aha_plan plan = NULL;
-    CHECK(mr_aha_plan_create(&cfg, &plan));
-    CHECK(mr_aha_plan_execute(plan, (const mr_complex *)d_x,
-                              (const mr_complex *)d_se,
-                              (const mr_complex *)d_toep, NULL,
-                              (mr_complex *)d_ax));
-    CHECK(mr_aha_plan_execute(plan, (const mr_complex *)d_y,
-                              (const mr_complex *)d_se,
-                              (const mr_complex *)d_toep, NULL,
-                              (mr_complex *)d_ay));
-    CHECK(mr_aha_plan_destroy(plan));
+    /* ---- 2. Apply AhA twice; the phi2/traj buffers are no longer needed - */
+    CHECK(mr_op_execute(op, (const mr_complex *)d_x, (mr_complex *)d_ax));
+    CHECK(mr_op_execute(op, (const mr_complex *)d_y, (mr_complex *)d_ay));
+    cudaDeviceSynchronize();
+    CHECK(mr_op_destroy(op));
 
     /* ---- 3. Hermitian check: <y, AhA x> == <AhA y, x> ------------------- */
     std::vector<float2> h_ax(x_elems), h_ay(x_elems);
@@ -170,7 +177,24 @@ int main(void)
     std::printf("<AhA y, x>   = %.6e %+.6ei\n", rre, rim);
     std::printf("relative difference = %.3e (Hermitian symmetry)\n", rel);
 
+    /* ---- 4. The same operator with the NUFFT method --------------------- */
+    opt.method = MR_OP_NUFFT;
+    CHECK(mr_op_create(&cfg, &in, &opt, &op));
+    CHECK(mr_op_execute(op, (const mr_complex *)d_x, (mr_complex *)d_ay));
+    cudaDeviceSynchronize();
+    CHECK(mr_op_destroy(op));
+    std::vector<float2> h_nu(x_elems);
+    cudaMemcpy(h_nu.data(), d_ay, x_elems * sizeof(float2), cudaMemcpyDeviceToHost);
+    double num = 0.0, den = 0.0;
+    for (int64_t i = 0; i < x_elems; ++i) {
+        const double dr = (double)h_nu[i].x - h_ax[i].x, di = (double)h_nu[i].y - h_ax[i].y;
+        num += dr * dr + di * di;
+        den += (double)h_ax[i].x * h_ax[i].x + (double)h_ax[i].y * h_ax[i].y;
+    }
+    const double rel_nu = std::sqrt(num / (den + 1e-30));
+    std::printf("NUFFT vs Toeplitz method: relative difference = %.3e\n", rel_nu);
+
     cudaFree(d_x); cudaFree(d_y); cudaFree(d_ax); cudaFree(d_ay);
-    cudaFree(d_se); cudaFree(d_phi2); cudaFree(d_traj); cudaFree(d_toep);
-    return (rel < 1e-4) ? EXIT_SUCCESS : EXIT_FAILURE;
+    cudaFree(d_se); cudaFree(d_phi2); cudaFree(d_traj);
+    return (rel < 1e-4 && rel_nu < 1e-4) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

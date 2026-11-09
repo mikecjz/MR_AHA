@@ -4,10 +4,16 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
 %   phi2_toep = CALC_TOEP(phi2, traj, config)
 %   phi2_toep = CALC_TOEP(phi2, traj, config, mask)
 %   [phi2_toep, mask] = CALC_TOEP(phi2, traj, config)    % masked, auto mask
-%   phi2_toep = CALC_TOEP(..., 'devices', [1 2 3 4])     % several GPUs
 %
 %   Turns the non-Cartesian Gram blocks Phi*Phi' into the Cartesian
 %   block-diagonal multiplier that AHA_TOEPLITZ applies between its two FFTs.
+%   The kernel is computed on MATLAB's current GPU.
+%
+%   CALC_TOEP and AHA_TOEPLITZ are the stateless low-level primitives. To
+%   apply A'A repeatedly (iterative reconstruction), or on several GPUs, use
+%   MR_AHA_OP.CREATE_OP instead: it computes the kernel itself from the same
+%   phi2 and traj (on every GPU it uses) and keeps it, with the sensitivity
+%   maps, for every application.
 %
 %   Gram blocks follow the MR-Multitasking convention: the temporal basis
 %   Phi_rt is rank-by-time [L, T], the Gram block of a readout (and kz
@@ -49,22 +55,6 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
 %                mask is derived from the trajectory with CALC_MASK and
 %                returned as the second output.
 %
-%   NAME-VALUE PAIRS
-%     'devices'  (CUDA backend) further GPUs that help compute the kernel,
-%                as 1-based gpuDevice indices. The (L^2+L)/2 triangular
-%                components of the kernel are independent; they are split
-%                over the current gpuDevice and these GPUs, every helper GPU
-%                computes its share and copies it into the result on the
-%                current GPU, overlapped with its computation. On four PCIe
-%                GPUs this takes 45-70 % of the single-GPU time (3D and 2D
-%                L = 72 respectively). The result equals the single-GPU one up to the NUFFT's
-%                run-to-run noise (~1e-7). Default: [] (current GPU only).
-%                The environment variable MR_AHA_TOEP_SPLIT (SETENV;
-%                'auto' default, 'split', 'off') overrides the library's
-%                choice of whether the split pays off on this machine. To
-%                build a multi-GPU operator, MR_AHA_OP.FROM_GRAM is faster
-%                still: it leaves a copy of the kernel on every GPU.
-%
 %   OUTPUTS
 %     phi2_toep  complex single gpuArray:
 %                  [Mx, My, (L^2+L)/2]        '2D',  unmasked
@@ -90,28 +80,16 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
-    narginchk(3, 6);
-    % Optional positional mask, then name-value pairs.
+    narginchk(3, 4);
     mask = [];
-    if ~isempty(varargin) && ~(ischar(varargin{1}) || isstring(varargin{1}))
+    if ~isempty(varargin)
         mask = varargin{1};
-        varargin(1) = [];
     end
-    p = inputParser();
-    p.FunctionName = 'calc_toep';
-    p.addParameter('devices', []);
-    p.parse(varargin{:});
-    devices = p.Results.devices;
 
     if strcmp(mr_backend(), 'metal')
-        if numel(devices) > 1
-            error('MR_AHA:calc_toep:backend', ...
-                  'calc_toep(..., ''devices'', ...) requires the CUDA backend.');
-        end
         [phi2_toep, mask] = mr_calc_toep_metal(phi2, traj, config, mask);
         return
     end
-    devices = mr_gpu_ordinals(devices);
 
     if ~isa(phi2, 'gpuArray'), phi2 = gpuArray(phi2); end
     if ~strcmp(underlyingType(phi2), 'single'), phi2 = single(phi2); end
@@ -126,11 +104,7 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
     is_masked = isfield(config, 'is_masked') && config.is_masked;
     if ~is_masked
         mask = [];
-        if isempty(devices)
-            phi2_toep = calc_toep_mex(phi2, traj, config);
-        else
-            phi2_toep = calc_toep_mex(phi2, traj, config, [], devices);
-        end
+        phi2_toep = calc_toep_mex(phi2, traj, config);
         return
     end
 
@@ -141,26 +115,7 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
     % R2023a+; double is exact for any index below 2^53.)
     mask0 = int64(double(gpuArray(mask(:))) - 1);
     config.num_masked = numel(mask0);
-    if isempty(devices)
-        phi2_toep = calc_toep_mex(phi2, traj, config, mask0);
-    else
-        phi2_toep = calc_toep_mex(phi2, traj, config, mask0, devices);
-    end
-end
-
-function ord = mr_gpu_ordinals(devices)
-%MR_GPU_ORDINALS  1-based gpuDevice indices -> int32 CUDA ordinals ([] stays []).
-    if isempty(devices)
-        ord = int32([]);
-        return
-    end
-    devices = double(devices(:)).';
-    n_gpu = gpuDeviceCount();
-    if any(devices ~= round(devices)) || any(devices < 1) || any(devices > n_gpu)
-        error('MR_AHA:calc_toep:devices', ...
-              'devices must be gpuDevice indices between 1 and %d.', n_gpu);
-    end
-    ord = int32(devices - 1);
+    phi2_toep = calc_toep_mex(phi2, traj, config, mask0);
 end
 
 function [phi2_toep, mask] = mr_calc_toep_metal(phi2, traj, config, mask)

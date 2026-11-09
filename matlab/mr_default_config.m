@@ -1,5 +1,6 @@
 function config = mr_default_config(traj_type, n_dim, L, varargin)
-%MR_DEFAULT_CONFIG  Build a config struct for AHA_TOEPLITZ and CALC_TOEP.
+%MR_DEFAULT_CONFIG  Build a config struct for MR_AHA_OP, AHA_TOEPLITZ and
+%   CALC_TOEP.
 %
 %   config = MR_DEFAULT_CONFIG(traj_type, n_dim, L)
 %   config = MR_DEFAULT_CONFIG(traj_type, n_dim, L, 'Name', Value, ...)
@@ -16,8 +17,8 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
 %     'triangulation'  'lower' (default) or 'upper'.
 %     'is_masked'      false (default) or true.
 %     'n_coils'        left empty by default and inferred from size(SEs).
-%     'eps'            NUFFT tolerance for CALC_TOEP and AHA_CUFINUFFT,
-%                      default 1e-6.
+%     'eps'            NUFFT tolerance for CALC_TOEP, MR_AHA_OP (both
+%                      methods) and AHA_CUFINUFFT, default 1e-6.
 %     'mask_method'    how CALC_MASK builds the mask: 'neighbour' (default,
 %                      keep locations within mask_radius grid cells of a
 %                      sample) or 'threshold' (threshold the unit-weight
@@ -26,12 +27,19 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
 %                      cells, default 2.
 %     'mask_threshold' absolute threshold of CALC_MASK's 'threshold' method
 %                      (in samples), default 0.05.
-%     'mem_fraction'   share of free GPU memory CALC_TOEP may use, default 0.5.
+%     'mem_fraction'   share of free GPU memory CALC_TOEP and MR_AHA_OP may
+%                      use for their working buffers, default 0.5.
 %     'gpu_device_id'  -1 (default) keeps MATLAB's currently selected GPU.
+%                      (MR_AHA_OP ignores it: its primary GPU is always the
+%                      current gpuDevice; see its 'devices' argument.)
 %     'verbose'        false (default).
 %
 %   EXAMPLE
 %     config = mr_default_config('stack', [256 256 64], 16);
+%     op     = mr_aha_op.create_op(SEs, phi2, traj, config);
+%     AhAx   = op * x;
+%
+%     % the same with the low-level primitives:
 %     Om     = calc_toep(phi2, traj, config);
 %     AhAx   = AhA_Toeplitz(x, SEs, Om, config);
 %
@@ -40,7 +48,7 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
 %     [Om, mask] = calc_toep(phi2, traj, config);
 %     AhAx   = AhA_Toeplitz(x, SEs, Om, config, mask);
 %
-%   See also AHA_TOEPLITZ, CALC_TOEP, CALC_MASK, AHA_CUFINUFFT.
+%   See also MR_AHA_OP, AHA_TOEPLITZ, CALC_TOEP, CALC_MASK, AHA_CUFINUFFT.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 

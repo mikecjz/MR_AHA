@@ -8,23 +8,23 @@
 #  (add -w esplhpc-cp087 / --exclude=... to pick the node)
 #
 #  PART=test   correctness: tests/check_reference.py and check_bd_kernels.py on
-#              one GPU, tests/check_mgpu.py on every allocated GPU
+#              one GPU, tests/check_op.py (the create_op operator, both
+#              methods, every toep_dist) on every allocated GPU
 #  PART=single bench_aha_backend.py on one GPU: generic kernels one coil at a
 #              time (MR_AHA_CUDA_GENERIC_BD=1, the previous operator), then the
 #              specialised kernels with coil groups 1, 2, 4 and 6, each with
 #              the per-stage profile (MR_AHA_CUDA_PROFILE=1)
 #  PART=bench  benchmarks/bench_mgpu.py on 1..N GPUs, split off/auto
+#              (Toeplitz create_op, apply time with a supplied kernel)
 #  PART=split  the same with $COILS coils (default 8 and 7, which do not divide
 #              the GPU counts), split off/on/auto: remainder-split timing and
 #              the cost model's choice
 #  PART=matlab builds the MEX files inside the Singularity MATLAB image (its
 #              MATLAB R2025b and CUDA 12.9, into build_<TAG>_matlab) and runs
-#              tests/check_mgpu_matlab.m on 2 and all allocated GPUs, plus
-#              tests/check_reference_matlab.m on one GPU
-#  PART=toep_test  multi-GPU pre-computation of phi2_toep: check_reference.py
-#              on one GPU (the refactored calc_toep), then
-#              tests/check_toep_mgpu.py on every allocated GPU (QUICK=1 for
-#              fewer problems)
+#              tests/check_op_matlab.m (mr_aha_op.create_op) on 2 and all
+#              allocated GPUs, plus tests/check_reference_matlab.m on one GPU
+#  PART=toep_test  old name of PART=test (same tests; QUICK=1 for fewer
+#              check_op.py problems)
 #              (the set-up benchmark, bench_toep_mgpu.py, is run by
 #              docs/MRM/scripts/run_hpc.sbatch with MGPU=1 MGPU_STEPS=toep)
 #
@@ -47,6 +47,7 @@ set -uo pipefail
 ROOT=${SLURM_SUBMIT_DIR:-$(pwd)}
 cd "$ROOT"
 PART=${PART:-test}
+[[ $PART == toep_test ]] && PART=test   # old name
 ENV_PY=${ENV_PY:-$HOME/.conda/envs/mr_aha/bin/python}
 ARCH=${ARCH:-90}
 BUILD=build_${TAG:-h100}_mgpu_$PART
@@ -74,8 +75,8 @@ if [[ $PART == matlab ]]; then
         $(dirname "$ENV_PY")/cmake --build $MBUILD -j ${SLURM_CPUS_PER_TASK:-8} \
             --target AhA_Toeplitz_mex calc_toep_mex calc_mask_mex mr_aha_op_mex" || exit 1
     ADDP="addpath('$ROOT/matlab', '$ROOT/$MBUILD/matlab', '$ROOT/tests')"
-    sing "matlab -batch \"$ADDP; check_mgpu_matlab('device_sets', {[1 2], 1:$NGPU}, \
-        'split_modes', {'off', 'on'})\"" || echo "check_mgpu_matlab FAILED"
+    sing "matlab -batch \"$ADDP; check_op_matlab('device_sets', {[1 2], 1:$NGPU})\"" \
+        || echo "check_op_matlab FAILED"
     sing "CUDA_VISIBLE_DEVICES=0 matlab -batch \"$ADDP; cd('$ROOT'); \
         check_reference_matlab\"" || echo "check_reference_matlab FAILED"
     echo "== done $(date)"
@@ -95,7 +96,8 @@ ALL=$(seq -s ' ' 0 $((NGPU - 1)))
 if [[ $PART == test ]]; then
     CUDA_VISIBLE_DEVICES=0 "$ENV_PY" -u tests/check_reference.py || echo "check_reference FAILED"
     CUDA_VISIBLE_DEVICES=0 "$ENV_PY" -u tests/check_bd_kernels.py || echo "check_bd_kernels FAILED"
-    "$ENV_PY" -u tests/check_mgpu.py --devices $ALL || echo "check_mgpu FAILED"
+    "$ENV_PY" -u tests/check_op.py --devices $ALL ${QUICK:+--quick} \
+        || echo "check_op FAILED"
 elif [[ $PART == single ]]; then
     export CUDA_VISIBLE_DEVICES=0
     run() {
@@ -112,10 +114,6 @@ elif [[ $PART == bench ]]; then
     "$ENV_PY" -u benchmarks/bench_mgpu.py --cases ${CASES:-stack 3d 2d} \
         --gpus ${GPUS:-$(seq -s ' ' 2 "$NGPU")} --split off auto --reps 10 \
         || echo "bench_mgpu FAILED"
-elif [[ $PART == toep_test ]]; then
-    CUDA_VISIBLE_DEVICES=0 "$ENV_PY" -u tests/check_reference.py || echo "check_reference FAILED"
-    "$ENV_PY" -u tests/check_toep_mgpu.py --devices $ALL ${QUICK:+--quick} \
-        || echo "check_toep_mgpu FAILED"
 elif [[ $PART == split ]]; then
     # Remainder split: coil counts that do not divide the GPU count.
     for c in ${COILS:-8 7}; do

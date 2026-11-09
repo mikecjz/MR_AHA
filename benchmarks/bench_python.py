@@ -5,8 +5,10 @@ For every dataset (see :mod:`common`) this measures
 * **NUFFT** (:class:`mr_aha.AhANufftPlan`): plan time and the time of one
   ``A^H A`` with cufinufft's default ``gpu_method`` and with the fastest
   per-type method found by a small search;
-* **Toeplitz, unmasked** (:class:`mr_aha.AhAPlan`): ``calc_toep`` time, plan
-  time and ``A^H A`` time, whenever the kernel fits on the device;
+* **Toeplitz, unmasked** (:func:`mr_aha.create_op`, one GPU): ``calc_toep``
+  time (the kernel computed at creation), plan time (the rest of the
+  creation) and ``A^H A`` time, whenever the kernel fits on the device (see
+  :func:`common.toeplitz_op`);
 * **Toeplitz, masked** with the library's default mask (neighbourhood of
   radius 2; results produced before that change used the kernel threshold
   0.05, see ``mask_method`` in the JSON): ``calc_mask``, ``calc_toep`` and
@@ -40,7 +42,8 @@ import os
 from pathlib import Path
 
 from common import (BACKEND, RESULTS, cg, cp, free_bytes, gpu_info, load,
-                    make_cfg, mr_aha, rel, save_json, sync, timed_once, timeit)
+                    make_cfg, mr_aha, rel, save_json, sync, timed_once, timeit,
+                    toeplitz_op)
 
 N_ITER = 20
 N_REP = {"2d": 20, "stack": 5, "3d": 5}
@@ -91,10 +94,11 @@ def bench_nufft(d, out, n_rep):
 
 
 def bench_toeplitz(d, out, key, masked, n_rep):
-    """Pre-compute and time a Toeplitz operator.
+    """Create and time a Toeplitz operator (kernel computed at creation).
 
     Returns:
-        ``(cfg, Om, mask, plan)``, or ``None`` when it does not fit in memory.
+        The :class:`mr_aha.AhAOp` (holding its kernel), or ``None`` when it
+        does not fit in memory.
     """
     ntri = mr_aha.num_tri(d["L"])
     pad = math.prod(d["cfg"].phi2_dim[:3])
@@ -119,13 +123,12 @@ def bench_toeplitz(d, out, key, masked, n_rep):
         out[key] = rec
         print(f"  {key}: skipped ({rec['skipped']})")
         return None
-    Om, rec["calc_toep_s"] = timed_once(
-        lambda: mr_aha.calc_toep(cfg, d["phi2"], d["traj"], mask=mask))
-    plan, rec["plan_s"] = timed_once(lambda: mr_aha.AhAPlan(cfg))
-    rec["aha"] = timeit(lambda: plan.apply(d["b"], d["SEs"], Om, mask=mask),
-                        n=n_rep, warmup=1)
+    op, rec["calc_toep_s"], rec["plan_s"] = toeplitz_op(
+        cfg, d["SEs"], d["phi2"], d["traj"], mask)
+    del mask  # the operator keeps its own reference
+    rec["aha"] = timeit(lambda: op(d["b"]), n=n_rep, warmup=1)
     out[key] = rec
-    return cfg, Om, mask, plan
+    return op
 
 
 def run(name):
@@ -160,18 +163,16 @@ def run(name):
 
     sols = {"nufft": u_nufft}
     for key, masked in (("toeplitz", False), ("toeplitz_masked", True)):
-        r = bench_toeplitz(d, out, key, masked, n_rep)
-        if r is None:
+        op = bench_toeplitz(d, out, key, masked, n_rep)
+        if op is None:
             continue
-        cfg, Om, mask, plan = r
-        del r  # otherwise the tuple keeps the kernel alive after `del Om`
         rec = out[key]
         print(f"  {key:15s} calc_toep {rec['calc_toep_s']:.2f} s, "
               f"AhA {rec['aha']['median']:.4f} s, kept {rec['kept_fraction']:.3f}")
-        sols[key] = run_cg(key, lambda v: plan.apply(v, d["SEs"], Om, mask=mask))
+        sols[key] = run_cg(key, op)
         print(f"  CG {key:15s} {cg_out[key]['total_s']:.2f} s")
-        plan.close()
-        del Om, mask, plan
+        op.close()  # releases the kernel
+        del op
         free_bytes()
 
     # Differences between the CG solutions (and to the truth, if known).

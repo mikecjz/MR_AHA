@@ -2,6 +2,7 @@
 
 For every benchmark problem (see :mod:`common`) one application of the
 unmasked and of the default-masked (neighbourhood, radius 2) Toeplitz operator
+(:func:`mr_aha.create_op`, one GPU, kernel computed at creation)
 is compared with the NUFFT operator (cufinufft, default ``gpu_method``, on
 CUDA; mlx-nufft on Metal; ``eps = 1e-6``) on the same input as ``mask_threshold.py``: the true
 coefficient image where it is known, the CG right-hand side otherwise. The
@@ -44,10 +45,8 @@ def run(name):
         if need > free_bytes():
             rec["skipped"] = f"out of memory (needs ~{need / 2**30:.1f} GB)"
         else:
-            Om = mr_aha.calc_toep(cfg, d["phi2"], d["traj"], mask=mask)
-            with mr_aha.AhAPlan(cfg) as plan:
-                rec["op_error"] = rel(plan.apply(x, d["SEs"], Om, mask=mask), ref)
-            del Om
+            with mr_aha.create_op(cfg, d["SEs"], d["phi2"], d["traj"], mask) as op:
+                rec["op_error"] = rel(op(x), ref)
         del mask
         free_bytes()
         out[key] = rec

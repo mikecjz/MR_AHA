@@ -11,7 +11,13 @@ function check_reference_matlab(ref_dir)
 %                    it against the stored AhAx (the operator-level check that
 %                    matters when the NUFFT differs from the reference's);
 %     calc_mask      'neighbour' (must match exactly) and 'threshold';
-%     AhA_cufinufft  (the NUFFT reference operator) against the stored one.
+%     mr_aha_op      MR_AHA_OP.CREATE_OP with method 'toeplitz' (kernel
+%                    computed by the operator; lower/upper, unmasked and both
+%                    masks) against the stored AhAx, and with method 'nufft'
+%                    against the stored NUFFT result and against AHA_CUFINUFFT;
+%     AhA_cufinufft  (the independent NUFFT reference operator: finufft's own
+%                    MATLAB interface, no library code) against the stored
+%                    one.
 %
 %   Works with either backend (see MR_BACKEND): on CUDA the arrays go to the
 %   GPU, on Metal they stay ordinary arrays. Errors if any check fails, so
@@ -59,6 +65,11 @@ function check_reference_matlab(ref_dir)
                               ifelse(metal, tol_toep_ext, 1e-5)}; %#ok<AGROW>
             rows(end+1, :) = {['AhAx_' t ' (new toep)'], rel(AhA_Toeplitz( ...
                 z.x, z.SEs, Om, cfg), z.(['AhAx_' t])), tol_aha}; %#ok<AGROW>
+            % The operator object, kernel computed from the Gram blocks.
+            op = mr_aha_op.create_op(z.SEs, z.phi2, z.traj, cfg);
+            rows(end+1, :) = {['AhAx_' t ' (create_op)'], rel(op * z.x, ...
+                z.(['AhAx_' t])), tol_aha}; %#ok<AGROW>
+            delete(op);
             for m = {'neighbour', 'threshold'}
                 mm = m{1};
                 cfgm = cfg; cfgm.is_masked = true;
@@ -69,6 +80,10 @@ function check_reference_matlab(ref_dir)
                 Om = calc_toep(z.phi2, z.traj, cfgm, mask);
                 rows(end+1, :) = {['AhAx_' suf ' (new toep)'], rel(AhA_Toeplitz( ...
                     z.x, z.SEs, Om, cfgm, mask), z.(['AhAx_' suf])), tol_aha}; %#ok<AGROW>
+                op = mr_aha_op.create_op(z.SEs, z.phi2, z.traj, cfgm, 'mask', mask);
+                rows(end+1, :) = {['AhAx_' suf ' (create_op)'], rel(op * z.x, ...
+                    z.(['AhAx_' suf])), tol_aha}; %#ok<AGROW>
+                delete(op);
             end
         end
         % Masks.
@@ -77,11 +92,24 @@ function check_reference_matlab(ref_dir)
         mn = gather(calc_mask(z.traj, cn)); mt = gather(calc_mask(z.traj, ct));
         rows(end+1, :) = {'mask_neighbour', setdiff_frac(mn, z.mask_neighbour + 1), 0}; %#ok<AGROW>
         rows(end+1, :) = {'mask_threshold', setdiff_frac(mt, z.mask_threshold + 1), 1e-3}; %#ok<AGROW>
-        % NUFFT reference operator (CUDA: needs cufinufft's MATLAB interface).
+        % NUFFT operator (library) and the independent NUFFT reference
+        % (CUDA: needs cufinufft's MATLAB interface).
         has_nufft = metal || exist('cufinufft_plan', 'file') == 2;
-        if isfield(z, 'AhAx_nufft') && has_nufft
-            rows(end+1, :) = {'AhAx_nufft', rel(AhA_cufinufft(z.x, z.SEs, z.phi2, ...
-                z.traj, base), z.AhAx_nufft), tol_aha}; %#ok<AGROW>
+        op = mr_aha_op.create_op(z.SEs, z.phi2, z.traj, base, 'method', 'nufft');
+        y_op = op * z.x;
+        delete(op);
+        if isfield(z, 'AhAx_nufft')
+            rows(end+1, :) = {'AhAx_nufft (create_op)', rel(y_op, z.AhAx_nufft), ...
+                              tol_aha}; %#ok<AGROW>
+        end
+        if has_nufft
+            y_ref = AhA_cufinufft(z.x, z.SEs, z.phi2, z.traj, base);
+            rows(end+1, :) = {'create_op nufft vs AhA_cufinufft', rel(y_op, y_ref), ...
+                              tol_aha}; %#ok<AGROW>
+            if isfield(z, 'AhAx_nufft')
+                rows(end+1, :) = {'AhAx_nufft', rel(y_ref, z.AhAx_nufft), ...
+                                  tol_aha}; %#ok<AGROW>
+            end
         end
 
         vals = cell2mat(rows(:, 2)); tols = cell2mat(rows(:, 3));

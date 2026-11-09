@@ -141,7 +141,8 @@ add_library(mr_aha STATIC
     src/cuda/mr_kernels.cu
     src/cuda/mr_kernels_bd.cu
     src/cuda/mr_aha.cu
-    src/cuda/mr_mgpu.cu
+    src/cuda/mr_op.cu
+    src/cuda/mr_nufft_op.cu
     src/cuda/mr_calc_toep.cu
     src/cuda/mr_toep_mgpu.cu
     src/cuda/mr_calc_mask.cu
@@ -160,13 +161,16 @@ target_include_directories(mr_aha
 # that mr_complex is cuFloatComplex; see the typedef in the header.
 target_compile_definitions(mr_aha PUBLIC MR_AHA_CUDA_COMPLEX)
 
-# CUDA::cuda_driver: the multi-GPU plan checks whether a device's primary
-# context still exists (cuDevicePrimaryCtxGetState) before releasing it.
-# Threads::Threads: the multi-GPU calc_toep drives each GPU from its own host
-# thread (std::thread, src/cuda/mr_toep_mgpu.cu).
+# CUDA::cuda_driver: the operator (src/cuda/mr_op.cu) checks whether a
+# device's primary context still exists (cuDevicePrimaryCtxGetState) before
+# releasing it.
+# CUDA::cublas: the Gram multiplication of the NUFFT method is a batched GEMM
+# (src/cuda/mr_nufft_op.cu).
+# Threads::Threads: the multi-GPU kernel computation drives each GPU from its
+# own host thread (std::thread, src/cuda/mr_toep_mgpu.cu).
 find_package(Threads REQUIRED)
 target_link_libraries(mr_aha
-    PUBLIC  CUDA::cudart CUDA::cufft CUDA::cuda_driver Threads::Threads
+    PUBLIC  CUDA::cudart CUDA::cufft CUDA::cublas CUDA::cuda_driver Threads::Threads
     PRIVATE cufinufft
 )
 
@@ -180,7 +184,7 @@ set_target_properties(mr_aha PROPERTIES
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 
-set(MR_BACKEND_LINK_LIBRARIES CUDA::cudart CUDA::cufft CUDA::cuda_driver)
+set(MR_BACKEND_LINK_LIBRARIES CUDA::cudart CUDA::cufft CUDA::cublas CUDA::cuda_driver)
 
 else()
 

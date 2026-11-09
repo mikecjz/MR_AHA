@@ -16,11 +16,16 @@ non-uniform sample, as a row vector from the right (MR-Multitasking's
 :math:`\\Phi_2 = \\Phi\\Phi^H` of its readout, :math:`\\Phi` being the
 rank x time temporal basis (see :mod:`mr_aha.api`). Both
 NUFFTs are unnormalised, which is precisely the convention the Toeplitz kernel
-of :func:`mr_aha.calc_toep` reproduces, so ``AhANufftPlan.apply`` and
-``AhAPlan.apply`` agree to within the NUFFT tolerance.
+of :func:`mr_aha.calc_toep` reproduces, so ``AhANufftPlan.apply`` and the
+operator of :func:`mr_aha.create_op` (either method) agree to within the
+NUFFT tolerance.
 
-No C/CUDA/Metal code of the library is involved, so this path doubles as an
-independent check of the Toeplitz library and as the baseline of the
+This is the **independent reference**: no C/CUDA/Metal code of the library is
+involved (it uses the cufinufft Python package and CuPy), so the tests use it
+to validate both methods of :func:`mr_aha.create_op`, in particular
+``method='nufft'``, which runs the same algorithm inside the library (in C,
+on one or several GPUs). For reconstructions use :func:`mr_aha.create_op`;
+this module is kept for validation and as the baseline of the
 benchmarks. The engine follows the loaded backend (:func:`mr_aha.backend`):
 
 * **CUDA**: ``cufinufft`` plans, everything else in CuPy; arrays are CuPy.

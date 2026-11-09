@@ -1,15 +1,21 @@
 """Time one multi-GPU Toeplitz :math:`A^H A` application (CUDA backend).
 
-Runs :class:`mr_aha.MultiGPUPlan` at the sizes of the benchmark problems of
+Runs the Toeplitz operator of :func:`mr_aha.create_op` with
+``devices=[0, .., G-1]`` at the sizes of the benchmark problems of
 ``benchmarks/README.md`` (2D radial 160^2, stack-of-stars 320^2 x 56,
 3D kooshball 160^3; constant inputs, as in ``bench_aha_backend.py``) on
 ``G`` = 1, 2, ... GPUs, with the remainder split (``MR_AHA_MGPU_SPLIT``) off
 and in its automatic mode, and reports the median time of one application,
-the speed-up over one GPU (:class:`mr_aha.AhAPlan`), the parallel efficiency
-and the plan's choices (devices used, coils per device, split coils, measured
-peer bandwidth).
+the speed-up over one GPU (the same operator with ``devices=None``), the
+parallel efficiency and the operator's choices (``op.info``: devices used,
+coils per device, split coils, measured peer bandwidth).
 
-The primary device's constants are shared in place (``share_primary``), so
+Only the application is timed: the constant kernel is handed to the operator
+through the private ``_phi2_toep`` keyword (with placeholder Gram blocks, see
+:func:`bench_aha_backend.dummy_gram`), so ``plan_s`` is the time of copying it
+to the other GPUs (``toep_source = 'supplied'``) plus the buffers and plans,
+not of computing it (``bench_toep_mgpu.py`` measures that). The primary
+device's constants are shared in place (``share_primary``, the default), so
 the primary holds one copy of the kernel like a single-GPU run.
 
 Usage (from the repository root)::
@@ -38,7 +44,7 @@ sys.path.insert(0, str(ROOT / "python"))
 sys.path.insert(0, str(ROOT / "benchmarks"))
 
 import mr_aha  # noqa: E402
-from bench_aha_backend import CASES, centred_mask  # noqa: E402
+from bench_aha_backend import CASES, centred_mask, dummy_gram  # noqa: E402
 
 
 def timeit(fn, reps: int, sync) -> float:
@@ -76,12 +82,13 @@ def run_case(name: str, masked: bool, gpus, splits, reps: int,
     SEs = cp.full((n_coils, *reversed(n_dim)), 0.5 - 0.25j, dtype=cp.complex64)
     toep = cp.full(mr_aha.phi2_toep_shape(cfg), 1e-3 + 1e-4j, dtype=cp.complex64)
     out = cp.empty_like(x)
+    phi2, traj = dummy_gram(cfg, cp)
     sync = cp.cuda.Device().synchronize
     label = f"{name:5s} {'masked  ' if masked else 'unmasked'} {n_coils:2d} coils"
 
-    with mr_aha.AhAPlan(cfg) as plan:
-        t1 = timeit(lambda: plan.apply(x, SEs, toep, mask=mask, out=out), reps, sync)
-    print(f"{label} 1 GPU (AhAPlan)      {t1 * 1e3:8.1f} ms", flush=True)
+    with mr_aha.create_op(cfg, SEs, phi2, traj, mask, _phi2_toep=toep) as op:
+        t1 = timeit(lambda: op.apply(x, out=out), reps, sync)
+    print(f"{label} 1 GPU (create_op)    {t1 * 1e3:8.1f} ms", flush=True)
     rows = [dict(case=name, masked=masked, n_coils=n_coils, gpus=1,
                  split="single", median_s=t1,
                  speedup=1.0, efficiency=1.0, info=None)]
@@ -91,8 +98,8 @@ def run_case(name: str, masked: bool, gpus, splits, reps: int,
             os.environ["MR_AHA_MGPU_SPLIT"] = split
             try:
                 t0 = time.perf_counter()
-                op = mr_aha.MultiGPUPlan(cfg, SEs, toep, mask=mask,
-                                         devices=list(range(G)), share_primary=True)
+                op = mr_aha.create_op(cfg, SEs, phi2, traj, mask,
+                                      devices=list(range(G)), _phi2_toep=toep)
                 t_plan = time.perf_counter() - t0
             except mr_aha.MRError as err:
                 print(f"{label} {G} GPUs split={split:4s} failed: {err}", flush=True)
@@ -113,7 +120,7 @@ def run_case(name: str, masked: bool, gpus, splits, reps: int,
                   f"split {info['n_split_coils']}, groups {info['group']}, "
                   f"peer {info['peer_access']} {info['peer_bandwidth_gbs']:.1f} GB/s, "
                   f"plan {t_plan:.1f} s", flush=True)
-    del toep, x, SEs, out, mask
+    del toep, x, SEs, out, mask, phi2, traj
     cp.get_default_memory_pool().free_all_blocks()
     return rows
 

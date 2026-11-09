@@ -13,11 +13,11 @@
  *
  * @section mr_toep_mgpu_roles Receivers and helpers
  *
- * A *receiver* needs the whole kernel in its own memory: the primary device
- * for ::mr_calc_toep_mgpu, every device of a multi-GPU @f$A^H A@f$ plan for
- * ::mr_mgpu_plan_create_gram (each of them applies the whole kernel to its
- * own coils). A *helper* only computes components for the receivers and
- * keeps nothing.
+ * A *receiver* needs the whole kernel in its own memory: every device of a
+ * multi-GPU Toeplitz operator (::mr_op_create) that applies the kernel to its
+ * own coils. A *helper* only computes components for the receivers and keeps
+ * nothing (a device the operator does not use for coils, e.g. when the coils
+ * do not divide over all devices).
  *
  * @section mr_toep_mgpu_flow Flow of ::mr_toep_distribute
  *
@@ -43,8 +43,8 @@
  *     @f]
  *     where @f$p@f$ is what a receiver computed in the pilot. The exchange is
  *     chosen when it is faster; roughly, when a receiver can receive a
- *     component faster than it can compute one. `MR_AHA_TOEP_SPLIT` forces a
- *     mode.
+ *     component faster than it can compute one. ::mr_op_options::toep_dist
+ *     (or `MR_AHA_TOEP_SPLIT`) forces a mode.
  *  5. *Exchange* (one thread per device): compute the rest of the own range;
  *     after each chunk, record an event and copy the chunk to every other
  *     receiver, one copy at a time in rotated order on the device's copy
@@ -134,21 +134,41 @@ struct mr_tpush {
 /* Helpers                                                                  */
 /* ------------------------------------------------------------------------ */
 
-int mr_toep_split_env(void)
+int mr_toep_dist_resolve(int requested, int *mode_out)
 {
+    /* The environment variable overrides the option (benchmarks, A/B runs). */
+    int m = requested;
     const char *e = std::getenv("MR_AHA_TOEP_SPLIT");
-    if (e == NULL || e[0] == '\0') return MR_TOEP_DIST_AUTO;
-    if (!strcmp(e, "off")) return -1;
-    if (!strcmp(e, "split")) return MR_TOEP_DIST_EXCHANGE;
-    if (!strcmp(e, "replicate")) return MR_TOEP_DIST_SELF;
-    return MR_TOEP_DIST_AUTO;
+    if (e != NULL && e[0] != '\0') {
+        if (!strcmp(e, "auto")) m = MR_TOEP_DIST_AUTO;
+        else if (!strcmp(e, "split")) m = MR_TOEP_DIST_SPLIT;
+        else if (!strcmp(e, "replicate")) m = MR_TOEP_DIST_REPLICATE;
+        else if (!strcmp(e, "broadcast") || !strcmp(e, "off")) m = MR_TOEP_DIST_BROADCAST;
+        else
+            MR_FAIL(MR_ERR_INVALID_ARG,
+                    "MR_AHA_TOEP_SPLIT='%s' is not one of auto, split, replicate, "
+                    "broadcast (off)", e);
+    }
+    switch (m) {
+    case MR_TOEP_DIST_AUTO:      *mode_out = MR_TDIST_AUTO; break;
+    case MR_TOEP_DIST_SPLIT:     *mode_out = MR_TDIST_EXCHANGE; break;
+    case MR_TOEP_DIST_REPLICATE: *mode_out = MR_TDIST_SELF; break;
+    case MR_TOEP_DIST_BROADCAST: *mode_out = MR_TDIST_ALONE; break;
+    default:
+        MR_FAIL(MR_ERR_INVALID_ARG, "toep_dist = %d is not a valid mr_toep_dist", m);
+    }
+    return MR_SUCCESS;
 }
 
-int mr_mgpu_candidates(const char *who, const mr_config *cfg, const int *devices,
-                       int n_devices, int *cand, int *G_out, int *primary_out)
+int mr_op_candidates(const char *who, const mr_config *cfg, const int *devices,
+                     int n_devices, int *cand, int *G_out, int *primary_out)
 {
-    MR_REQUIRE(n_devices >= 0 && n_devices <= MR_MGPU_MAX_DEVICES,
-               "%s: n_devices must be in [0, %d]", who, MR_MGPU_MAX_DEVICES);
+    const int all = (devices == NULL && n_devices == MR_OP_ALL_DEVICES);
+    MR_REQUIRE(all || (n_devices >= 0 && n_devices <= MR_OP_MAX_DEVICES),
+               "%s: n_devices must be in [0, %d] or MR_OP_ALL_DEVICES (with "
+               "devices NULL)", who, MR_OP_MAX_DEVICES);
+    MR_REQUIRE(n_devices <= 0 || devices != NULL,
+               "%s: devices is NULL but n_devices = %d", who, n_devices);
     int ndev_visible = 0;
     MR_CUDA_CHECK(cudaGetDeviceCount(&ndev_visible));
     int primary = cfg->gpu_device_id;
@@ -160,21 +180,20 @@ int mr_mgpu_candidates(const char *who, const mr_config *cfg, const int *devices
      * order, without duplicates. */
     int G = 0;
     cand[G++] = primary;
-    const int explicit_list = (devices != NULL && n_devices > 0);
-    const int nreq = explicit_list ? n_devices : ndev_visible;
+    const int nreq = all ? ndev_visible : n_devices;
     for (int k = 0; k < nreq; ++k) {
-        const int dv = explicit_list ? devices[k] : k;
+        const int dv = all ? k : devices[k];
         MR_REQUIRE(dv >= 0 && dv < ndev_visible,
                    "%s: device %d is not visible (%d visible)", who, dv,
                    ndev_visible);
         int dup = 0;
         for (int j = 0; j < G; ++j) dup |= (cand[j] == dv);
         if (dup) continue;
-        if (!explicit_list) {
-            if (G == MR_MGPU_MAX_DEVICES) break; /* all visible: use the first 16 */
+        if (all) {
+            if (G == MR_OP_MAX_DEVICES) break; /* all visible: use the first 16 */
         } else {
-            MR_REQUIRE(G < MR_MGPU_MAX_DEVICES, "%s: at most %d devices are supported",
-                       who, MR_MGPU_MAX_DEVICES);
+            MR_REQUIRE(G < MR_OP_MAX_DEVICES, "%s: at most %d devices are supported",
+                       who, MR_OP_MAX_DEVICES);
         }
         cand[G++] = dv;
     }
@@ -199,8 +218,8 @@ static int mr_tfail(mr_tdev *d, int rc)
  */
 static void mr_tparallel(mr_tjob *job, void (*fn)(mr_tjob *, int))
 {
-    std::thread th[MR_MGPU_MAX_DEVICES];
-    int started[MR_MGPU_MAX_DEVICES] = {0};
+    std::thread th[MR_OP_MAX_DEVICES];
+    int started[MR_OP_MAX_DEVICES] = {0};
     for (int k = 0; k < job->G; ++k) {
         try {
             th[k] = std::thread(fn, job, k);
@@ -349,7 +368,7 @@ static int mr_tphase2_body(mr_tjob *job, int k)
     mr_tdev *d = &job->d[k];
     MR_CUDA_CHECK(cudaSetDevice(d->dev));
 
-    if (job->mode == MR_TOEP_DIST_EXCHANGE) {
+    if (job->mode == MR_TDIST_EXCHANGE) {
         if (d->r1 > d->r0) {
             mr_tpush pu = {job, k};
             int rc = mr_tpush_chunk(&pu, d->r0, d->done); /* the pilot */
@@ -446,9 +465,9 @@ static int mr_tprobe(mr_tjob *job, double *gbs)
 {
     const int G = job->G;
     const size_t B = MR_TOEP_PROBE_BYTES;
-    void *src[MR_MGPU_MAX_DEVICES] = {0};
-    void *dst[MR_MGPU_MAX_DEVICES] = {0};
-    cudaStream_t st[MR_MGPU_MAX_DEVICES] = {0};
+    void *src[MR_OP_MAX_DEVICES] = {0};
+    void *dst[MR_OP_MAX_DEVICES] = {0};
+    cudaStream_t st[MR_OP_MAX_DEVICES] = {0};
 
     cudaError_t ce = cudaSuccess;
     for (int i = 0; i < G && ce == cudaSuccess; ++i) {
@@ -509,13 +528,13 @@ int mr_toep_distribute(const mr_config *cfg, const mr_toep_dist_dev *devs, int G
                        int mode, mr_toep_dist_report *report)
 {
     const auto t_start = std::chrono::steady_clock::now();
-    MR_REQUIRE(G >= 1 && G <= MR_MGPU_MAX_DEVICES && devs[0].d_full != NULL,
+    MR_REQUIRE(G >= 1 && G <= MR_OP_MAX_DEVICES && devs[0].d_full != NULL,
                "mr_toep_distribute: bad device list");
     const int64_t ntri = mr_num_tri(cfg->L);
     const int64_t slab = cfg->is_masked ? (int64_t)cfg->num_masked : mr_pad_size(cfg);
 
     /* Helpers beyond the number of components would have nothing to do. */
-    mr_tdev *d = (mr_tdev *)calloc(MR_MGPU_MAX_DEVICES, sizeof(mr_tdev));
+    mr_tdev *d = (mr_tdev *)calloc(MR_OP_MAX_DEVICES, sizeof(mr_tdev));
     if (d == NULL) MR_FAIL(MR_ERR_ALLOC, "failed to allocate the device slots");
     int n = 0;
     for (int k = 0; k < G; ++k) {
@@ -552,7 +571,7 @@ int mr_toep_distribute(const mr_config *cfg, const mr_toep_dist_dev *devs, int G
         const char *e = std::getenv("MR_AHA_TOEP_CHUNKS");
         if (e && e[0] && atoll(e) >= 1) nchunks = atoll(e);
     }
-    job.max_chunk = (mode == MR_TOEP_DIST_SELF) ? 0 : (per + nchunks - 1) / nchunks;
+    job.max_chunk = (mode == MR_TDIST_SELF) ? 0 : (per + nchunks - 1) / nchunks;
 
     int rc = MR_SUCCESS;
     mr_toep_dist_report rep;
@@ -588,7 +607,7 @@ int mr_toep_distribute(const mr_config *cfg, const mr_toep_dist_dev *devs, int G
 
     /* Bandwidth for the cost model. */
     auto t_ph = std::chrono::steady_clock::now();
-    if (mode == MR_TOEP_DIST_AUTO && n > 1) {
+    if (mode == MR_TDIST_AUTO && n > 1) {
         if (mr_tprobe(&job, &rep.gather_gbs) != MR_SUCCESS) rep.gather_gbs = 0.0;
         mr_clear_error(); /* a failed probe is not an error of the call */
     }
@@ -633,9 +652,9 @@ int mr_toep_distribute(const mr_config *cfg, const mr_toep_dist_dev *devs, int G
         rep.entry_ms = te;
         rep.t_exchange_ms = t_x;
         rep.t_self_ms = t_self;
-        if (mode == MR_TOEP_DIST_AUTO)
-            job.mode = (rep.gather_gbs <= 0.0 || t_x < t_self) ? MR_TOEP_DIST_EXCHANGE
-                                                               : MR_TOEP_DIST_SELF;
+        if (mode == MR_TDIST_AUTO)
+            job.mode = (rep.gather_gbs <= 0.0 || t_x < t_self) ? MR_TDIST_EXCHANGE
+                                                               : MR_TDIST_SELF;
         else
             job.mode = mode;
         rep.mode = job.mode;
@@ -671,76 +690,14 @@ int mr_toep_distribute(const mr_config *cfg, const mr_toep_dist_dev *devs, int G
         printf("): %s, chunk %lld, %.3f ms/component, receive %.1f GB/s, model "
                "exchange %.0f ms / self %.0f ms; probe %.0f, setup+pilot %.0f, "
                "%s %.0f, cleanup %.0f, total %.0f ms\n",
-               rep.mode == MR_TOEP_DIST_EXCHANGE ? "split + exchange" : "replicate",
+               rep.mode == MR_TDIST_EXCHANGE ? "split + exchange" : "replicate",
                (long long)(d[0].done), rep.entry_ms, rep.gather_gbs,
                rep.t_exchange_ms, rep.t_self_ms, rep.probe_ms, rep.phase1_ms,
-               rep.mode == MR_TOEP_DIST_EXCHANGE ? "exchange" : "self",
+               rep.mode == MR_TDIST_EXCHANGE ? "exchange" : "self",
                rep.phase2_ms, rep.cleanup_ms, rep.total_ms);
         fflush(stdout);
     }
     if (report) *report = rep;
     free(d);
-    return rc;
-}
-
-/* ------------------------------------------------------------------------ */
-/* Public API: approach D, the kernel on one device computed by several     */
-/* ------------------------------------------------------------------------ */
-
-/** @brief Body of ::mr_calc_toep_mgpu; may change the current device. */
-static int mr_calc_toep_mgpu_impl(const mr_config *cfg, const int *devices,
-                                  int n_devices, const mr_complex *d_phi2,
-                                  const float *d_traj, int64_t Ntrajs, int64_t Nkx,
-                                  const int64_t *d_mask, mr_complex *d_phi2_toep)
-{
-    int cand[MR_MGPU_MAX_DEVICES];
-    int G = 0, primary = 0;
-    int rc = mr_mgpu_candidates("mr_calc_toep_mgpu", cfg, devices, n_devices, cand,
-                                &G, &primary);
-    if (rc != MR_SUCCESS) return rc;
-
-    mr_config pc = *cfg;
-    pc.gpu_device_id = primary;
-    const int mode = mr_toep_split_env();
-    /* One device, `off`, or `replicate` (which for a single receiver means
-     * the primary computes alone): the ordinary single-GPU path. */
-    if (G == 1 || mode < 0 || mode == MR_TOEP_DIST_SELF) {
-        MR_CUDA_CHECK(cudaSetDevice(primary));
-        return mr_calc_toep_impl(&pc, d_phi2, d_traj, Ntrajs, Nkx, d_mask,
-                                 d_phi2_toep);
-    }
-    mr_toep_dist_dev devs[MR_MGPU_MAX_DEVICES];
-    for (int k = 0; k < G; ++k) {
-        devs[k].dev = cand[k];
-        devs[k].d_full = (k == 0) ? d_phi2_toep : NULL;
-    }
-    return mr_toep_distribute(&pc, devs, G, d_phi2, d_traj, Ntrajs, Nkx, d_mask,
-                              mode, NULL);
-}
-
-extern "C" int mr_calc_toep_mgpu(const mr_config *cfg, const int *devices,
-                                 int n_devices, const mr_complex *d_phi2,
-                                 const float *d_traj, int64_t Ntrajs, int64_t Nkx,
-                                 const int64_t *d_mask, mr_complex *d_phi2_toep)
-{
-    mr_clear_error();
-    MR_REQUIRE(cfg != NULL, "mr_calc_toep_mgpu: cfg is NULL");
-    MR_REQUIRE(d_phi2 != NULL, "mr_calc_toep_mgpu: d_phi2 is NULL");
-    MR_REQUIRE(d_traj != NULL, "mr_calc_toep_mgpu: d_traj is NULL");
-    MR_REQUIRE(d_phi2_toep != NULL, "mr_calc_toep_mgpu: d_phi2_toep is NULL");
-    MR_REQUIRE(Ntrajs > 0, "mr_calc_toep_mgpu: Ntrajs = %lld must be > 0",
-               (long long)Ntrajs);
-    MR_REQUIRE(Nkx > 0, "mr_calc_toep_mgpu: Nkx = %lld must be > 0", (long long)Nkx);
-    if (cfg->is_masked)
-        MR_REQUIRE(d_mask != NULL,
-                   "mr_calc_toep_mgpu: d_mask is required when is_masked is set");
-    const int status = mr_config_validate(cfg);
-    if (status != MR_SUCCESS) return status;
-
-    int prev = 0;
-    MR_CUDA_CHECK(cudaGetDevice(&prev));
-    const int rc = mr_calc_toep_mgpu_impl(cfg, devices, n_devices, d_phi2, d_traj,
-                                          Ntrajs, Nkx, d_mask, d_phi2_toep);
-    cudaSetDevice(prev);
     return rc;
 }

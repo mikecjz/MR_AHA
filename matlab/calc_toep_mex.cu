@@ -6,17 +6,15 @@
  * @code
  *   phi2_toep = calc_toep_mex(phi2, traj, config)
  *   phi2_toep = calc_toep_mex(phi2, traj, config, mask)
- *   phi2_toep = calc_toep_mex(phi2, traj, config, mask, devices)
  * @endcode
  *
  * `phi2` is a complex single gpuArray of size `[Ntrajs, L, L]` (2D / 3D) or
  * `[Ntrajs, Nkz, L, L]` (stack), `traj` a real single gpuArray of size
  * `[Ntrajs, Nkx, ndim]` holding radians in @f$[-\pi, \pi)@f$, and `mask` an
- * `int64` gpuArray of 0-based linear indices (`[]` when unmasked). A
- * non-empty `devices`, an `int32` vector of **CUDA ordinals**, selects
- * ::mr_calc_toep_mgpu: those GPUs help MATLAB's current GPU compute the
- * kernel, which is returned on the current GPU. The helper GPUs are driven by
- * library threads that never call the MATLAB API.
+ * `int64` gpuArray of 0-based linear indices (`[]` when unmasked). The
+ * kernel is computed with ::mr_calc_toep on MATLAB's current GPU. (To build
+ * an operator on several GPUs, `mr_aha_op.create_op` computes the kernel on
+ * those GPUs itself.)
  *
  * Prefer the `calc_toep.m` wrapper, which performs the class and index-base
  * conversions.
@@ -35,15 +33,15 @@
  * @param[in]  nlhs Number of requested outputs (must be 0 or 1).
  * @param[out] plhs `plhs[0]` receives `phi2_toep` as a gpuArray shaped
  *                  `[Mx, My, Mz, (L^2+L)/2]` or `[num_masked, (L^2+L)/2]`.
- * @param[in]  nrhs Number of inputs (3 to 5).
- * @param[in]  prhs `{phi2, traj, config[, mask[, devices]]}`.
+ * @param[in]  nrhs Number of inputs (3 or 4).
+ * @param[in]  prhs `{phi2, traj, config[, mask]}`.
  */
 void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
 {
-    if (nrhs < 3 || nrhs > 5)
+    if (nrhs < 3 || nrhs > 4)
         mexErrMsgIdAndTxt(MR_ID,
                           "Usage: phi2_toep = calc_toep_mex(phi2, traj, "
-                          "config[, mask[, devices]]).");
+                          "config[, mask]).");
     if (nlhs > 1)
         mexErrMsgIdAndTxt(MR_ID, "Too many output arguments.");
 
@@ -61,10 +59,6 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     mr_mex_check_complex_single(g_phi2, "phi2", MR_ID);
     int64_t Ntrajs = 0, Nkx = 0;
     mr_mex_check_traj(g_traj, &cfg, &Ntrajs, &Nkx, MR_ID);
-
-    /* Helper GPUs (CUDA ordinals) for the multi-GPU path, if any. */
-    int devices[MR_MGPU_MAX_DEVICES];
-    const int n_devices = (nrhs == 5) ? mr_mex_devices(prhs[4], devices, MR_ID) : 0;
 
     if (cfg.is_masked) {
         if (nrhs < 4 || mxIsEmpty(prhs[3]))
@@ -99,11 +93,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     const int64_t    *p_mask =
         g_mask ? (const int64_t *)mxGPUGetDataReadOnly(g_mask) : NULL;
     mr_complex       *p_out  = (mr_complex *)mxGPUGetData(g_out);
-    const int rc = (n_devices > 0)
-                       ? mr_calc_toep_mgpu(&cfg, devices, n_devices, p_phi2, p_traj,
-                                           Ntrajs, Nkx, p_mask, p_out)
-                       : mr_calc_toep(&cfg, p_phi2, p_traj, Ntrajs, Nkx, p_mask,
-                                      p_out);
+    const int rc = mr_calc_toep(&cfg, p_phi2, p_traj, Ntrajs, Nkx, p_mask, p_out);
 
     if (rc != MR_SUCCESS) {
         mxGPUDestroyGPUArray(g_out);

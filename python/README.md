@@ -34,7 +34,9 @@ of `calc_mask` evaluate their type-1 NUFFT in Python with mlx-nufft and let the
 library finish the job (`mr_calc_toep_from_psf`, `mr_calc_mask_from_kernel`);
 see `mr_aha._psf`. Their `nufft=` argument selects the engine (`'mlx'`,
 `'finufft'` for CPU FINUFFT, or `'library'` for the CUDA backend's built-in
-cufinufft). `AhANufftPlan` uses MLX and mlx-nufft there.
+cufinufft). `AhANufftPlan` and `create_op(..., method="nufft")` use MLX and
+mlx-nufft there; `create_op` accepts `devices=None`, `0`, `[0]` or `"all"`
+(the one GPU).
 
 ## Array layout
 
@@ -62,62 +64,87 @@ row-major `(Nz, Ntrajs, L, L)`, is passed as `P.transpose(2, 3, 0, 1)` (plus an
 
 ## Usage
 
+One object, `AhAOp`, created from the Gram blocks, the trajectory and the
+sensitivity maps with `mr_aha.create_op` (or `mr_aha.AhAOp.create_op`), then
+applied as often as needed:
+
 ```python
 import cupy as cp
 import mr_aha
 
 cfg = mr_aha.make_config("stack", (256, 256, 64), L=16, n_coils=8)
 
-Om = mr_aha.calc_toep(cfg, phi2, traj)      # one-off pre-computation
-
-with mr_aha.AhAPlan(cfg) as plan:           # reuse inside the CG loop
+with mr_aha.create_op(cfg, SEs, phi2, traj) as op:  # kernel computed here
     for _ in range(n_iter):
-        y = plan.apply(x, SEs, Om)
+        y = op(x)                                    # or op.apply(x, out=y)
+    print(op.info)                                   # method, devices, timings
 ```
 
-Masked operators keep `phi2_toep` only at selected upsampled k-space samples.
-`calc_mask` derives them from the trajectory. By default it keeps every grid location within
-`mask_radius=2` cells of a sample. With `mask_method="threshold"` it thresholds the unit-weight
-Toeplitz kernel at `mask_threshold` (absolute, in samples, default 0.05) instead. Per call,
-`calc_mask(cfg, traj, radius=...)` or `threshold=...` overrides the configured method:
+Options of `create_op`:
+
+| argument | default | meaning |
+| --- | --- | --- |
+| `method` | `"toeplitz"` | `"toeplitz"`: the kernel `phi2_toep` is computed at creation, every application is FFT + block-diagonal multiplication. `"nufft"`: every application runs a type-2 NUFFT, the Gram multiplication on the samples and a type-1 NUFFT per coil (cufinufft, inside the library); no kernel, much less memory, slower per application. |
+| `devices` | `None` | `None`: the current GPU only. `"all"`: every visible GPU. A list of CUDA ordinals: those GPUs (the current one always takes part). Coils are split over the GPUs. |
+| `toep_dist` | `"auto"` | Toeplitz on several GPUs: how every GPU gets the kernel — `"split"` (each computes a share, shares exchanged), `"replicate"` (each computes all of it), `"broadcast"` (one computes, copies to the others), `"auto"` (cost model). |
+| `share_primary` | `True` | Use `SEs` (and `mask`) in place instead of copying them; do not modify them in place while the operator is open. |
+| `nufft_opts` | `None` | `method="nufft"`: `{"upsampfac": 2.0, "gpu_method": 0}`. |
+
+`op.kernel(k)` returns a read-only view of the Toeplitz kernel the operator
+holds on its `k`-th GPU (e.g. to save it).
+
+Masked operators keep `phi2_toep` only at selected upsampled k-space samples
+(Toeplitz method only). `calc_mask` derives them from the trajectory. By
+default it keeps every grid location within `mask_radius=2` cells of a sample.
+With `mask_method="threshold"` it thresholds the unit-weight Toeplitz kernel at
+`mask_threshold` (absolute, in samples, default 0.05) instead. Per call,
+`calc_mask(cfg, traj, radius=...)` or `threshold=...` overrides the configured
+method:
 
 ```python
 cfg  = mr_aha.make_config("stack", (256, 256, 64), L=16, n_coils=8, is_masked=True)
-mask = mr_aha.calc_mask(cfg, traj)                  # or your own indices
-Om   = mr_aha.calc_toep(cfg, phi2, traj, mask=mask) # fills cfg.num_masked
-y    = mr_aha.aha_toeplitz(cfg, x, SEs, Om, mask=mask)
+mask = mr_aha.calc_mask(cfg, traj)                   # or your own indices
+op   = mr_aha.create_op(cfg, SEs, phi2, traj, mask)  # fills cfg.num_masked
 ```
 
 `mask` holds **0-based** linear indices into the centred upsampled grid.
 
+### Low-level primitives
+
+`mr_aha.calc_toep(cfg, phi2, traj, mask)` computes the kernel on the current
+GPU and `mr_aha.aha_toeplitz(cfg, x, SEs, phi2_toep, mask)` applies it once
+(stateless; it allocates its buffers on every call). They are what the
+Toeplitz operator does internally on one GPU.
+
 ## Several GPUs (CUDA)
 
-`mr_aha.MultiGPUPlan` spreads the coils of one application over several GPUs
-and sums the partial results on the current CuPy device. The constant arrays
-are passed (and copied to every GPU) once, at creation; `apply` takes only `x`:
-
 ```python
-with mr_aha.MultiGPUPlan(cfg, SEs, Om, mask=None, devices=[0, 1, 2, 3],
-                         share_primary=True) as op:   # Om used in place on GPU 0
+with mr_aha.create_op(cfg, SEs, phi2, traj, devices=[0, 1, 2, 3]) as op:
     for _ in range(n_iter):
-        y = op.apply(x)                               # or op(x)
-    print(op.info)    # devices used, coils per device, split coils, peer bandwidth
+        y = op(x)     # x and y on the current CuPy device
+    print(op.info)    # devices used, coils per device, how the kernel was made
 ```
 
-The library may use fewer GPUs than given (the smallest number with the same
-coils per GPU) and keeps small problems on one GPU. See the
-[Multi-GPU section](../README.md#multi-gpu-cuda) of the main README.
+Every GPU applies its own coils and the partial results are summed on the
+current CuPy device. With the Toeplitz method every GPU holds the whole
+kernel, computed in parallel by the GPUs (`toep_dist`); with the NUFFT method
+every GPU holds its own NUFFT plans. The library may use fewer GPUs than given
+(the smallest number with the same coils per GPU) and keeps small problems on
+one GPU. See the [Multi-GPU section](../README.md#multi-gpu-cuda) of the main
+README.
 
 ## NUFFT reference
 
 `mr_aha.AhANufftPlan` evaluates the same operator with type-2 / type-1
 cufinufft transforms instead of the Toeplitz embedding (pure CuPy + the
-`cufinufft` package, no MR_AHA C code). It needs `pip install cufinufft`, and
+`cufinufft` package, no MR_AHA C code). It is the **independent reference**
+the tests validate both methods of `create_op` against (`method="nufft"` runs
+the same algorithm inside the library); use `create_op` for reconstructions. It needs `pip install cufinufft`, and
 the cufinufft wheel expects `libcudart.so.12` on the library path (load your
 CUDA module or install `nvidia-cuda-runtime-cu12`).
 
 ```python
 with mr_aha.AhANufftPlan(cfg, traj, type1_opts={"gpu_method": 1},
                          type2_opts={"gpu_method": 2}) as ref:
-    y_ref = ref.apply(x, SEs, phi2)    # agrees with aha_toeplitz to ~1e-6
+    y_ref = ref.apply(x, SEs, phi2)    # agrees with create_op(...)(x) to ~1e-6
 ```

@@ -172,30 +172,142 @@ class MRConfig(ctypes.Structure):
     ]
 
 
-#: Mirror of ``MR_MGPU_MAX_DEVICES``.
-MGPU_MAX_DEVICES = 16
+#: Mirror of ``MR_OP_MAX_DEVICES``: most devices one operator can use.
+OP_MAX_DEVICES = 16
 
-#: Mirror of ``MR_MGPU_SHARE_PRIMARY``.
-MGPU_SHARE_PRIMARY = 1
+#: Mirror of ``MR_OP_ALL_DEVICES`` (``n_devices`` selecting every visible
+#: device).
+OP_ALL_DEVICES = -1
 
-#: Names of the ``mr_mgpu_info.toep_source`` values (``MR_MGPU_TOEP_*``): how
-#: a multi-GPU plan obtained ``phi2_toep``.
-MGPU_TOEP_SOURCES = {0: "supplied", 1: "broadcast", 2: "split", 3: "replicate"}
+#: Mirror of ``MR_OP_SHARE_PRIMARY``.
+OP_SHARE_PRIMARY = 1
 
 
-class MRMgpuInfo(ctypes.Structure):
-    """``ctypes`` mirror of the C ``mr_mgpu_info`` struct (CUDA backend).
+class OpMethod:
+    """How :func:`mr_aha.create_op` evaluates :math:`A^H A` (``mr_op_method``)."""
 
-    Describes how a :class:`mr_aha.MultiGPUPlan` distributes the work; see
-    :attr:`mr_aha.MultiGPUPlan.info` for a dictionary view.
-    """
+    TOEPLITZ = 0
+    """Toeplitz embedding with a kernel pre-computed at creation (default)."""
+
+    NUFFT = 1
+    """Type-2 NUFFT, Gram multiplication, type-1 NUFFT per coil; no kernel."""
+
+    _FROM_STR = {"toeplitz": TOEPLITZ, "nufft": NUFFT}
+    _TO_STR = {TOEPLITZ: "toeplitz", NUFFT: "nufft"}
+
+    @classmethod
+    def parse(cls, value) -> int:
+        """Convert ``'toeplitz'``/``'nufft'`` to an enum value.
+
+        Args:
+            value: A string naming the method, or an int already in the enum.
+
+        Returns:
+            The integer enum value.
+
+        Raises:
+            ValueError: If ``value`` names no known method.
+        """
+        if isinstance(value, int) and value in cls._TO_STR:
+            return value
+        try:
+            return cls._FROM_STR[str(value).lower()]
+        except KeyError:
+            raise ValueError(
+                f"method must be 'toeplitz' or 'nufft'; got {value!r}"
+            ) from None
+
+
+class ToepDist:
+    """How a multi-GPU Toeplitz operator puts the kernel on every GPU
+    (``mr_toep_dist``). See :func:`mr_aha.create_op`."""
+
+    AUTO = 0
+    """Cost model: ``'split'`` or ``'replicate'``."""
+
+    SPLIT = 1
+    """Every GPU computes a share of the components; shares exchanged."""
+
+    REPLICATE = 2
+    """Every GPU computes the whole kernel itself, no transfers."""
+
+    BROADCAST = 3
+    """The primary computes the kernel alone and copies it to the others."""
+
+    _FROM_STR = {"auto": AUTO, "split": SPLIT, "replicate": REPLICATE,
+                 "broadcast": BROADCAST}
+
+    @classmethod
+    def parse(cls, value) -> int:
+        """Convert ``'auto'``/``'split'``/``'replicate'``/``'broadcast'``.
+
+        Args:
+            value: A string naming the mode, or an int already in the enum.
+
+        Returns:
+            The integer enum value.
+
+        Raises:
+            ValueError: If ``value`` names no known mode.
+        """
+        if isinstance(value, int) and 0 <= value <= 3:
+            return value
+        try:
+            return cls._FROM_STR[str(value).lower()]
+        except KeyError:
+            raise ValueError(
+                "toep_dist must be 'auto', 'split', 'replicate' or 'broadcast'; "
+                f"got {value!r}"
+            ) from None
+
+
+#: Names of the ``mr_op_info_t.toep_source`` values (``MR_OP_TOEP_*``): how
+#: an operator obtained ``phi2_toep``.
+OP_TOEP_SOURCES = {0: "supplied", 1: "broadcast", 2: "split", 3: "replicate",
+                   4: "none"}
+
+
+class MROpInputs(ctypes.Structure):
+    """``ctypes`` mirror of the C ``mr_op_inputs`` struct (arrays as raw
+    device or unified-memory pointers)."""
 
     _fields_ = [
+        ("d_SEs", ctypes.c_void_p),
+        ("d_phi2", ctypes.c_void_p),
+        ("d_traj", ctypes.c_void_p),
+        ("Ntrajs", ctypes.c_int64),
+        ("Nkx", ctypes.c_int64),
+        ("d_mask", ctypes.c_void_p),
+        ("d_phi2_toep", ctypes.c_void_p),
+    ]
+
+
+class MROpOptions(ctypes.Structure):
+    """``ctypes`` mirror of the C ``mr_op_options`` struct. Fill with
+    ``mr_op_options_defaults`` before overriding fields."""
+
+    _fields_ = [
+        ("method", ctypes.c_int),
+        ("devices", ctypes.POINTER(ctypes.c_int)),
         ("n_devices", ctypes.c_int),
-        ("devices", ctypes.c_int * MGPU_MAX_DEVICES),
-        ("coil_begin", ctypes.c_int * MGPU_MAX_DEVICES),
-        ("coil_count", ctypes.c_int * MGPU_MAX_DEVICES),
-        ("group", ctypes.c_int * MGPU_MAX_DEVICES),
+        ("toep_dist", ctypes.c_int),
+        ("flags", ctypes.c_int),
+        ("nufft_upsampfac", ctypes.c_double),
+        ("nufft_gpu_method", ctypes.c_int),
+    ]
+
+
+class MROpInfo(ctypes.Structure):
+    """``ctypes`` mirror of the C ``mr_op_info_t`` struct; see
+    :attr:`mr_aha.AhAOp.info` for a dictionary view."""
+
+    _fields_ = [
+        ("method", ctypes.c_int),
+        ("n_devices", ctypes.c_int),
+        ("devices", ctypes.c_int * OP_MAX_DEVICES),
+        ("coil_begin", ctypes.c_int * OP_MAX_DEVICES),
+        ("coil_count", ctypes.c_int * OP_MAX_DEVICES),
+        ("group", ctypes.c_int * OP_MAX_DEVICES),
         ("n_split_coils", ctypes.c_int),
         ("peer_access", ctypes.c_int),
         ("peer_bandwidth_gbs", ctypes.c_double),
@@ -204,6 +316,7 @@ class MRMgpuInfo(ctypes.Structure):
         ("toep_ms", ctypes.c_double),
         ("toep_component_ms", ctypes.c_double),
         ("toep_gather_gbs", ctypes.c_double),
+        ("create_ms", ctypes.c_double),
     ]
 
 
@@ -333,33 +446,24 @@ lib.mr_aha_plan_destroy.argtypes = [ctypes.c_void_p]
 lib.mr_aha_toeplitz.restype = ctypes.c_int
 lib.mr_aha_toeplitz.argtypes = [_cfg_p, _c_ptr, _c_ptr, _c_ptr, _c_ptr, _c_ptr]
 
-if hasattr(lib, "mr_mgpu_plan_create"):  # CUDA backend only
-    lib.mr_mgpu_plan_create.restype = ctypes.c_int
-    lib.mr_mgpu_plan_create.argtypes = [
-        _cfg_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int, _c_ptr, _c_ptr,
-        _c_ptr, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
-    lib.mr_mgpu_plan_execute.restype = ctypes.c_int
-    lib.mr_mgpu_plan_execute.argtypes = [ctypes.c_void_p, _c_ptr, _c_ptr]
-    lib.mr_mgpu_plan_info.restype = ctypes.c_int
-    lib.mr_mgpu_plan_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(MRMgpuInfo)]
-    lib.mr_mgpu_plan_destroy.restype = ctypes.c_int
-    lib.mr_mgpu_plan_destroy.argtypes = [ctypes.c_void_p]
-
-if hasattr(lib, "mr_mgpu_plan_create_gram"):  # CUDA backend only
-    lib.mr_mgpu_plan_create_gram.restype = ctypes.c_int
-    lib.mr_mgpu_plan_create_gram.argtypes = [
-        _cfg_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int, _c_ptr, _c_ptr,
-        _c_ptr, ctypes.c_int64, ctypes.c_int64, _c_ptr, ctypes.c_int,
+if hasattr(lib, "mr_op_create"):  # every backend that has the operator object
+    lib.mr_op_options_defaults.restype = ctypes.c_int
+    lib.mr_op_options_defaults.argtypes = [ctypes.POINTER(MROpOptions)]
+    lib.mr_op_create.restype = ctypes.c_int
+    lib.mr_op_create.argtypes = [
+        _cfg_p, ctypes.POINTER(MROpInputs), ctypes.POINTER(MROpOptions),
         ctypes.POINTER(ctypes.c_void_p)]
-    lib.mr_mgpu_plan_kernel.restype = ctypes.c_int
-    lib.mr_mgpu_plan_kernel.argtypes = [
+    lib.mr_op_execute.restype = ctypes.c_int
+    lib.mr_op_execute.argtypes = [ctypes.c_void_p, _c_ptr, _c_ptr]
+    lib.mr_op_info.restype = ctypes.c_int
+    lib.mr_op_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(MROpInfo)]
+    lib.mr_op_kernel.restype = ctypes.c_int
+    lib.mr_op_kernel.argtypes = [
         ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
-
-if hasattr(lib, "mr_calc_toep_mgpu"):  # CUDA backend only
-    lib.mr_calc_toep_mgpu.restype = ctypes.c_int
-    lib.mr_calc_toep_mgpu.argtypes = [
-        _cfg_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int, _c_ptr, _c_ptr,
-        ctypes.c_int64, ctypes.c_int64, _c_ptr, _c_ptr]
+    lib.mr_op_destroy.restype = ctypes.c_int
+    lib.mr_op_destroy.argtypes = [ctypes.c_void_p]
+    lib.mr_op_abandon.restype = ctypes.c_int
+    lib.mr_op_abandon.argtypes = [ctypes.c_void_p]
 
 lib.mr_calc_toep.restype = ctypes.c_int
 lib.mr_calc_toep.argtypes = [

@@ -1,13 +1,20 @@
 """Time one Toeplitz :math:`A^H A` application on whichever backend is loaded.
 
-Runs :class:`mr_aha.AhAPlan` at the sizes of the three benchmark problems of
-``benchmarks/README.md`` (2D radial 160^2, stack-of-stars 320^2 x 56,
-3D kooshball 160^3), unmasked and masked, and reports the plan-creation time
-and the median time of one application. Only the speed is measured, so the
-inputs are constant arrays (the operator has no data-dependent branches) and
-the mask is a centred disc (2D, stack) or ball (3D) keeping the same fraction
-of the upsampled grid as the benchmark's ``calc_mask`` masks (83 %, 81 %,
-64 %).
+Runs the Toeplitz operator of :func:`mr_aha.create_op` (one GPU) at the
+sizes of the three benchmark problems of ``benchmarks/README.md`` (2D radial
+160^2, stack-of-stars 320^2 x 56, 3D kooshball 160^3), unmasked and masked,
+and reports the operator-creation time (``plan_s``) and the median time of
+one application. Only the speed is measured, so the inputs are constant
+arrays (the operator has no data-dependent branches) and the mask is a
+centred disc (2D, stack) or ball (3D) keeping the same fraction of the
+upsampled grid as the benchmark's ``calc_mask`` masks (83 %, 81 %, 64 %).
+
+The constant kernel is handed to the operator through the private
+``_phi2_toep`` keyword of :func:`mr_aha.create_op` (used in place, no copy),
+so no kernel is computed and ``plan_s`` covers the work buffers and FFT plans
+only, as for the former plan object. :func:`dummy_gram` supplies the Gram
+blocks and trajectory that :func:`mr_aha.create_op` requires but does not use
+in that case.
 
 Works for both backends: CuPy arrays and CUDA-event-free wall-clock timing
 with a device synchronisation for ``'cuda'``, NumPy arrays for ``'metal'``
@@ -66,8 +73,31 @@ def centred_mask(cfg, keep: float) -> np.ndarray:
     return np.flatnonzero((r2 <= thr).ravel()).astype(np.int64)
 
 
+def dummy_gram(cfg, xp):
+    """Smallest valid ``(phi2, traj)`` for ``cfg`` (one readout, one sample).
+
+    :func:`mr_aha.create_op` always takes the Gram blocks and the trajectory;
+    when a finished kernel is supplied (``_phi2_toep``) they are only checked
+    for consistency with ``cfg``, never used, so placeholders suffice.
+
+    Args:
+        cfg: Configuration.
+        xp: Array module (CuPy or NumPy).
+
+    Returns:
+        ``(phi2, traj)``: zeros shaped ``(L, L, 1)`` (``(L, L, Nkz, 1)`` for a
+        stack) and ``(ndim, 1, 1)``.
+    """
+    L = int(cfg.L)
+    stack = cfg.traj_type == mr_aha.TrajType.STACK
+    phi2 = xp.zeros((L, L, int(cfg.phi2_dim[2]), 1) if stack else (L, L, 1),
+                    dtype=xp.complex64)
+    ndim = 3 if cfg.traj_type == mr_aha.TrajType.THREE_D else 2
+    return phi2, xp.zeros((ndim, 1, 1), dtype=xp.float32)
+
+
 def run_case(name: str, masked: bool, reps: int, xp, sync) -> dict:
-    """Time plan creation and ``reps`` applications of one configuration."""
+    """Time operator creation and ``reps`` applications of one configuration."""
     traj_type, n_dim, L, n_coils, keep = CASES[name]
     cfg = mr_aha.make_config(traj_type, n_dim, L, n_coils=n_coils,
                              is_masked=masked)
@@ -81,21 +111,23 @@ def run_case(name: str, masked: bool, reps: int, xp, sync) -> dict:
     SEs = xp.full((n_coils, *reversed(n_dim)), 0.5 - 0.25j, dtype=xp.complex64)
     toep = xp.full(mr_aha.phi2_toep_shape(cfg), 1e-3 + 1e-4j, dtype=xp.complex64)
     out = xp.empty_like(x)
+    phi2, traj = dummy_gram(cfg, xp)
 
+    sync()
     t0 = time.perf_counter()
-    plan = mr_aha.AhAPlan(cfg)
+    op = mr_aha.create_op(cfg, SEs, phi2, traj, mask, _phi2_toep=toep)
     sync()
     t_plan = time.perf_counter() - t0
     for _ in range(2):
-        plan.apply(x, SEs, toep, mask=mask, out=out)
+        op.apply(x, out=out)
     sync()
     ts = []
     for _ in range(reps):
         t0 = time.perf_counter()
-        plan.apply(x, SEs, toep, mask=mask, out=out)
+        op.apply(x, out=out)
         sync()
         ts.append(time.perf_counter() - t0)
-    plan.close()
+    op.close()
     res = dict(case=name, masked=masked, n_dim=n_dim, L=L, n_coils=n_coils,
                phi2_dim=[int(cfg.phi2_dim[i]) for i in range(cfg.n_spatial)],
                kept=(cfg.num_masked / np.prod([cfg.phi2_dim[i] for i in range(3)])
@@ -107,7 +139,7 @@ def run_case(name: str, masked: bool, reps: int, xp, sync) -> dict:
           f"{res['kernel_gb']:5.1f} GB  plan {t_plan * 1e3:7.1f} ms  "
           f"AhA median {res['median_s'] * 1e3:8.1f} ms  min {res['min_s'] * 1e3:8.1f} ms",
           flush=True)
-    del toep, x, SEs, out, mask
+    del toep, x, SEs, out, mask, phi2, traj
     return res
 
 

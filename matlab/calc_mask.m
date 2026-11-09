@@ -50,7 +50,10 @@ function [mask, kernel] = calc_mask(traj, config, threshold)
 %   OUTPUTS
 %     mask       int64 gpuArray column of sorted, 1-based linear indices into
 %                the centred upsampled grid config.phi2_dim. Pass it to
-%                CALC_TOEP and AHA_TOEPLITZ.
+%                MR_AHA_OP.CREATE_OP ('mask'), or to CALC_TOEP and
+%                AHA_TOEPLITZ. (Both MR_AHA_OP.CREATE_OP and CALC_TOEP call
+%                CALC_MASK themselves when a masked config comes without a
+%                mask.)
 %     kernel     single gpuArray |T| (the unit-weight kernel of the
 %                'threshold' method, before the max-filter), [Mx, My] for
 %                '2D'/'stack' or [Mx, My, Mz] for '3D', centred. Computed for
@@ -59,6 +62,8 @@ function [mask, kernel] = calc_mask(traj, config, threshold)
 %   EXAMPLE
 %     config = mr_default_config('3D', [160 160 160], 12, 'is_masked', true);
 %     mask   = calc_mask(traj, config);
+%     op     = mr_aha_op.create_op(SEs, phi2, traj, config, 'mask', mask);
+%     AhAx   = op * x;                  % or, with the low-level primitives:
 %     Om     = calc_toep(phi2, traj, config, mask);
 %     AhAx   = AhA_Toeplitz(x, SEs, Om, config, mask);
 %
@@ -68,7 +73,7 @@ function [mask, kernel] = calc_mask(traj, config, threshold)
 %            in the MEX file; 'threshold' (and the kernel output) needs a
 %            NUFFT, which runs in Python with mlx-nufft (see MR_PYTHON).
 %
-%   See also CALC_TOEP, AHA_TOEPLITZ, MR_DEFAULT_CONFIG.
+%   See also MR_AHA_OP, CALC_TOEP, AHA_TOEPLITZ, MR_DEFAULT_CONFIG.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 

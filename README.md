@@ -47,6 +47,30 @@ place through unified memory.
 
 ## The operations
 
+### `create_op` — the operator object
+
+```
+op   = mr_aha_op.create_op(SEs, phi2, traj, config, ...)       % MATLAB
+op   = mr_aha.create_op(cfg, SEs, phi2, traj, ...)             # Python
+       mr_op_create(&cfg, &inputs, &options, &op)              /* C */
+AhAx = op * x  /  op(x)  /  mr_op_execute(op, d_x, d_AhAx)
+```
+
+The one stateful object of the library: the complete operator $x \mapsto A^H A x$, built once from
+the Gram blocks, the trajectory and the sensitivity maps, then applied as often as an iterative
+reconstruction needs. Two methods evaluate the same operator:
+
+* `method = 'toeplitz'` (default): the kernel `phi2_toep` is computed at creation (`calc_toep`
+  below) and every application is the Toeplitz pipeline of `AhA_Toeplitz` below. Fast per
+  application; the kernel is the largest array.
+* `method = 'nufft'`: every application runs, per coil, a type-2 NUFFT, the Gram multiplication on
+  the samples and a type-1 NUFFT (cufinufft, inside the library). No kernel, so far less memory,
+  but slower per application. It is the baseline the Toeplitz method is compared against.
+
+`devices` puts the operator on several GPUs of one node (coils split over the GPUs, see
+[Multi-GPU](#multi-gpu-cuda)); by default it runs on the current GPU only, at the cost of the
+single-GPU primitives below.
+
 ### `calc_toep` — one-off pre-computation
 
 ```
@@ -58,10 +82,9 @@ Turns the non-Cartesian Gram blocks $\Phi_2 = \Phi\Phi^H$ (MR-Multitasking's
 $L \times L$ matrix per trajectory, into the Cartesian block-diagonal multiplier used by the
 operator. Internally: pack each block into a
 triangle, type-1 cufinufft onto the upsampled grid, centred inverse FFT, optional mask gather.
-The $(L^2+L)/2$ triangular components are independent, so on the CUDA backend
-`calc_toep(..., 'devices', 1:4)` (MATLAB) / `calc_toep(..., devices=[0, 1, 2, 3])` (Python) /
-`mr_calc_toep_mgpu` (C) spreads them over several GPUs and gathers the result on the current one
-(see [Multi-GPU](#multi-gpu-cuda)).
+This is a stateless, single-GPU primitive; the Toeplitz operator calls it internally (and, on
+several GPUs, spreads its $(L^2+L)/2$ independent triangular components over the GPUs, see
+[Multi-GPU](#multi-gpu-cuda)).
 
 ### `AhA_Toeplitz` — the hot loop
 
@@ -74,7 +97,8 @@ For every coil: multiply by the sensitivity map, zero-pad onto the upsampled gri
 rank coefficients at each k-space location, as a row vector from the right, by that location's
 Hermitian $L \times L$ block ($v \leftarrow v\,B$, as MR-Multitasking does), inverse FFT, crop,
 multiply by the adjoint sensitivity map, accumulate. No NUFFT is evaluated here, which is the whole point of the
-Toeplitz embedding.
+Toeplitz embedding. Stateless and single-GPU (`mr_aha_toeplitz` / `aha_toeplitz`); the operator object
+applies the same pipeline with its buffers kept between applications.
 
 ### `calc_mask` — automatic mask for the masked operator
 
@@ -95,9 +119,9 @@ y    = mr_aha.AhANufftPlan(cfg, traj).apply(x, SEs, phi2)    # Python
 ```
 
 The same operator evaluated the "vanilla" way, coil by coil: type-2 cufinufft, one $L\times L$ block
-per readout, type-1 cufinufft. Pure MATLAB / CuPy on top of cufinufft (no MR_AHA C code), used to
-validate the Toeplitz operator and as the benchmark baseline. Both agree with `AhA_Toeplitz` to
-$\sim 10^{-6}$.
+per readout, type-1 cufinufft. Pure MATLAB / CuPy on top of finufft's own interfaces (no MR_AHA C
+code): the **independent reference** the tests validate both methods of the operator against
+(`method = 'nufft'` runs the same algorithm inside the library). All agree to $\sim 10^{-6}$.
 
 ---
 
@@ -263,21 +287,25 @@ Put both `matlab/` and `build/matlab/` on the MATLAB path.
 ```matlab
 config = mr_default_config('stack', [320 320 56], 16);
 
-Om = calc_toep(phi2, traj, config);          % once
+op = mr_aha_op.create_op(SEs, phi2, traj, config);   % once: kernel computed here
 for it = 1:n_iter
-    AhAx = AhA_Toeplitz(x, SEs, Om, config); % inside the CG loop
+    AhAx = op * x;                                   % inside the CG loop (or op.apply(x))
 end
+delete(op);                                          % frees the GPU memory
 ```
 
-Masked operator, with the mask derived from the trajectory:
+Name-value options: `'method'` (`'toeplitz'` or `'nufft'`), `'devices'` (`[]`: the current GPU,
+`'all'`, or 1-based `gpuDevice` indices), `'mask'`, `'toep_dist'`, `'share_primary'`,
+`'nufft_opts'`; see `help mr_aha_op`. Masked operator, with the mask derived from the trajectory:
 
 ```matlab
 config = mr_default_config('stack', [320 320 56], 16, 'is_masked', true);
-[Om, mask] = calc_toep(phi2, traj, config);     % calls calc_mask when no mask is given
-AhAx   = AhA_Toeplitz(x, SEs, Om, config, mask);
-
-mask   = calc_mask(traj, config, 0.05);         % or explicitly, 1-based int64 gpuArray
+mask   = calc_mask(traj, config);                    % 1-based int64 gpuArray
+op     = mr_aha_op.create_op(SEs, phi2, traj, config, 'mask', mask);
 ```
+
+The stateless single-GPU primitives remain: `Om = calc_toep(phi2, traj, config)` and
+`AhAx = AhA_Toeplitz(x, SEs, Om, config[, mask])`.
 
 NUFFT reference (needs `-DMR_AHA_BUILD_CUFINUFFT_MATLAB=ON`, and `build/finufft/matlab` on the
 path, or any other cufinufft MATLAB installation):
@@ -295,8 +323,8 @@ The `.m` wrappers move host arrays to the GPU, cast to complex `single`, derive 
 > simply creating any `gpuArray`, is enough; the wrappers do this implicitly by moving their inputs.
 
 On Apple silicon the same functions take ordinary MATLAB arrays (no Parallel Computing Toolbox);
-`calc_toep`, the `'threshold'` mask and `AhA_cufinufft` run their NUFFTs through MATLAB's Python
-interface. See [Apple silicon](#apple-silicon-metal-backend).
+`calc_toep`, the `'threshold'` mask, `mr_aha_op.create_op` and `AhA_cufinufft` run their NUFFTs
+through MATLAB's Python interface. See [Apple silicon](#apple-silicon-metal-backend).
 
 ---
 
@@ -313,10 +341,9 @@ import mr_aha
 
 cfg = mr_aha.make_config("stack", (320, 320, 56), L=16, n_coils=12)
 
-Om = mr_aha.calc_toep(cfg, phi2, traj)
-with mr_aha.AhAPlan(cfg) as plan:
+with mr_aha.create_op(cfg, SEs, phi2, traj) as op:   # kernel computed here
     for _ in range(n_iter):
-        y = plan.apply(x, SEs, Om)
+        y = op(x)
 ```
 
 On Apple silicon the arrays are NumPy arrays instead of CuPy arrays (see
@@ -325,17 +352,22 @@ of the table above, because CuPy and NumPy are row-major: `x` is `(L, Nz, Ny, Nx
 `SEs` is `(Ncoils, Nz, Ny, Nx)`, `traj` is `(ndim, Nkx, Ntrajs)`, and so on. See
 [`python/README.md`](python/README.md).
 
-Masked operator and NUFFT reference (`pip install cufinufft`):
+Masked operator, NUFFT method, and the NUFFT reference (`pip install cufinufft`):
 
 ```python
 cfg  = mr_aha.make_config("3D", (160, 160, 160), L=12, n_coils=12, is_masked=True)
 mask = mr_aha.calc_mask(cfg, traj)
-Om   = mr_aha.calc_toep(cfg, phi2, traj, mask=mask)      # also sets cfg.num_masked
-y    = mr_aha.aha_toeplitz(cfg, x, SEs, Om, mask=mask)
+op   = mr_aha.create_op(cfg, SEs, phi2, traj, mask)      # also sets cfg.num_masked
 
-with mr_aha.AhANufftPlan(cfg, traj) as ref:
+cfg_nu = mr_aha.make_config("3D", (160, 160, 160), L=12, n_coils=12)
+op_nu  = mr_aha.create_op(cfg_nu, SEs, phi2, traj, method="nufft")
+
+with mr_aha.AhANufftPlan(cfg_nu, traj) as ref:           # independent reference
     y_ref = ref.apply(x, SEs, phi2)
 ```
+
+The stateless single-GPU primitives remain: `mr_aha.calc_toep(cfg, phi2, traj, mask)` and
+`mr_aha.aha_toeplitz(cfg, x, SEs, phi2_toep, mask)`.
 
 ---
 
@@ -350,22 +382,28 @@ cfg.n_dim[0] = 320; cfg.n_dim[1] = 320; cfg.n_dim[2] = 56;
 cfg.phi2_dim[0] = 640; cfg.phi2_dim[1] = 640; cfg.phi2_dim[2] = 56;
 cfg.L = 16; cfg.n_coils = 12;
 
-mr_calc_toep(&cfg, d_phi2, d_traj, Ntrajs, Nkx, NULL, d_toep);
+mr_op_inputs in = {0};
+in.d_SEs = d_SEs; in.d_phi2 = d_phi2; in.d_traj = d_traj;
+in.Ntrajs = Ntrajs; in.Nkx = Nkx;               /* d_mask when masked */
+mr_op_options opt;
+mr_op_options_defaults(&opt);                   /* Toeplitz, current GPU */
+/* opt.method = MR_OP_NUFFT; opt.devices = devs; opt.n_devices = 4; */
 
-mr_aha_plan plan;
-mr_aha_plan_create(&cfg, &plan);
+mr_op op;
+mr_op_create(&cfg, &in, &opt, &op);             /* kernel computed here */
 for (int it = 0; it < n_iter; ++it)
-    mr_aha_plan_execute(plan, d_x, d_SEs, d_toep, NULL, d_AhAx);
-mr_aha_plan_destroy(plan);
+    mr_op_execute(op, d_x, d_AhAx);
+mr_op_destroy(op);
 ```
 
 Every entry point returns `MR_SUCCESS` (0) or a negative `mr_status`; `mr_status_string` gives the
-category and `mr_last_error` the detailed, thread-local diagnostic. `mr_aha_toeplitz` is the
-one-shot convenience form. Link against `mr_aha`, or `target_link_libraries(your_target mr_aha)`
+category and `mr_last_error` the detailed, thread-local diagnostic. The stateless single-GPU
+primitives `mr_calc_toep`, `mr_aha_plan_*` and `mr_aha_toeplitz` remain available. Link against `mr_aha`, or `target_link_libraries(your_target mr_aha)`
 after `add_subdirectory(MR_AHA)`.
 
 [`examples/example_aha.cu`](examples/example_aha.cu) is a complete, self-contained program that
-builds a synthetic stack-of-stars problem and checks the operator's Hermitian symmetry.
+builds a synthetic stack-of-stars problem, checks the operator's Hermitian symmetry and compares
+the two methods.
 
 ---
 
@@ -373,29 +411,33 @@ builds a synthetic stack-of-stars problem and checks the operator's Hermitian sy
 
 $A^H A$ is a sum over coils, so one application can be spread over several GPUs of a node: each
 GPU applies the operator for a share of the coils and the partial results are summed on the
-caller's GPU (the *primary*). `phi2_toep` and the mask are copied to every GPU once, when the
-operator is created, together with each GPU's own sensitivity maps; an application then only
-broadcasts `x` and gathers the partial outputs. Multi-GPU makes the operator faster but does not
-raise the largest problem size: the whole kernel must fit on every GPU.
+caller's GPU (the *primary*). Whether an operator uses several GPUs is decided when it is created,
+with `devices`; the same GPUs build the operator's constants and apply it. An application then only
+broadcasts `x` and gathers the partial outputs. Both methods work this way:
+
+* **Toeplitz**: every GPU holds a copy of `phi2_toep` (computed by all GPUs together, below) and of
+  its coils' maps. Multi-GPU makes the operator faster but does not raise the largest problem size:
+  the whole kernel must fit on every GPU.
+* **NUFFT**: every GPU holds its own cufinufft plans, the Gram blocks and trajectory, and its coils'
+  maps. No kernel, so the memory per GPU is far smaller; set-up is plan creation on every GPU.
 
 ```matlab
-op   = mr_aha_op(SEs, Om, config, 'devices', 1:4);   % 1-based gpuDevice indices
-AhAx = op.apply(x);                                  % or op * x
-info = op.info();                                    % devices and coils used
+op   = mr_aha_op.create_op(SEs, phi2, traj, config, 'devices', 1:4);   % 1-based gpuDevice indices
+AhAx = op * x;                                                         % or op.apply(x)
+info = op.info();                                                      % devices, coils, timings
 delete(op);
 ```
 
 ```python
-with mr_aha.MultiGPUPlan(cfg, SEs, Om, devices=[0, 1, 2, 3]) as op:
-    y = op.apply(x)
+with mr_aha.create_op(cfg, SEs, phi2, traj, devices=[0, 1, 2, 3]) as op:   # or devices="all"
+    y = op(x)
     print(op.info)
 ```
 
 ```c
-mr_mgpu_plan op;
-mr_mgpu_plan_create(&cfg, devices, n_devices, d_SEs, d_toep, NULL, 0, &op);
-mr_mgpu_plan_execute(op, d_x, d_AhAx);
-mr_mgpu_plan_destroy(op);
+int devs[4] = {0, 1, 2, 3};
+opt.devices = devs; opt.n_devices = 4;          /* or n_devices = MR_OP_ALL_DEVICES */
+mr_op_create(&cfg, &in, &opt, &op);
 ```
 
 * **Primary GPU.** Inputs and outputs live on the current GPU (MATLAB's `gpuDevice`, CuPy's
@@ -405,79 +447,67 @@ mr_mgpu_plan_destroy(op);
 * **How many GPUs.** With $C$ coils on $G$ GPUs the time is set by $\lceil C/G \rceil$ coils, so
   the smallest number of GPUs with the same $\lceil C/G \rceil$ is used (12 coils on 5 GPUs use
   4). Small problems (fewer than $2^{22}$ upsampled values per coil, e.g. the 2D benchmark) stay
-  on the primary GPU; `MR_AHA_MGPU_MIN_WORK` changes the threshold.
-* **Remainder split.** When the coils do not divide over the GPUs, the remaining coils can be split
-  across all GPUs *by rank*, with an all-to-all exchange of k-space slabs around the block-diagonal
-  stage. `MR_AHA_MGPU_SPLIT=auto` (default) enables it only when a cost model, fed with a one-coil
-  timing and the measured GPU-to-GPU bandwidth, predicts a gain of at least 5 %, which in practice
-  needs NVLink; `on` / `off` force it.
-* **Memory.** Every GPU holds a copy of `phi2_toep`. `share_primary` (MATLAB, Python) /
-  `MR_MGPU_SHARE_PRIMARY` (C) lets the primary GPU use the caller's arrays in place instead of a
-  second copy; they must then stay unchanged while the operator exists. The primary also holds
-  one `x`-sized staging buffer per other GPU.
+  on the primary GPU; `MR_AHA_MGPU_MIN_WORK` changes the threshold. One GPU costs nothing extra
+  over the single-GPU primitives (no worker streams, no copies of `x`).
+* **Remainder split (Toeplitz).** When the coils do not divide over the GPUs, the remaining coils
+  can be split across all GPUs *by rank*, with an all-to-all exchange of k-space slabs around the
+  block-diagonal stage. `MR_AHA_MGPU_SPLIT=auto` (default) enables it only when a cost model, fed
+  with a one-coil timing and the measured GPU-to-GPU bandwidth, predicts a gain of at least 5 %,
+  which in practice needs NVLink; `on` / `off` force it.
+* **Memory.** `share_primary` (default on; `MR_OP_SHARE_PRIMARY` in C) lets the primary GPU use the
+  caller's `SEs` and mask in place instead of a second copy; they must then stay unchanged while
+  the operator exists. The primary also holds one `x`-sized staging buffer per other GPU.
 * **MATLAB lifetime.** The MEX file stays locked while an operator exists, so `clear mex` cannot
   unload it under a live operator. After `reset(gpuDevice)` or selecting another GPU, `apply`
   raises an error instead of computing; delete the operator and create a new one.
 
 ### Set-up: computing `phi2_toep` on all GPUs
 
-Building a multi-GPU operator from a kernel that `calc_toep` computed on one GPU costs
-$T_\mathrm{calc}$ on that GPU while the others are idle, plus copying the kernel from the primary
-to each of the other $G-1$ GPUs, all through the primary's own link. For 2D radial with L = 72
-(an 8.6 GB kernel) on 4 L40S over PCIe the set-up took 3.7 s, four times as long as 10 CG
-iterations. Building the operator from the Gram blocks instead avoids most of this. On the same
-4 GPUs the set-up drops to 1.9 s, which is faster than `calc_toep` alone on one GPU (2.0 s). For
-a 160³ kooshball (L = 12) it drops from 12.1 s to 4.3 s. See
-[docs/PERFORMANCE.md §3.4](docs/PERFORMANCE.md) for the mechanism and all measurements.
-
-```matlab
-op = mr_aha_op.from_gram(SEs, phi2, traj, config, 'devices', 1:4);  % no calc_toep call
-Om = op.kernel();                                                   % optional: a copy of the kernel
-```
-
-```python
-op = mr_aha.MultiGPUPlan.from_gram(cfg, SEs, phi2, traj, mask, devices=[0, 1, 2, 3])
-Om = op.kernel(0)                     # view of the plan's kernel on the primary GPU
-```
-
-```c
-mr_mgpu_plan_create_gram(&cfg, devices, n, d_SEs, d_phi2, d_traj, Ntrajs, Nkx, d_mask, 0, &op);
-```
+Computing the kernel on one GPU and copying it to the others costs $T_\mathrm{calc}$ on that GPU
+while the others are idle, plus copying the kernel from the primary to each of the other $G-1$
+GPUs, all through the primary's own link. For 2D radial with L = 72 (an 8.6 GB kernel) on 4 L40S
+over PCIe that set-up took 3.7 s, four times as long as 10 CG iterations. The Toeplitz operator
+therefore computes the kernel on all its GPUs at once (`toep_dist`). On the same 4 GPUs the set-up
+drops to 1.9 s, which is faster than `calc_toep` alone on one GPU (2.0 s). For a 160³ kooshball
+(L = 12) it drops from 12.1 s to 4.3 s. See [docs/PERFORMANCE.md §3.4](docs/PERFORMANCE.md) for
+the mechanism and all measurements.
 
 Each GPU computes a contiguous share of the components directly into its own copy of the kernel.
 The GPUs then exchange their shares (an all-gather), chunk by chunk, overlapped with the
 computation. Each GPU sends one copy at a time, to the others in rotated order, so every link
 carries about one transfer at a time. Letting every GPU send to all the others at once was
-several times slower on PCIe nodes whose GPUs sit on different NUMA nodes. Each GPU computes about $T_\mathrm{calc}/G$ and receives $(G-1)/G$ of the kernel over
-its own link, instead of the primary sending $(G-1)$ whole kernels. Every component is computed
-once, so the copies on all GPUs are bit-identical.
+several times slower on PCIe nodes whose GPUs sit on different NUMA nodes. Each GPU computes
+about $T_\mathrm{calc}/G$ and receives $(G-1)/G$ of the kernel over its own link, instead of the
+primary sending $(G-1)$ whole kernels. Every component is computed once, so the copies on all GPUs
+are bit-identical.
 
-* **When it pays off.** Computing $1/G$ and exchanging is faster than every GPU computing the
-  whole kernel itself when a GPU can receive one component faster than it can compute one. That
-  needs only a few GB/s (about 4 GB/s for the 2D L = 72 kernel), well below PCIe peer-to-peer and
-  far below NVLink.
-* **Cost model.** At creation every GPU computes and times the first chunk of its share (useful
-  work in either case). All GPUs then copy 64 MB to every receiver *at the same time*, with the
-  schedule of the exchange, to measure the bandwidth each gets when they share links. The library then picks the exchange
-  (`toep_source = 'split'`) or lets every GPU compute the kernel itself (`'replicate'`, e.g.
-  without peer access).
-* **Overrides.** `MR_AHA_TOEP_SPLIT=split|replicate|off|auto` (default `auto`). `off`
-  reproduces the old path: the primary computes the kernel and copies it to the others.
-  `MR_AHA_TOEP_CHUNKS` (default 4) is the minimum number of chunks per GPU; 1 disables the
-  overlap and is for benchmarking only.
-* **Report.** `info` gives `toep_source`, `toep_devices`, `toep_ms`, `toep_component_ms` and
-  `toep_gather_gbs`.
-* **Single-GPU consumers.** `calc_toep` with `devices` (`mr_calc_toep_mgpu`) uses the same engine
-  with only the primary receiving. Helper GPUs then need memory for their share only.
-* **Memory.** Every GPU that applies the operator holds a copy of the kernel, as before, plus the
-  transient buffers of `calc_toep` while computing. These are sized within `mem_fraction` of the
-  memory left after the copy. GPUs the operator does not use for coils (e.g. the 5th of 5 GPUs
-  with 12 coils) still help compute the kernel.
+* **`toep_dist`** (`'auto'` default, `'split'`, `'replicate'`, `'broadcast'`). `'split'` is the
+  exchange above, `'replicate'` lets every GPU compute the whole kernel itself (no transfers),
+  `'broadcast'` is the old path (the primary computes, then copies to the others). The
+  environment variable `MR_AHA_TOEP_SPLIT` (same values; `off` = `broadcast`) overrides the
+  argument; any other value is an error.
+* **When splitting pays off.** Computing $1/G$ and exchanging is faster than every GPU computing
+  the whole kernel itself when a GPU can receive one component faster than it can compute one.
+  That needs only a few GB/s (about 4 GB/s for the 2D L = 72 kernel), well below PCIe
+  peer-to-peer and far below NVLink.
+* **Cost model (`'auto'`).** At creation every GPU computes and times the first chunk of its share
+  (useful work in either case). All GPUs then copy 64 MB to every receiver *at the same time*, with
+  the schedule of the exchange, to measure the bandwidth each gets when they share links. The
+  library then picks the exchange (`toep_source = 'split'`) or lets every GPU compute the kernel
+  itself (`'replicate'`, e.g. without peer access). `MR_AHA_TOEP_CHUNKS` (default 4) is the
+  minimum number of chunks per GPU; 1 disables the overlap and is for benchmarking only.
+* **Report.** `info` gives `method`, `toep_source`, `toep_devices`, `toep_ms`,
+  `toep_component_ms`, `toep_gather_gbs` and `create_ms`; `kernel(k)` returns the kernel held on
+  the `k`-th GPU.
+* **Memory.** Every GPU that applies the operator holds a copy of the kernel plus, while
+  computing, the transient buffers of `calc_toep`, sized within `mem_fraction` of the memory left
+  after the copy. GPUs the operator does not use for coils (e.g. the 5th of 5 GPUs with 12 coils)
+  still help compute the kernel.
 
-`tests/check_mgpu.py` and `tests/check_mgpu_matlab.m` compare the multi-GPU and single-GPU
-operators, and `tests/check_toep_mgpu.py` compares the multi-GPU pre-computation with the
-single-GPU one. `benchmarks/bench_mgpu.py` measures the scaling of the operator, and
-`benchmarks/bench_toep_mgpu.py` measures the set-up.
+`tests/check_op.py` and `tests/check_op_matlab.m` compare the operator on one and several GPUs,
+with both methods, against the single-GPU primitives and the NUFFT reference.
+`benchmarks/bench_mgpu.py` measures the scaling of the operator, `benchmarks/bench_toep_mgpu.py`
+the set-up, and `benchmarks/bench_cg_breakdown.py` a short reconstruction with both methods.
 
 ---
 

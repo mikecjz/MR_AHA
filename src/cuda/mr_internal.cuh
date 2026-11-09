@@ -280,14 +280,21 @@ int mr_toep_ctx_destroy(mr_toep_ctx *ctx);
 int mr_enable_peer(int a, int b);
 
 /** @brief How the multi-GPU pre-computation of `phi2_toep` distributes the
- *         components (see ::mr_toep_distribute). */
-enum mr_toep_dist_mode {
-    MR_TOEP_DIST_AUTO      = 0, /**< Cost model: exchange or self.          */
-    MR_TOEP_DIST_EXCHANGE  = 1, /**< Every component computed once, then
-                                     copied to every device that needs it. */
-    MR_TOEP_DIST_SELF      = 2  /**< Every device that needs the whole
-                                     kernel computes it itself; helpers
-                                     drop out after the pilot.             */
+ *         components (internal form of the public ::mr_toep_dist; see
+ *         ::mr_toep_distribute and ::mr_toep_dist_resolve). */
+enum mr_tdist_mode {
+    MR_TDIST_AUTO      = 0, /**< Cost model: exchange or self.          */
+    MR_TDIST_EXCHANGE  = 1, /**< Every component computed once, then
+                                 copied to every device that needs it
+                                 (::MR_TOEP_DIST_SPLIT).                */
+    MR_TDIST_SELF      = 2, /**< Every device that needs the whole
+                                 kernel computes it itself; helpers
+                                 drop out after the pilot
+                                 (::MR_TOEP_DIST_REPLICATE).            */
+    MR_TDIST_ALONE     = 3  /**< Not a mode of ::mr_toep_distribute: the
+                                 primary computes the kernel with
+                                 ::mr_calc_toep_impl and the operator
+                                 copies it (::MR_TOEP_DIST_BROADCAST).  */
 };
 
 /** @brief One device taking part in ::mr_toep_distribute. */
@@ -301,7 +308,7 @@ struct mr_toep_dist_dev {
 /** @brief What ::mr_toep_distribute did (for reports and the plan's info). */
 struct mr_toep_dist_report {
     int    n_devices;     /**< Devices that computed components.            */
-    int    mode;          /**< ::MR_TOEP_DIST_EXCHANGE or ::MR_TOEP_DIST_SELF
+    int    mode;          /**< ::MR_TDIST_EXCHANGE or ::MR_TDIST_SELF
                                (what was run, after `auto`).               */
     double entry_ms;      /**< Measured GPU time of one component (slowest
                                device's pilot), ms.                        */
@@ -322,10 +329,10 @@ struct mr_toep_dist_report {
  * The components are split into contiguous, nearly equal ranges, one per
  * device. Every device computes the first chunk of its range (the *pilot*,
  * timed); then the cost model (or @p mode) decides between
- *  - ::MR_TOEP_DIST_EXCHANGE: every device computes the rest of its range and
+ *  - ::MR_TDIST_EXCHANGE: every device computes the rest of its range and
  *    copies each finished chunk to every receiver, so every receiver ends
  *    with the whole kernel and every component was computed exactly once;
- *  - ::MR_TOEP_DIST_SELF: every receiver computes all the components it does
+ *  - ::MR_TDIST_SELF: every receiver computes all the components it does
  *    not have yet itself (no transfer); helpers stop after the pilot.
  *
  * Synchronous: returns when every receiver holds the whole kernel. One host
@@ -336,7 +343,7 @@ struct mr_toep_dist_report {
  *                     are complete.
  * @param[in]  devs    Devices; `devs[0]` is the primary, which holds the
  *                     inputs, and must be a receiver. No duplicates.
- * @param[in]  G       Number of devices, `1 <= G <= MR_MGPU_MAX_DEVICES`.
+ * @param[in]  G       Number of devices, `1 <= G <= MR_OP_MAX_DEVICES`.
  * @param[in]  d_phi2  Gram blocks on the primary device.
  * @param[in]  d_traj  Trajectory on the primary device.
  * @param[in]  Ntrajs  Number of trajectories.
@@ -354,28 +361,35 @@ int mr_toep_distribute(const mr_config *cfg, const mr_toep_dist_dev *devs, int G
                        int mode, mr_toep_dist_report *report);
 
 /**
- * @brief Build the device list of a multi-GPU call: the primary device first
+ * @brief Build the device list of an operator: the primary device first
  *        (::mr_config::gpu_device_id, or the current device when -1), then
- *        @p devices (or every visible device when NULL) in order, without
- *        duplicates.
+ *        @p devices in order, without duplicates.
  * @param[in]  who         Function name for diagnostics.
  * @param[in]  cfg         Configuration.
  * @param[in]  devices     Requested CUDA ordinals, or NULL.
- * @param[in]  n_devices   Length of @p devices (0 with NULL).
- * @param[out] cand        Receives up to ::MR_MGPU_MAX_DEVICES ordinals.
+ * @param[in]  n_devices   Length of @p devices. With @p devices NULL: 0 for
+ *                         the primary only, ::MR_OP_ALL_DEVICES for every
+ *                         visible device (the first ::MR_OP_MAX_DEVICES).
+ * @param[out] cand        Receives up to ::MR_OP_MAX_DEVICES ordinals.
  * @param[out] G_out       Number of entries of @p cand.
  * @param[out] primary_out The primary device.
  * @return ::MR_SUCCESS, ::MR_ERR_INVALID_ARG or ::MR_ERR_CUDA.
  */
-int mr_mgpu_candidates(const char *who, const mr_config *cfg, const int *devices,
-                       int n_devices, int *cand, int *G_out, int *primary_out);
+int mr_op_candidates(const char *who, const mr_config *cfg, const int *devices,
+                     int n_devices, int *cand, int *G_out, int *primary_out);
 
 /**
- * @brief Parse `MR_AHA_TOEP_SPLIT` (`off`, `split`, `replicate`, `auto`).
- * @return -1 for `off` (the primary computes the kernel alone), otherwise a
- *         ::mr_toep_dist_mode (`auto` when unset or unrecognised).
+ * @brief Resolve the kernel distribution of a Toeplitz operator.
+ *
+ * The environment variable `MR_AHA_TOEP_SPLIT`
+ * (`auto|split|replicate|broadcast`, `off` = `broadcast`) overrides
+ * @p requested when set and non-empty; any other value is an error.
+ *
+ * @param[in]  requested ::mr_toep_dist from the options.
+ * @param[out] mode_out  The ::mr_tdist_mode to run.
+ * @return ::MR_SUCCESS or ::MR_ERR_INVALID_ARG (unknown value).
  */
-int mr_toep_split_env(void);
+int mr_toep_dist_resolve(int requested, int *mode_out);
 
 /**
  * @brief Coils per group chosen by a single-GPU plan (see
@@ -388,9 +402,68 @@ int mr_aha_plan_group(mr_aha_plan plan);
 /**
  * @brief Free only the host structure of a single-GPU plan whose device
  *        context was destroyed (its cuFFT plans and buffers went with the
- *        context and must not be touched); used by the multi-GPU plan.
+ *        context and must not be touched); used by the operator.
  * @param[in] plan A plan, or NULL.
  */
 void mr_aha_plan_forget(mr_aha_plan plan);
+
+/* ------------------------------------------------------------------------ */
+/* NUFFT engine of the operator (mr_nufft_op.cu)                            */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * @brief Opaque per-device state of the ::MR_OP_NUFFT method: cufinufft
+ *        type-2 / type-1 plans, the reordered trajectory and Gram blocks,
+ *        cuBLAS and the work buffers of one coil (see `mr_nufft_op.cu`).
+ */
+struct mr_nufft_eng;
+
+/**
+ * @brief Create a NUFFT engine on device ::mr_config::gpu_device_id.
+ *
+ * The current device must be that device. @p d_phi2 and @p d_traj may live
+ * on another device (@p src_dev, the operator's primary); they are copied in
+ * and reordered, and need not outlive the call.
+ *
+ * @param[in]  cfg        Configuration of this device's share:
+ *                        ::mr_config::n_coils is its number of coils,
+ *                        ::mr_config::gpu_device_id its ordinal (>= 0) and
+ *                        ::mr_config::stream its stream. Must not be masked.
+ * @param[in]  d_phi2     Gram blocks, see ::mr_calc_toep.
+ * @param[in]  d_traj     Trajectory, see ::mr_calc_toep.
+ * @param[in]  src_dev    Device holding @p d_phi2 and @p d_traj.
+ * @param[in]  Ntrajs     Number of readouts.
+ * @param[in]  Nkx        Samples per readout.
+ * @param[in]  upsampfac  cufinufft upsampling factor (<= 0: 2.0).
+ * @param[in]  gpu_method cufinufft `gpu_method` (<= 0: cufinufft's default).
+ * @param[out] out        Receives the engine; NULL on failure.
+ * @return ::MR_SUCCESS or a negative ::mr_status.
+ */
+int mr_nufft_eng_create(const mr_config *cfg, const mr_complex *d_phi2,
+                        const float *d_traj, int src_dev, int64_t Ntrajs, int64_t Nkx,
+                        double upsampfac, int gpu_method, mr_nufft_eng **out);
+
+/**
+ * @brief Apply the engine's coils: `d_out = sum_c S_c^H F+ B F- S_c d_x`.
+ *
+ * Asynchronous on the engine's stream; the current device must be the
+ * engine's.
+ *
+ * @param[in,out] e     Engine.
+ * @param[in]     d_x   Spatial coefficients on the engine's device.
+ * @param[in]     d_SEs The engine's ::mr_config::n_coils maps, consecutive.
+ * @param[out]    d_out Output, fully overwritten.
+ * @return ::MR_SUCCESS or a negative ::mr_status.
+ */
+int mr_nufft_eng_execute(mr_nufft_eng *e, const mr_complex *d_x,
+                         const mr_complex *d_SEs, mr_complex *d_out);
+
+/**
+ * @brief Release an engine.
+ * @param[in] e     Engine, or NULL (no-op).
+ * @param[in] alive Zero when the device's context was destroyed (reset): the
+ *                  device handles are then dropped without being used.
+ */
+void mr_nufft_eng_destroy(mr_nufft_eng *e, int alive);
 
 #endif /* MR_AHA_MR_INTERNAL_CUH */

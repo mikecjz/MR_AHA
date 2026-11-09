@@ -22,10 +22,15 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
 %   back (unnormalised inverse FFT). The centring is realised by a phase
 %   modulation folded into the coil map rather than by fftshift copies.
 %
-%   No custom C/CUDA code is involved: the NUFFTs come from cufinufft's own
-%   MATLAB interface (CUFINUFFT_PLAN) and everything else is gpuArray code.
-%   With the Metal backend (Apple silicon) the same operator runs through
-%   the Python mr_aha.AhANufftPlan (MLX + mlx-nufft) on ordinary arrays.
+%   ROLE: this is the independent REFERENCE of the NUFFT route, not the
+%   production implementation. No MR_AHA library code is involved: the
+%   NUFFTs come from cufinufft's own MATLAB interface (CUFINUFFT_PLAN) and
+%   everything else is gpuArray code. The tests use it to validate
+%   MR_AHA_OP.CREATE_OP(..., 'method', 'nufft'), which evaluates the same
+%   operator inside the library (cufinufft's C API, several GPUs if asked,
+%   no MATLAB per-coil loop). Use that operator in reconstructions. With the
+%   Metal backend (Apple silicon) this reference runs through the Python
+%   mr_aha.AhANufftPlan (MLX + mlx-nufft) on ordinary arrays.
 %
 %   INPUTS
 %     x       complex single gpuArray, [Nx, Ny, L] ('2D') or [Nx, Ny, Nz, L].
@@ -54,7 +59,7 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
 %   Nkx-by-L times L-by-L product per readout, which avoids materialising the
 %   [Ntrajs, Nkx, L, L] broadcast intermediate.
 %
-%   See also MR_NUFFT_PLAN, AHA_TOEPLITZ, CALC_TOEP.
+%   See also MR_AHA_OP, MR_NUFFT_PLAN, AHA_TOEPLITZ, CALC_TOEP.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
