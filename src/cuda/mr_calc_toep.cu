@@ -304,8 +304,22 @@ int mr_toep_ctx_create(const mr_config *cfg, const mr_complex *d_phi2,
     opts.gpu_device_id = dev;
     opts.debug = cfg->verbose ? 1 : 0;
     {
+        /* Tuning / benchmarking (experimental): cufinufft's internal
+         * upsampling factor sigma (MR_AHA_TOEP_UPSAMPFAC, 2.0 or 1.25 for the
+         * Horner kernel) and its type-1 spreading method
+         * (MR_AHA_TOEP_GPU_METHOD, 0 = cufinufft's choice, 1 = GM-sort,
+         * 2 = shared memory). sigma only sizes cufinufft's fine grid; the
+         * Toeplitz grid phi2_dim is unaffected. */
+        const char *e = std::getenv("MR_AHA_TOEP_UPSAMPFAC");
+        if (e && e[0] && atof(e) > 1.0) opts.upsampfac = atof(e);
+        e = std::getenv("MR_AHA_TOEP_GPU_METHOD");
+        if (e && e[0] && atoi(e) >= 0) opts.gpu_method = atoi(e);
+    }
+    {
         /* Bound cufinufft's internal fine grid: sigma^D * prod(M) per transform. */
-        const double sigma_d = (nufft_dim == 3) ? 8.0 : 4.0;
+        const double sigma_d = (nufft_dim == 3)
+            ? opts.upsampfac * opts.upsampfac * opts.upsampfac
+            : opts.upsampfac * opts.upsampfac;
         const int64_t fine = (nufft_dim == 3) ? pad_size : (int64_t)Mx * My;
         const size_t per_tr = (size_t)(sigma_d * (double)fine) * sizeof(mr_complex);
         int64_t mb = (per_tr > 0) ? (int64_t)(nufft_budget / per_tr) : ntr;

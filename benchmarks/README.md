@@ -338,6 +338,47 @@ access (copies go through the host at ~4 GB/s), so the split is never chosen the
 Reproduce with `benchmarks/hpc/run_mgpu_h100.sh` (`PART=test|single|bench|split|matlab`); the raw
 numbers are in `results/esplhpc-cp089/` and `results/pact400-recon3/aha_cuda*.json`.
 
+## Experimental: cufinufft upsampling factor in `calc_toep`
+
+`calc_toep` runs its type-1 transforms at cufinufft's standard upsampling factor σ = 2. The
+experimental environment variables `MR_AHA_TOEP_UPSAMPFAC` (σ, default 2.0) and
+`MR_AHA_TOEP_GPU_METHOD` (type-1 spreading method, default 0 = cufinufft's choice) change that;
+[`toep_upsampfac.py`](toep_upsampfac.py) sweeps σ ∈ {2, 1.25}, `eps` ∈ {1e-6, 1e-5, 1e-4} and
+method ∈ {auto, 1 = GM-sort} on one TITAN RTX (`pact400-recon3`). Time is the kernel computation
+inside `create_op` (minimum of two); the error is one $A^HA$ application against the NUFFT operator
+(σ = 2, `eps` = 1e-6). The 3D problem uses the default neighbourhood mask; 2D and stack are
+unmasked. Raw numbers: `results/pact400-recon3/toep_upsampfac_<problem>.json`.
+
+| problem | eps | method | σ = 2 (default) | σ = 1.25 |
+|---|---|---|---|---|
+| 2D | 1e-6 | auto | 18 ms / 9.3e-7 | 21 ms / 1.7e-6 |
+| | 1e-6 | GM-sort | 11 ms / 1.1e-6 | 14 ms / 1.9e-6 |
+| | 1e-4 | GM-sort | 7 ms / 1.6e-5 | 7 ms / 5.2e-6 |
+| stack | 1e-6 | auto | 2.95 s / 1.2e-6 | 3.45 s / 2.2e-6 |
+| | 1e-6 | GM-sort | 2.28 s / 1.1e-6 | 2.55 s / 2.2e-6 |
+| | 1e-5 | GM-sort | 2.11 s / 1.4e-6 | 2.27 s / 2.1e-6 |
+| | 1e-4 | GM-sort | 1.96 s / 2.1e-5 | 1.75 s / 4.7e-6 |
+| 3D (masked) | 1e-6 | auto | 18.0 s / 1.9e-6 | 32.7 s / 2.3e-6 |
+| | 1e-5 | auto | 12.6 s / 3.3e-6 | 19.4 s / 2.9e-6 |
+| | 1e-4 | auto | 8.0 s / 1.9e-5 | 7.2 s / 4.8e-6 |
+| | 1e-6 | GM-sort | 7.0 s / 1.5e-5 | 10.2 s / 8.5e-5 |
+| | 1e-5 | GM-sort | 5.8 s / 6.0e-6 | 7.9 s / 6.1e-5 |
+| | 1e-4 | GM-sort | 5.0 s / 2.1e-5 | 4.6 s / 6.9e-5 |
+
+* **At the same `eps`, σ = 1.25 is slower (up to 1.8×).** The Toeplitz type-1 transform has
+  2N modes per axis, so the samples are dense on the fine grid and spreading, not the FFT,
+  dominates. σ = 1.25 needs a kernel about 1.4× wider for the same `eps`, i.e. about 2× (2D) to
+  3× (3D) more spreading work, which outweighs the 0.39× (2D) / 0.24× (3D) smaller FFT.
+* **At matched accuracy σ = 1.25 can win.** Its kernel width formula is more conservative, so at
+  `eps = 1e-4` it reaches about 5·10⁻⁶. For 3D (auto method) that is 7.2 s against 12.6 s for
+  σ = 2 at `eps = 1e-5` (3.3·10⁻⁶): 1.7× faster. For stack the gain is 1.2× at a 3× larger error;
+  2D gains nothing.
+* **GM-sort (method 1) trades accuracy in 3D.** It is 1.2–1.6× faster than cufinufft's choice
+  (shared memory) in 2D and stack at equal accuracy, and 2.5× faster in 3D, but there its error
+  grows 5–30× (to 10⁻⁵–10⁻⁴), probably from fp32 global atomics in dense cells.
+* **Default unchanged.** σ = 2 and cufinufft's method choice stay the defaults; the variables are
+  experimental and not part of the API.
+
 ## Apple silicon (Metal backend)
 
 The same benchmark on a Mac Studio (Apple M3 Ultra, 512 GB unified memory) with the Metal backend
