@@ -303,8 +303,11 @@ static int mr_nu_fetch(void **tmp, const void **view, const void *src, int src_d
  * @param[in]     d_traj     Trajectory [Ntrajs, Nkx, n_dim] on @p src_dev.
  * @param[in]     src_dev    CUDA ordinal of the device holding the inputs.
  * @param[in]     upsampfac  cufinufft upsampling factor (0: 2.0).
- * @param[in]     gpu_method cufinufft spreading method (0: cufinufft's
- *                           choice).
+ * @param[in]     gpu_method cufinufft spreading method for both plans
+ *                           (1: non-uniform points driven, 2: shared
+ *                           memory); 0 for the library default: method 1
+ *                           for the type-1 plan and cufinufft's own choice
+ *                           (method 1) for the type-2 plan.
  * @return ::MR_SUCCESS or a negative ::mr_status.
  */
 static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
@@ -426,6 +429,12 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
     opts.modeord = 0;          /* centred (CMCL) modes, like the library     */
     opts.gpu_device_id = dev;  /* cufinufft ignores the current device       */
     opts.gpu_stream = (void *)s;
+    /* gpu_method 0 = the library default: type 2 keeps cufinufft's choice
+     * (non-uniform points driven, method 1), type 1 is set to method 1
+     * below instead of cufinufft's shared-memory method 2, which was 1.06x
+     * (L40S) to 1.39x (TITAN RTX) slower per A^H A on the stack-of-stars
+     * benchmark (benchmarks/bench_aha_methods.py) at equal accuracy. A
+     * positive gpu_method applies to both plans. */
     if (gpu_method > 0) opts.gpu_method = gpu_method;
     opts.debug = 0;
     const int nufft_dim = (cfg->traj_type == MR_TRAJ_3D) ? 3 : 2;
@@ -439,6 +448,7 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
         MR_FAIL(MR_ERR_CUFINUFFT, "cufinufftf_makeplan (type 2) failed with code %d",
                 err);
     }
+    if (gpu_method <= 0) opts.gpu_method = 1; /* library default for type 1 */
     err = cufinufftf_makeplan(1, nufft_dim, modes, +1, (int)e->ntr, eps, &e->t1, &opts);
     if (err != 0) {
         e->t1 = NULL;

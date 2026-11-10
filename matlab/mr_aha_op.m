@@ -129,8 +129,10 @@ classdef mr_aha_op < handle
 %                        .upsampfac   upsampling factor (default 2, the
 %                                     setting of AHA_CUFINUFFT)
 %                        .gpu_method  cufinufft's gpu_method (1: non-uniform
-%                                     points driven, 2: shared memory;
-%                                     default 0, cufinufft's choice)
+%                                     points driven, 2: shared memory,
+%                                     for both transforms; default 0:
+%                                     method 1 for type 1, cufinufft's
+%                                     choice for type 2)
 %                      Default struct() (all defaults). A non-empty struct
 %                      with the Toeplitz method is an error.
 %

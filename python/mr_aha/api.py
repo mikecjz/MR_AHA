@@ -834,7 +834,9 @@ class AhAOp:
                 which must not be modified in place while it is open.
             nufft_opts: ``method='nufft'`` only: ``{'upsampfac': 2.0,
                 'gpu_method': 0}`` (cufinufft's upsampling factor, default 2,
-                and ``gpu_method``, 0 for cufinufft's default).
+                and cufinufft's ``gpu_method`` for both transforms, 1 or 2;
+                0, the default, uses method 1 for the type-1 transform and
+                cufinufft's choice for the type-2 one).
             _phi2_toep: Private: a finished kernel to use instead of
                 computing one (tests, benchmarks, and the Metal backend
                 internally). ``phi2`` and ``traj`` may then be ``None``.

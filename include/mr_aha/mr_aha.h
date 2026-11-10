@@ -725,8 +725,11 @@ typedef struct mr_op_options {
      *  (the setting of the reference operators). The tolerance is
      *  ::mr_config::eps. */
     double       nufft_upsampfac;
-    /** ::MR_OP_NUFFT: cufinufft `gpu_method` (1: non-uniform points driven,
-     *  2: shared memory), 0 for cufinufft's default. */
+    /** ::MR_OP_NUFFT: cufinufft `gpu_method` for both transforms (1:
+     *  non-uniform points driven, 2: shared memory). 0 (default) selects the
+     *  library default: method 1 for the type-1 transform (faster than
+     *  cufinufft's own shared-memory choice in the benchmarks, at equal
+     *  accuracy) and cufinufft's choice (method 1) for the type-2 one. */
     int          nufft_gpu_method;
 } mr_op_options;
 
