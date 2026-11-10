@@ -13,8 +13,12 @@ for each problem, tolerance ``eps`` and type-1 spreading method
 * ``toep_s``: the kernel computation time inside :func:`mr_aha.create_op`
   (the operator's ``info['toep_ms']``), the minimum over ``N_REP`` creations;
 * ``op_error``: ``||T x - A^H A x|| / ||A^H A x||`` of one application of the
-  Toeplitz operator against the NUFFT operator (cufinufft, sigma = 2,
-  eps = 1e-6), on the same input as ``op_error.py``.
+  Toeplitz operator against the NUFFT operator (cufinufft on CUDA, mlx-nufft
+  on Metal; sigma = 2, eps = 1e-6), on the same input as ``op_error.py``.
+
+On Metal the kernel's NUFFT is mlx-nufft (``mr_aha._psf``), which reads the
+same ``MR_AHA_TOEP_UPSAMPFAC``; it has no spreading-method switch, so only
+method 0 is run there.
 
 The 3D problem uses the default (neighbourhood) mask, since its unmasked
 kernel does not fit on a 24 GB GPU; the others are unmasked.
@@ -31,13 +35,13 @@ from __future__ import annotations
 import os
 import sys
 
-from common import (RESULTS, free_bytes, gpu_info, load, make_cfg, mr_aha,
+from common import (BACKEND, RESULTS, free_bytes, gpu_info, load, make_cfg, mr_aha,
                     rel, save_json, toeplitz_op)
 
 N_REP = 2
 SIGMAS = (2.0, 1.25)
 EPSS = (1e-6, 1e-5, 1e-4)
-METHODS = (0, 1)
+METHODS = (0, 1) if BACKEND == "cuda" else (0,)
 
 
 def run(name):

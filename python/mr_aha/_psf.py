@@ -7,8 +7,8 @@ builds ``phi2_toep`` in two stages there:
    the stored triangle (:class:`~mr_aha.Triangulation`), each stored element is
    broadcast along its readout to give the non-uniform strengths, and a type-1
    NUFFT with sign -1, centred (``modeord = 0``) modes ``phi2_dim`` and
-   upsampling factor 2 evaluates the point-spread function of each triangular
-   component. This is exactly what the CUDA ``mr_calc_toep`` does with
+   upsampling factor 2 (see :func:`toep_upsampfac`) evaluates the
+   point-spread function of each triangular component. This is exactly what the CUDA ``mr_calc_toep`` does with
    cufinufft before its inverse FFT.
 2. **The library** (``mr_calc_toep_from_psf``): centred inverse FFT,
    ``1/prod(M)`` scaling and the optional mask gather.
@@ -37,10 +37,46 @@ import numpy as np
 
 from ._lib import MRConfig, TrajType, Triangulation, check, lib
 
-__all__ = ["ENGINES", "tri_pairs", "calc_toep_two_stage"]
+__all__ = ["ENGINES", "tri_pairs", "calc_toep_two_stage", "toep_upsampfac"]
 
 #: NUFFT engines accepted by :func:`calc_toep_two_stage`.
 ENGINES = ("mlx", "finufft")
+
+#: Experimental environment variable that overrides the NUFFT upsampling
+#: factor of the kernel computation; the same name is read by the CUDA
+#: ``mr_calc_toep``.
+UPSAMPFAC_ENV = "MR_AHA_TOEP_UPSAMPFAC"
+
+
+def toep_upsampfac() -> float:
+    """Upsampling factor sigma of the type-1 NUFFT that computes the kernel.
+
+    **Experimental.** The default is 2.0, the standard (FINUFFT / cufinufft)
+    setting. The environment variable ``MR_AHA_TOEP_UPSAMPFAC``, read at every
+    kernel computation, overrides it; 1.25 is the other value worth trying.
+    sigma only sizes the NUFFT's internal fine grid and its spreading kernel:
+    the Toeplitz grid ``phi2_dim`` is unchanged. At the same ``eps``,
+    sigma = 1.25 needs a wider kernel, so it pays off only at a looser
+    ``eps`` (see ``benchmarks/README.md``). mlx-nufft caps that kernel at
+    width 8 in 3D (fp32), which bounds the achievable error to about 5e-5.
+
+    Returns:
+        sigma, a float > 1.
+
+    Raises:
+        ValueError: The environment variable is set but is not a number > 1.
+    """
+    env = os.environ.get(UPSAMPFAC_ENV, "").strip()
+    if not env:
+        return 2.0
+    try:
+        sigma = float(env)
+    except ValueError:
+        sigma = 0.0
+    if not sigma > 1.0:
+        raise ValueError(f"{UPSAMPFAC_ENV} must be a number > 1 (e.g. 2.0 or "
+                         f"1.25), got {env!r}")
+    return sigma
 
 
 def tri_pairs(L: int, triangulation: int) -> list:
@@ -102,6 +138,8 @@ class _Type1:
                        for d in reversed(range(traj.shape[0])))
         self.engine = engine
         self.modes = modes_rev
+        #: NUFFT upsampling factor, see :func:`toep_upsampfac`.
+        self.upsampfac = toep_upsampfac()
         if engine == "mlx":
             try:
                 from mlx_nufft import Type1PlanND  # noqa: PLC0415
@@ -111,7 +149,7 @@ class _Type1:
                     "it from the submodule: `pip install -e third_party/mlx-nufft`"
                 ) from exc
             self._plan = Type1PlanND(coords, modes_rev, eps=max(eps, 1e-6),
-                                     isign=-1, upsampfac=2.0)
+                                     isign=-1, upsampfac=self.upsampfac)
         elif engine == "finufft":
             import finufft  # noqa: PLC0415
             self._fn = {2: finufft.nufft2d1, 3: finufft.nufft3d1}[len(modes_rev)]
@@ -125,7 +163,7 @@ class _Type1:
         if self.engine == "mlx":
             return self._plan.execute_batch(cs)
         out = self._fn(*self._coords, cs.astype(np.complex128), self.modes,
-                       eps=self._eps, isign=-1, upsampfac=2.0)
+                       eps=self._eps, isign=-1, upsampfac=self.upsampfac)
         return out.reshape(cs.shape[0], *self.modes).astype(np.complex64)
 
 
