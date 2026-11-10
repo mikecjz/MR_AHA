@@ -338,7 +338,7 @@ access (copies go through the host at ~4 GB/s), so the split is never chosen the
 Reproduce with `benchmarks/hpc/run_mgpu_h100.sh` (`PART=test|single|bench|split|matlab`); the raw
 numbers are in `results/esplhpc-cp089/` and `results/pact400-recon3/aha_cuda*.json`.
 
-## Experimental: cufinufft upsampling factor in `calc_toep`
+## Experimental: NUFFT upsampling factor in `calc_toep`
 
 `calc_toep` runs its type-1 transforms at cufinufft's standard upsampling factor σ = 2. The
 experimental environment variables `MR_AHA_TOEP_UPSAMPFAC` (σ, default 2.0) and
@@ -378,6 +378,35 @@ unmasked. Raw numbers: `results/pact400-recon3/toep_upsampfac_<problem>.json`.
   grows 5–30× (to 10⁻⁵–10⁻⁴), probably from fp32 global atomics in dense cells.
 * **Default unchanged.** σ = 2 and cufinufft's method choice stay the defaults; the variables are
   experimental and not part of the API.
+
+**Apple silicon (M3 Ultra, `AW650523HJY`).** On Metal the kernel's type-1 NUFFT is mlx-nufft
+(`mr_aha._psf`), which reads the same `MR_AHA_TOEP_UPSAMPFAC`; there is no spreading-method switch.
+Same problems and protocol (time: `calc_toep` in Python, minimum of two; error against the
+mlx-nufft NUFFT operator at σ = 2, `eps` = 1e-6; 3D masked). Raw numbers:
+`results/AW650523HJY/toep_upsampfac_<problem>.json`.
+
+| problem | eps | σ = 2 (default) | σ = 1.25 |
+|---|---|---|---|
+| 2D | 1e-6 | 10.1 ms / 9.9e-7 | 11.6 ms / 4.2e-6 |
+| | 1e-5 | 9.8 ms / 2.8e-6 | 8.9 ms / 2.0e-6 |
+| | 1e-4 | 7.1 ms / 1.6e-5 | 7.9 ms / 6.2e-6 |
+| stack | 1e-6 | 3.50 s / 8.9e-7 | 4.73 s / 4.1e-6 |
+| | 1e-5 | 3.33 s / 2.0e-6 | 4.47 s / 2.0e-6 |
+| | 1e-4 | 3.31 s / 2.0e-5 | 3.56 s / 5.8e-6 |
+| 3D (masked) | 1e-6 | 14.1 s / 1.5e-5 | 19.2 s / 2.9e-5 |
+| | 1e-5 | 10.5 s / 2.1e-5 | 19.2 s / 2.9e-5 |
+| | 1e-4 | 8.0 s / 2.1e-5 | 14.6 s / 3.7e-5 |
+
+* **σ = 1.25 does not pay off on Metal.** It is 1.1–1.8× slower for stack and 3D at every `eps`,
+  and also at matched accuracy (stack: 3.56 s at `eps = 1e-4` against 3.33 s for σ = 2 at
+  `eps = 1e-5`); 2D is too small to matter. The CUDA gain at matched accuracy does not carry over:
+  σ = 2 already gets faster as `eps` loosens (3D: 14.1 → 8.0 s), while σ = 1.25 in 3D runs at the
+  width cap of 8 that mlx-nufft applies in fp32, so it does not get cheaper.
+* **Accuracy.** σ = 1.25 raises the operator error 2–5× at `eps = 1e-6`. The 2D
+  kernel itself differs from the CPU-finufft kernel by 2.8·10⁻⁴ at σ = 1.25 (8.9·10⁻⁷ at σ = 2;
+  CPU finufft at σ = 1.25: 8.5·10⁻⁷), so mlx-nufft's fp32 σ = 1.25 path is the limit, not the
+  switch. The 3D errors (1.5–2·10⁻⁵ even at σ = 2) are measured against mlx-nufft's own fp32 3D
+  NUFFT operator, which sits near that floor.
 
 ## Apple silicon (Metal backend)
 

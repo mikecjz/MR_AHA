@@ -86,17 +86,19 @@ This is a stateless, single-GPU primitive; the Toeplitz operator calls it intern
 several GPUs, spreads its $(L^2+L)/2$ independent triangular components over the GPUs, see
 [Multi-GPU](#multi-gpu-cuda)).
 
-> **Experimental (CUDA): cufinufft settings of `calc_toep`.** Two environment variables, read
-> when the kernel is computed (by `calc_toep` or `create_op`), change the type-1 transform:
-> `MR_AHA_TOEP_UPSAMPFAC` sets cufinufft's internal upsampling factor σ (default **2.0**; 1.25 is
-> the other value with the fast Horner kernel) and `MR_AHA_TOEP_GPU_METHOD` its spreading method
-> (default 0 = cufinufft's choice, 1 = GM-sort, 2 = shared memory). σ only sizes cufinufft's fine
-> grid; the Toeplitz grid `phi2_dim` is unchanged. At the same `eps`, σ = 1.25 is *slower*
-> (the grid is dense, so the 50 % wider spreading kernel outweighs the smaller FFT); it only pays
-> off at a looser `eps`, e.g. 1.7× faster for the 3D kooshball at `eps = 1e-4` with an error
-> similar to σ = 2 at `eps = 1e-5`. GM-sort is 1.2–2.5× faster but loses accuracy in 3D. These
-> switches are for benchmarking and may change; see
-> [benchmarks/README.md](benchmarks/README.md#experimental-cufinufft-upsampling-factor-in-calc_toep).
+> **Experimental: NUFFT settings of `calc_toep`.** Environment variables, read when the kernel
+> is computed (by `calc_toep` or `create_op`), change its type-1 transform.
+> `MR_AHA_TOEP_UPSAMPFAC` sets the NUFFT's internal upsampling factor σ (default **2.0**; 1.25 is
+> the other value with cufinufft's fast Horner kernel) on both backends: cufinufft on CUDA,
+> mlx-nufft (`mr_aha._psf`) on Apple silicon. `MR_AHA_TOEP_GPU_METHOD` (CUDA only) sets
+> cufinufft's spreading method (default 0 = cufinufft's choice, 1 = GM-sort, 2 = shared memory).
+> σ only sizes the NUFFT's fine grid; the Toeplitz grid `phi2_dim` is unchanged. At the same
+> `eps`, σ = 1.25 is *slower* on both backends (the grid is dense, so the 50 % wider spreading
+> kernel outweighs the smaller FFT). On CUDA it pays off only at a looser `eps`, e.g. 1.7× faster
+> for the 3D kooshball at `eps = 1e-4` with an error similar to σ = 2 at `eps = 1e-5`; on Apple
+> silicon it is 1.1–1.8× slower for stack and 3D at every `eps`. GM-sort is 1.2–2.5× faster but loses
+> accuracy in 3D. These switches are for benchmarking and may change; see
+> [benchmarks/README.md](benchmarks/README.md#experimental-nufft-upsampling-factor-in-calc_toep).
 
 ### `AhA_Toeplitz` — the hot loop
 
