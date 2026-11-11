@@ -11,17 +11,17 @@ The C library, and the project documentation, describe every array in
 dimension order is reversed here*, which leaves the underlying memory layout
 identical and therefore requires no data movement:
 
-===========================  =======================================
-column-major (docs, MATLAB)  row-major (this module, CuPy)
-===========================  =======================================
-``x[Nx, Ny, Nz, L]``         ``x[L, Nz, Ny, Nx]``
-``SEs[Nx, Ny, Nz, Nc]``      ``SEs[Nc, Nz, Ny, Nx]``
-``phi2_toep[Mx, My, Mz, T]`` ``phi2_toep[T, Mz, My, Mx]``
+============================  =======================================
+column-major (docs, MATLAB)   row-major (this module, CuPy)
+============================  =======================================
+``x[Nx, Ny, Nz, L]``          ``x[L, Nz, Ny, Nx]``
+``SEs[Nx, Ny, Nz, Nc]``       ``SEs[Nc, Nz, Ny, Nx]``
+``phi2_toep[Mx, My, Mz, T]``  ``phi2_toep[T, Mz, My, Mx]``
 ``phi2[Ntrajs, L, L]``        ``phi2[L, L, Ntrajs]``
-``phi2[Ntrajs, Nkz, L, L]``  ``phi2[L, L, Nkz, Ntrajs]`` (stack)
-``traj[Ntrajs, Nkx, ndim]``  ``traj[ndim, Nkx, Ntrajs]``
-``mask_kernel[Mx, My, Mz]``  ``mask_kernel[Mz, My, Mx]``
-===========================  =======================================
+``phi2[Ntrajs, Nkz, L, L]``   ``phi2[L, L, Nkz, Ntrajs]`` (stack)
+``traj[Ntrajs, Nkx, ndim]``   ``traj[ndim, Nkx, Ntrajs]``
+``mask_kernel[Mx, My, Mz]``   ``mask_kernel[Mz, My, Mx]``
+============================  =======================================
 
 Every array must be a C-contiguous CuPy array resident on the GPU; ``complex64``
 for the data arrays, ``float32`` for ``traj`` and ``int64`` for ``mask``.
