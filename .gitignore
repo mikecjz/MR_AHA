@@ -8,3 +8,12 @@ __pycache__/
 .cache/
 compile_commands.json
 .clangd
+.claude/
+.agents/
+*.egg-info/
+.venv/
+data/
+benchmarks/
+build_*/
+docs/
+skills-lock.json
