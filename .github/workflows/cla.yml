@@ -1,0 +1,68 @@
+# Contributor License Agreement (CLA) check.
+#
+# Every author of a commit in a pull request must sign licenses/CLA.md once before the
+# pull request can be merged. If any of them has not signed, the bot posts a
+# comment linking to licenses/CLA.md, lists who still needs to sign, and marks the
+# "CLAAssistant" check as failed. Each author signs by commenting the exact
+# sentence below. The bot then commits
+# their signature (GitHub username, user ID, time, pull request number) to
+# signatures/version1/cla.json on the `cla-signatures` branch and marks the
+# check as passed. Later pull requests by the same author pass at once.
+#
+# One-off set-up (see .github/CONTRIBUTING.md, "For maintainers"):
+#   * This file only takes effect once it is on the default branch (main).
+#   * The `cla-signatures` branch must exist and must not be protected.
+#   * Make the "CLAAssistant" check required in the branch protection of main.
+#
+# Security: pull_request_target runs with write access in the context of the
+# base repository. This workflow never checks out or runs the pull request's
+# code, and the action is pinned to a full commit SHA, so that is safe. Do not
+# add a checkout step here.
+#
+# Action: https://github.com/contributor-assistant/github-action
+
+name: "CLA Assistant"
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write        # commit signatures to the cla-signatures branch
+  pull-requests: write   # comment on and lock pull requests
+  statuses: write        # set the CLA check status
+
+jobs:
+  CLAAssistant:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "CLA Assistant"
+        if: >-
+          (github.event.comment.body == 'recheck' ||
+           github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') ||
+          github.event_name == 'pull_request_target'
+        # v2.6.1
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: "signatures/version1/cla.json"
+          path-to-document: "https://github.com/mikecjz/MT_CUDA/blob/main/licenses/CLA.md"
+          branch: "cla-signatures"
+          # The copyright holder and bots do not sign.
+          allowlist: "mikecjz,dependabot[bot],github-actions[bot],bot*"
+          custom-notsigned-prcomment: >-
+            Thank you for your contribution! mr_aha is dual-licensed (AGPL v3 and
+            commercial, see [LICENSING.md](https://github.com/mikecjz/MT_CUDA/blob/main/licenses/LICENSING.md)),
+            so before we can merge it we ask every contributor to sign our
+            [Contributor License Agreement](https://github.com/mikecjz/MT_CUDA/blob/main/licenses/CLA.md).
+            You keep the copyright in your work. You only need to sign once.
+            To sign, post the following sentence as a comment on this pull request:
+          custom-allsigned-prcomment: "All contributors have signed the CLA. Thank you!"
+          signed-commit-message: "CLA: $contributorName signed in $owner/$repo#$pullRequestNo"
+          create-file-commit-message: "CLA: create the signature file"
+          # Lock the pull request after merge so signature comments cannot be edited.
+          lock-pullrequest-aftermerge: true

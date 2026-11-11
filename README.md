@@ -737,4 +737,13 @@ identical reconstructions). Findings and how to reproduce them are in
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE).
+mr_aha is dual-licensed:
+
+* **[GNU AGPL v3 only](LICENSE)**, free for any use, including commercial, provided that works
+  built on it that are distributed or offered as a network service release their full source
+  under the AGPL. An additional permission allows linking with CUDA and MATLAB.
+* **Commercial license** for closed-source products or services. Contact
+  <junzhou@chen.engineer>.
+
+See [`licenses/LICENSING.md`](licenses/LICENSING.md) for details, examples, third-party licenses and the
+contributor license agreement.
