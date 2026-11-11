@@ -3,7 +3,7 @@ function check_reference_matlab(ref_dir)
 %
 %   CHECK_REFERENCE_MATLAB() runs the public MATLAB functions on every file of
 %   data/ref_mlx_mat (written by tests/export_reference_mat.py from the CUDA
-%   reference data of benchmarks/make_reference.py) and compares:
+%   reference data of tests/make_reference.py) and compares:
 %
 %     AhA_Toeplitz   with each stored phi2_toep (lower/upper, unmasked and both
 %                    masks) against the stored AhAx;

@@ -194,7 +194,8 @@ else()
 
 # VkFFT (header-only) and metal-cpp (header-only, bundled with VkFFT), from the
 # `third_party/VkFFT` submodule. It points to the mikecjz/VkFFT fork, which
-# carries the Metal autorelease fix (see benchmarks/vkfft/README.md).
+# carries the Metal autorelease fix (see
+# https://mikecjz.github.io/MR_AHA_docs/benchmarks/vkfft.html).
 set(MR_VKFFT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/VkFFT")
 if(NOT EXISTS "${MR_VKFFT_DIR}/vkFFT/vkFFT.h")
     message(FATAL_ERROR

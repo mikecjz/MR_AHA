@@ -16,7 +16,8 @@
  * `NS::String::string()`, ...) is autoreleased and is freed when the
  * innermost autorelease pool drains. MATLAB and Python call into the library
  * from threads whose pools drain at unpredictable times, and VkFFT (in the
- * fixed fork used here, see `benchmarks/vkfft/README.md`) relies on the caller
+ * fixed fork used here, see
+ * https://mikecjz.github.io/MR_AHA_docs/benchmarks/vkfft.html) relies on the caller
  * to provide a pool. Every public entry point of the Metal backend therefore
  * opens an ::mr_metal_pool for its whole duration.
  *

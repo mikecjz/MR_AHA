@@ -49,7 +49,7 @@ Please open an issue that includes:
 
 ### Building
 
-See [Building](../README.md#building) in the README. In short:
+See [Installation](https://mikecjz.github.io/MR_AHA_docs/getting-started/install.html) in the documentation. In short:
 
 ```bash
 git submodule update --init --recursive
@@ -71,7 +71,8 @@ without asking their users.
 
 ## Conventions
 
-* **Array layout and Gram blocks.** Follow the conventions in the README:
+* **Array layout and Gram blocks.** Follow the conventions in the
+  [documentation](https://mikecjz.github.io/MR_AHA_docs/guide/conventions.html):
   column-major shapes in the documentation, centred k-space and image space,
   and the MR-Multitasking Gram-block convention (`v <- v * Phi2`).
 * **Documentation in the code.** The comments are published as the API
@@ -85,7 +86,8 @@ without asking their users.
   at their tolerances. Say so explicitly in the pull request if a tolerance
   had to change, and why.
 * **Performance.** For changes aimed at speed, include before/after timings
-  (see [`benchmarks/`](../benchmarks/)) and the GPU they were measured on.
+  (the scripts of [MR_AHA_benchmarks](https://github.com/mikecjz/MR_AHA_benchmarks)
+  make that a one-liner) and the GPU they were measured on.
 
 ## Third-party code
 

@@ -484,7 +484,8 @@ def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
         trajectories such as few-arm spirals.
 
     For a stack trajectory the in-plane mask is repeated over all kz planes.
-    ``benchmarks/neighbour_mask.md`` compares the two methods.
+    https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html
+    compares the two methods.
 
     Typical use::
 

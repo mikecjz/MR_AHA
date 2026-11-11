@@ -1,6 +1,6 @@
 """Export the ``data/ref_mlx/*.npz`` reference files to MATLAB ``.mat`` files.
 
-``benchmarks/make_reference.py`` stores every array in the row-major (NumPy)
+``tests/make_reference.py`` stores every array in the row-major (NumPy)
 order of the Python binding. MATLAB uses the column-major shapes of the
 project documentation, which are the same memory with the dimensions
 reversed, so each array is written transposed (``a.T``): ``savemat`` stores it

@@ -34,7 +34,8 @@ function [mask, kernel] = calc_mask(traj, config, threshold)
 %     trajectories such as few-arm spirals.
 %
 %   For a 'stack' trajectory the in-plane mask is repeated on every kz plane.
-%   benchmarks/neighbour_mask.md compares the two methods.
+%   https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html
+%   compares the two methods.
 %
 %   INPUTS
 %     traj       real single gpuArray [Ntrajs, Nkx, ndim], radians in

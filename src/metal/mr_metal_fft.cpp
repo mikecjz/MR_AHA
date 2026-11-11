@@ -15,7 +15,8 @@
  * here, before any other header pulls metal-cpp in without those macros, and
  * no other translation unit may include it.
  *
- * Settings, from `benchmarks/vkfft/README.md` (M3 Ultra): single precision,
+ * Settings, from https://mikecjz.github.io/MR_AHA_docs/benchmarks/vkfft.html
+ * (M3 Ultra): single precision,
  * `coalescedMemory = 32` bytes (1.35x faster than VkFFT's default on the
  * stack-of-stars grid, neutral on 3D). Forward error 3e-7 against an fp64
  * reference, on par with cuFFT.

@@ -58,8 +58,8 @@ versions.
 
 Usage::
 
-    CUDA_VISIBLE_DEVICES=1 python benchmarks/make_reference.py          # generate + verify
-    python benchmarks/make_reference.py --verify-only                   # re-check existing files
+    CUDA_VISIBLE_DEVICES=1 python tests/make_reference.py          # generate + verify
+    python tests/make_reference.py --verify-only                   # re-check existing files
 """
 
 from __future__ import annotations

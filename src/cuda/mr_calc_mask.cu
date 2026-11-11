@@ -44,7 +44,8 @@
  * mask follows. The unit-weight kernel is the same sum with every block set
  * to one, so wherever @f$|T|@f$ is negligible no sample lies nearby and
  * @f$\hat{T}@f$ is negligible as well, whatever the subspace. Measurements of
- * both are in `benchmarks/neighbour_mask.md`.
+ * both are in the documentation
+ * (https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html).
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */

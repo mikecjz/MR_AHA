@@ -57,7 +57,8 @@ def toep_upsampfac() -> float:
     sigma only sizes the NUFFT's internal fine grid and its spreading kernel:
     the Toeplitz grid ``phi2_dim`` is unchanged. At the same ``eps``,
     sigma = 1.25 needs a wider kernel, so it pays off only at a looser
-    ``eps`` (see ``benchmarks/README.md``). mlx-nufft caps that kernel at
+    ``eps`` (see https://mikecjz.github.io/MR_AHA_docs/benchmarks/upsampfac.html).
+    mlx-nufft caps that kernel at
     width 8 in 3D (fp32), which bounds the achievable error to about 5e-5.
 
     Returns:

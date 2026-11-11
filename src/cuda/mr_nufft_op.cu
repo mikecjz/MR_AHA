@@ -433,7 +433,8 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
      * (non-uniform points driven, method 1), type 1 is set to method 1
      * below instead of cufinufft's shared-memory method 2, which was 1.06x
      * (L40S) to 1.39x (TITAN RTX) slower per A^H A on the stack-of-stars
-     * benchmark (benchmarks/bench_aha_methods.py) at equal accuracy. A
+     * benchmark (`python/bench_aha.py` of the MR_AHA_benchmarks repository)
+     * at equal accuracy. A
      * positive gpu_method applies to both plans. */
     if (gpu_method > 0) opts.gpu_method = gpu_method;
     opts.debug = 0;

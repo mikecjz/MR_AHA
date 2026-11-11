@@ -145,8 +145,9 @@ typedef struct MR_ALIGN8 mr_complex_s {
 /**
  * @brief Default neighbourhood radius of ::mr_calc_mask, in upsampled grid cells.
  *
- * Used by the default method ::MR_MASK_NEIGHBOUR. Measured in
- * `benchmarks/neighbour_mask.md`: with radius 2 the masked operator matches
+ * Used by the default method ::MR_MASK_NEIGHBOUR. Measured in the
+ * documentation (https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html):
+ * with radius 2 the masked operator matches
  * the unmasked one to within the single-precision NUFFT tolerance on
  * image-like inputs for the 280-spoke radial (79 % of the grid kept) and 3D
  * kooshball (54 % kept) test problems. On the 377-spoke 160^2 radial data
@@ -161,7 +162,8 @@ typedef struct MR_ALIGN8 mr_complex_s {
  * @brief Default (absolute) threshold of ::mr_calc_mask, in units of samples.
  *
  * Used only by ::MR_MASK_THRESHOLD. Chosen experimentally (see
- * `benchmarks/README.md`) on the 2D radial, stack-of-stars and 3D kooshball
+ * https://mikecjz.github.io/MR_AHA_docs/benchmarks/masking.html)
+ * on the 2D radial, stack-of-stars and 3D kooshball
  * test problems: at 0.05 the masked operator differs from the exact one by a
  * few times the single-precision NUFFT tolerance on image-like inputs, while
  * the empty corners of the upsampled k-space grid (about 16-20 % of it in 2D,

@@ -1,6 +1,6 @@
 """Check an MR_AHA build against the CUDA reference data in ``data/ref_mlx/``.
 
-The reference files are written by ``benchmarks/make_reference.py`` from the
+The reference files are written by ``tests/make_reference.py`` from the
 CUDA backend (see that script for the keys and the array layout). This script
 re-runs the library that :mod:`mr_aha` loads (``$MR_AHA_LIBRARY`` selects a
 specific build) on the stored inputs and compares every output. It works for
@@ -280,7 +280,7 @@ def main() -> int:
         if json.loads(str(z["config_json"])).get("gram_convention") != "multitasking":
             print(f"FAIL {f.stem}: written before the MR-Multitasking Gram convention "
                   "(no gram_convention in config_json); regenerate it with "
-                  "benchmarks/make_reference.py")
+                  "tests/make_reference.py")
             failed += 1
             continue
         c = configs(z)
