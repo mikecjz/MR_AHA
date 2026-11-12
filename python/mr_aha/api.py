@@ -1,7 +1,7 @@
 """High-level, CuPy-friendly interface to MR_AHA.
 
 MR_AHA evaluates the forward normal operator :math:`A^H A` for non-Cartesian
-MRI with low-rank (subspace / MR-Multitasking) modelling, using a Toeplitz
+MRI with low-rank (subspace) modelling, using a Toeplitz
 embedding so that no non-uniform FFT is needed inside the iteration loop.
 
 Array layout
@@ -26,8 +26,8 @@ Every array must be a C-contiguous CuPy array resident on the GPU; ``complex64``
 for the data arrays, ``float32`` for ``traj`` and ``int64`` for ``mask``.
 Masks use **0-based** linear indices into the centred upsampled grid.
 
-Gram blocks (MR-Multitasking convention)
-----------------------------------------
+Gram blocks
+-----------
 The temporal basis :math:`\\Phi` is **rank x time** (MATLAB ``Phi_rt``,
 ``[L, T]``) and the spatial coefficients keep the rank as their last
 column-major dimension. The Gram block of a readout (and kz encode) is
@@ -39,18 +39,15 @@ column-major dimension. The Gram block of a readout (and kz encode) is
 MATLAB ``Phi_rt(:, idx) * Phi_rt(:, idx)'``, and every block-diagonal
 multiplication treats the rank vector :math:`v` of a k-space location as a
 **row vector multiplied from the right**, :math:`v \\leftarrow v\\,\\Phi_2`
-(MR-Multitasking's ``reshape(k, [], L) * Phi2``). The same holds for the
+(MATLAB ``reshape(k, [], L) * Phi2``). The same holds for the
 Toeplitz blocks in ``phi2_toep``. In NumPy terms, with a row-major
 ``phi2[a, b, ...]`` holding column-major entry ``(b, a)``::
 
     out[l] = sum_m v[m] * Phi2[m, l] = sum_m phi2[l, m] * v[m]
 
-A MR-Multitasking ``Phi2`` ``[L, L, Ntrajs, Nz]`` read with h5py (row-major
+Gram blocks stored ``[L, L, Ntrajs, Nz]`` and read with h5py (row-major
 ``(Nz, Ntrajs, L, L)``) is passed as ``P.transpose(2, 3, 0, 1)`` (plus a kz
-fftshift if its kz order is natural). Earlier versions of the library
-multiplied ``Phi2 @ v`` instead (time x rank :math:`\\Phi`,
-:math:`\\Phi^H\\Phi`); blocks prepared for them need their two ``L`` axes
-swapped.
+fftshift if their kz order is natural).
 """
 
 from __future__ import annotations
@@ -536,7 +533,7 @@ def aha_toeplitz(cfg: MRConfig, x, SEs, phi2_toep, mask=None, out=None):
     The low-level primitive: applies a finished kernel once, on the current
     device, creating and destroying the working buffers on every call. Use
     :func:`create_op` for anything applied more than once (it builds the
-    kernel from the Gram blocks, keeps every buffer and can use several GPUs).
+    kernel from the Gram blocks, keeps every buffer and can be multi-GPU).
 
     Args:
         cfg: Configuration from :func:`make_config`.
@@ -626,8 +623,8 @@ class AhAOp:
 
     The operator holds everything it needs: the sensitivity maps and either
     the Toeplitz kernel (``method='toeplitz'``, computed at creation) or the
-    NUFFT plans and Gram blocks (``method='nufft'``). Whether it runs on one
-    GPU or several is decided at creation (``devices``); on several GPUs the
+    NUFFT plans and Gram blocks (``method='nufft'``). Whether it is single- or
+    multi-GPU is decided at creation (``devices``); multi-GPU, the
     coils are split over the GPUs and the partial results summed on the
     current (primary) device. Inputs and outputs live on the primary device.
 
@@ -679,7 +676,7 @@ class AhAOp:
                 problems too small to gain; :attr:`info` reports the choice.
                 On Metal only ``None``, ``0``, ``[0]`` and ``'all'`` (the one
                 GPU) are accepted.
-            toep_dist: Toeplitz on several GPUs: how every GPU gets its copy
+            toep_dist: multi-GPU Toeplitz: how every GPU gets its copy
                 of the kernel. ``'auto'`` (default) chooses between
                 ``'split'`` (every GPU computes a share, the shares are
                 exchanged) and ``'replicate'`` (every GPU computes the whole

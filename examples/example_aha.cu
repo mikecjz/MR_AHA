@@ -11,7 +11,7 @@
  *
  * The example also performs the standard Hermitian check
  * @f$\langle y, A^H A x\rangle = \langle A^H A y, x\rangle@f$, which is the
- * cheapest end-to-end sanity test of the operator. To use several GPUs, set
+ * cheapest end-to-end sanity test of the operator. For a multi-GPU operator, set
  * ::mr_op_options::devices (or `n_devices = MR_OP_ALL_DEVICES`).
  *
  * Build with `-DMR_AHA_BUILD_EXAMPLES=ON`.
@@ -90,7 +90,7 @@ int main(void)
         }
     }
 
-    /* Hermitian positive-semidefinite Gram blocks in the MR-Multitasking
+    /* Hermitian positive-semidefinite Gram blocks in the library's
      * convention: Phi2 = Phi Phi^H for a random rank x time basis Phi = B
      * (L x L here). The library applies them as v <- v * Phi2. */
     std::vector<float2> h_phi2((size_t)Ntrajs * Nz * L * L);

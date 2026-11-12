@@ -13,7 +13,7 @@
  * `[Ntrajs, Nkx, ndim]` holding radians in @f$[-\pi, \pi)@f$, and `mask` an
  * `int64` gpuArray of 0-based linear indices (`[]` when unmasked). The
  * kernel is computed with ::mr_calc_toep on MATLAB's current GPU. (To build
- * an operator on several GPUs, `mr_aha.create_op` computes the kernel on
+ * a multi-GPU operator, `mr_aha.create_op` computes the kernel on
  * those GPUs itself.)
  *
  * Prefer the `calc_toep.m` wrapper, which performs the class and index-base

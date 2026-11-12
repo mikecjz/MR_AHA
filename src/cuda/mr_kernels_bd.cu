@@ -51,7 +51,7 @@ __device__ __forceinline__ mr_complex mr_cmul_conj(mr_complex a, mr_complex b)
  * @brief @p NC row vectors times a Hermitian block, reading each stored
  *        element once.
  *
- * Multitasking convention: each rank vector is a row vector multiplied from
+ * Gram-block convention: each rank vector is a row vector multiplied from
  * the right, @f$y = v A@f$, i.e. @f$y_c = \sum_r v_r A_{rc}@f$. Walks the
  * stored triangle in packed order (see ::mr_triangulation): packed component
  * `t` is entry `(r, c)` of the block. It contributes @f$v_r A_{rc}@f$ to

@@ -10,8 +10,8 @@
  * where @f$F_{-}@f$ is a type-2 NUFFT (uniform image to the non-uniform
  * samples, sign @f$-1@f$), @f$F_{+} = F_{-}^H@f$ the matching type-1 NUFFT
  * (sign @f$+1@f$) and @f$\mathcal{B}@f$ multiplies the length-@f$L@f$ rank
- * vector of every sample, as a row vector from the right (MR-Multitasking,
- * see @ref mr_gram), by the Gram block of its readout:
+ * vector of every sample, as a row vector from the right (see
+ * @ref mr_gram), by the Gram block of its readout:
  * @f$v \leftarrow v\,\Phi_2@f$. Both NUFFTs are unnormalised, which is the
  * convention the Toeplitz kernel of ::mr_calc_toep reproduces, so the two
  * methods of ::mr_op_create agree to within the NUFFT tolerance.

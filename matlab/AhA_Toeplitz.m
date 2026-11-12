@@ -9,8 +9,8 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
 %
 %   AHA_TOEPLITZ is the stateless low-level primitive: it applies a finished
 %   kernel once, on the current GPU, and allocates its working buffers on
-%   every call. For repeated application (iterative reconstruction), or on
-%   several GPUs, build the operator once with MR_AHA.CREATE_OP, which
+%   every call. For repeated application (iterative reconstruction), or
+%   multi-GPU, build the operator once with MR_AHA.CREATE_OP, which
 %   computes the kernel itself from the Gram blocks and keeps it, the maps
 %   and the buffers: op = mr_aha.create_op(SEs, phi2, traj, config);
 %   AhAx = op * x.
@@ -30,7 +30,7 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
 %                At every upsampled k-space location the rank coefficients
 %                are multiplied as a row vector from the right by that
 %                location's Hermitian block B, k(1,:) <- k(1,:) * B
-%                (MR-Multitasking convention, see CALC_TOEP).
+%                (Gram-block convention, see CALC_TOEP).
 %                  [Mx, My, (L^2+L)/2]          '2D',  unmasked
 %                  [Mx, My, Mz, (L^2+L)/2]      '3D'/'stack', unmasked
 %                  [numel(mask), (L^2+L)/2]     masked

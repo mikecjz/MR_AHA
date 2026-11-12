@@ -9,12 +9,12 @@
 # MR_AHA
 
 MR_AHA evaluates the forward normal operator $A^H A$ on the GPU for **non-Cartesian MRI with
-low-rank (subspace / MR-Multitasking) modelling**. It uses a Toeplitz embedding, so one
+low-rank (subspace) modelling**. It uses a Toeplitz embedding, so one
 application costs two FFTs per coil instead of two NUFFTs; a NUFFT-based operator with the same
 interface is included as the reference.
 
 One C++ library does the numerics for **MATLAB, Python and C/C++**. It builds for **CUDA**
-(NVIDIA, one or several GPUs) or **Metal** (Apple silicon).
+(NVIDIA, single- or multi-GPU) or **Metal** (Apple silicon).
 
 **Documentation: <https://mikecjz.github.io/MR_AHA_docs/>** (conventions, array shapes, masking,
 multi-GPU, Apple silicon, API reference, benchmark results).
@@ -80,7 +80,7 @@ shapes, the Gram-block convention and the C API are in the
 
 * [MR_AHA_docs](https://github.com/mikecjz/MR_AHA_docs): sources of the documentation website.
 * [MR_AHA_benchmarks](https://github.com/mikecjz/MR_AHA_benchmarks): Python and MATLAB scripts
-  that time the Toeplitz and NUFFT operators on one or several GPUs.
+  that time the Toeplitz and NUFFT operators on one GPU and multi-GPU.
 
 Contributions are welcome; see [CONTRIBUTING](.github/CONTRIBUTING.md).
 

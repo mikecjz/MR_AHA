@@ -33,7 +33,7 @@ __device__ __forceinline__ void mr_decompose3(long long idx, int d0, int d1,
 /**
  * @brief Apply a Hermitian packed block to a staged rank vector.
  *
- * Multitasking convention: the rank vector is a *row* vector multiplied from
+ * Gram-block convention: the rank vector is a *row* vector multiplied from
  * the right, @f$y = v A@f$, i.e.
  * @f$y_i = \sum_j v_j A_{ji}@f$ (the sum runs over the first index of the
  * block). The stored triangle lives at `base[t * stride]` for packed offset
@@ -55,7 +55,7 @@ __device__ __forceinline__ mr_complex mr_apply_block_row(const mr_complex *v,
     mr_complex acc = make_cuFloatComplex(0.0f, 0.0f);
     for (int j = 0; j < L; ++j) {
         int do_conj = 0;
-        /* Element A_{ji}: row j, column i (Multitasking v * A). */
+        /* Element A_{ji}: row j, column i (v * A). */
         int t = mr_tri_offset(j, i, L, tri_upper, &do_conj);
         mr_complex a = base[(long long)t * stride];
         if (do_conj) a = cuConjf(a);

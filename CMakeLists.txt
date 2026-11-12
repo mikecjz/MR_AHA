@@ -1,6 +1,6 @@
 # ============================================================================
 #  MR_AHA - GPU forward normal operator for non-Cartesian MRI with low-rank
-#            (subspace / MR-Multitasking) modelling.
+#            (subspace) modelling.
 #
 #  The library is built for exactly one GPU backend, chosen with
 #  MR_AHA_BACKEND:

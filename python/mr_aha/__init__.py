@@ -6,7 +6,7 @@ The package is built around one object, mirroring the MATLAB interface:
     The :math:`A^H A` operator, created from the Gram blocks, the trajectory
     and the sensitivity maps. ``method='toeplitz'`` (default) pre-computes the
     Toeplitz kernel at creation; ``method='nufft'`` applies type-2 / type-1
-    NUFFTs per coil instead. ``devices=`` puts it on several GPUs of one node
+    NUFFTs per coil instead. ``devices=`` makes it multi-GPU on one node
     (coils split over the GPUs). ``op(x)`` applies it.
 
 Low-level, stateless, single-GPU primitives:

@@ -97,7 +97,7 @@ static inline int mr_tri_offset(int i, int j, int L, int tri_upper,
 
 /**
  * @brief Component @p i of the staged rank row vector @p v times the
- *        Hermitian block (Multitasking convention `y = v A`), i.e.
+ *        Hermitian block (Gram-block convention `y = v A`), i.e.
  *        `y_i = sum_j v_j A_ji`.
  *
  * @param v         Staged input vector of length @p L (threadgroup memory).
@@ -114,7 +114,7 @@ static inline float2 mr_apply_block_row(threadgroup const float2 *v,
     float2 acc = float2(0.0f);
     for (int j = 0; j < L; ++j) {
         bool conj;
-        /* Element A_{ji}: row j, column i (Multitasking v * A). */
+        /* Element A_{ji}: row j, column i (v * A). */
         const int t = mr_tri_offset(j, i, L, tri_upper, conj);
         const float2 a = base[(ulong)t * stride];
         acc += conj ? mr_cmul_conj(a, v[j]) : mr_cmul(a, v[j]);
@@ -215,7 +215,7 @@ kernel void mr_k_crop_mul_conj_se(device float2       *out        [[buffer(0)]],
  *
  * Each thread stages its own rank vector in threadgroup memory (`L` float2
  * per thread, length set by the host) before overwriting it component by
- * component with `v A` (Multitasking convention).
+ * component with `v A` (Gram-block convention).
  * Port of `mr_k_blockdiag_dense`.
  */
 kernel void mr_k_blockdiag_dense(device float2         *pad  [[buffer(0)]],
@@ -279,7 +279,7 @@ kernel void mr_k_blockdiag_masked(device float2       *compact    [[buffer(0)]],
 /**
  * @brief Row vector times Hermitian block, reading each stored element once.
  *
- * Multitasking convention: the rank vector is a row vector multiplied from
+ * Gram-block convention: the rank vector is a row vector multiplied from
  * the right, `y = v A`, i.e. `y_c = sum_r v_r A_rc`. Walks the stored
  * triangle in packed order (::mr_triangulation): element `t` is entry
  * `(r, c)` of the block, and it contributes `v_r A_rc` to `y_c` and, off the

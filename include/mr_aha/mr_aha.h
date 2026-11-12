@@ -3,7 +3,7 @@
  * @brief Public C API of the MR_AHA library.
  *
  * MR_AHA evaluates the forward normal operator @f$A^H A@f$ for non-Cartesian
- * MRI with low-rank (subspace / MR-Multitasking) modelling on the GPU, using a
+ * MRI with low-rank (subspace) modelling on the GPU, using a
  * Toeplitz embedding so that no non-uniform FFT is required inside the
  * iteration loop.
  *
@@ -30,9 +30,9 @@
  * (i)fftshifts internally, by index remapping rather than by phase modulation,
  * so the convention is exact for both even and odd dimensions.
  *
- * @section mr_gram Gram blocks (MR-Multitasking convention)
+ * @section mr_gram Gram blocks
  *
- * The library follows the MR-Multitasking convention throughout. The temporal
+ * The library uses one convention throughout. The temporal
  * basis is stored **rank x time**, @f$\Phi \in \mathbb{C}^{L \times T}@f$
  * (MATLAB `Phi_rt`, `[L, T]`), and the spatial coefficients keep the rank as
  * their **last** dimension (`[Nx, Ny, Nz, L]`). The Gram block of a readout
@@ -53,10 +53,10 @@
  *   v \;\leftarrow\; v\,\Phi_2, \qquad
  *   v_l \;\leftarrow\; \sum_m v_m\,(\Phi_2)_{ml},
  * @f]
- * exactly MR-Multitasking's `reshape(k, [], L) * Phi2`. For the data model
+ * in MATLAB `reshape(k, [], L) * Phi2`. For the data model
  * @f$k_t = \sum_m \Phi(m,t)\,(F S u_m)_t@f$ with adjoint
- * @f$(A^H k)_l = S^H F^H \sum_t \overline{\Phi(l,t)}\,k_t@f$ (MR-Multitasking
- * forms @f$A^H b@f$ as `k.' * Phi_rt'`), the coefficient coupling rank
+ * @f$(A^H k)_l = S^H F^H \sum_t \overline{\Phi(l,t)}\,k_t@f$ (in MATLAB
+ * `k.' * Phi_rt'`), the coefficient coupling rank
  * @f$m@f$ into rank @f$l@f$ is
  * @f$\sum_t \overline{\Phi(l,t)}\,\Phi(m,t) = (\Phi_2)_{ml}@f$, so this is
  * the normal operator.
@@ -440,7 +440,7 @@ MR_EXPORT int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out);
  * (with the centring index remap folded in), @f$F@f$ is the centred DFT over
  * the upsampled grid, and @f$\hat{T}@f$ is the block-diagonal multiplication by
  * the Hermitian @f$L \times L@f$ block @f$B@f$ held in `phi2_toep` at every
- * upsampled k-space location, applied MR-Multitasking style to the rank row
+ * upsampled k-space location, applied to the rank row
  * vector from the right, @f$v \leftarrow v B@f$ (see @ref mr_gram). The scaling of `phi2_toep` produced by ::mr_calc_toep
  * already absorbs the @f$1/(M_xM_yM_z)@f$ of the unnormalised cuFFT pair, so no
  * further scaling is applied here.
@@ -506,8 +506,8 @@ MR_EXPORT int mr_aha_toeplitz(const mr_config  *cfg,
 
 /**
  * @defgroup mr_op The A^H A operator object
- * @brief One stateful operator, created from the Gram blocks, on one GPU or
- *        on several GPUs of one node.
+ * @brief One stateful operator, created from the Gram blocks, single- or
+ *        multi-GPU on one node.
  *
  * ::mr_op_create builds the complete operator
  * @f$x \mapsto A^H A x@f$ from the trajectory, the Gram blocks and the
@@ -520,7 +520,7 @@ MR_EXPORT int mr_aha_toeplitz(const mr_config  *cfg,
  *   ::mr_aha_plan_execute; no non-uniform FFT is needed per application.
  * - ::MR_OP_NUFFT: the direct route, per coil a type-2 NUFFT (image to
  *   trajectory), the block-diagonal Gram multiplication on the samples
- *   (MR-Multitasking convention, see @ref mr_gram) and a type-1 NUFFT back,
+ *   (see @ref mr_gram) and a type-1 NUFFT back,
  *   with cufinufft. No kernel; less memory, more time per application. This
  *   is the baseline the Toeplitz method is compared against.
  *
@@ -933,8 +933,8 @@ MR_EXPORT int mr_op_abandon(mr_op op);
  *                          @f$L\times L@f$ Gram block
  *                          @f$\Phi_2 = \Phi\Phi^H@f$ of that trajectory
  *                          (MATLAB `Phi_rt(:,idx) * Phi_rt(:,idx)'`, see
- *                          @ref mr_gram) and `Nkz == Mz == Nz`. A
- *                          MR-Multitasking `Phi2` `[L, L, Ntrajs, Nz]` is
+ *                          @ref mr_gram) and `Nkz == Mz == Nz`. Gram
+ *                          blocks stored `[L, L, Ntrajs, Nz]` are
  *                          `permute(Phi2, [3 4 1 2])` (plus a kz fftshift
  *                          if its kz order is natural).
  * @param[in]  d_traj       Device array of non-Cartesian coordinates,

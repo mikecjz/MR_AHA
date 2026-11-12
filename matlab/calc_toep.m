@@ -10,18 +10,18 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
 %   The kernel is computed on MATLAB's current GPU.
 %
 %   CALC_TOEP and AHA_TOEPLITZ are the stateless low-level primitives. To
-%   apply A'A repeatedly (iterative reconstruction), or on several GPUs, use
+%   apply A'A repeatedly (iterative reconstruction), or multi-GPU, use
 %   MR_AHA.CREATE_OP instead: it computes the kernel itself from the same
 %   phi2 and traj (on every GPU it uses) and keeps it, with the sensitivity
 %   maps, for every application.
 %
-%   Gram blocks follow the MR-Multitasking convention: the temporal basis
+%   Gram block convention: the temporal basis
 %   Phi_rt is rank-by-time [L, T], the Gram block of a readout (and kz
 %   encode) is Phi_rt(:,idx) * Phi_rt(:,idx)', and the operator multiplies
 %   the rank coefficients of every k-space location as a row vector from the
-%   right, k(1,:) <- k(1,:) * Phi2, exactly like MR-Multitasking's
-%   reshape(k, [], L) * Phi2. Its Phi2 can therefore be passed unchanged
-%   apart from the dimension order (see below).
+%   right, k(1,:) <- k(1,:) * Phi2, i.e. reshape(k, [], L) * Phi2. Blocks
+%   stored [L, L, Ntrajs(, Nz)] are passed unchanged apart from the
+%   dimension order (see below).
 %
 %   INPUTS
 %     phi2       complex single gpuArray of Gram blocks, one L-by-L matrix per
@@ -30,8 +30,8 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
 %                  [Ntrajs, Nkz, L, L]   for 'stack', with Nkz == Nz == Mz
 %                i.e. phi2(itraj, :, :) is the L-by-L matrix
 %                Phi_rt(:,idx) * Phi_rt(:,idx)' of trajectory itraj. Data
-%                stored as [L, L, Ntrajs] (or [L, L, Ntrajs, Nz] for a stack,
-%                as MR-Multitasking does) must be permuted first, e.g.
+%                stored as [L, L, Ntrajs] (or [L, L, Ntrajs, Nz] for a stack)
+%                must be permuted first, e.g.
 %                permute(Phi2, [3 1 2]) or permute(Phi2, [3 4 1 2]); a stack
 %                in natural kz order also needs fftshift(.., 2).
 %

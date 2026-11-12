@@ -64,7 +64,7 @@ __global__ void mr_k_crop_mul_conj_se(mr_complex *d_out, const mr_complex *d_pad
  *
  * At every upsampled k-space location the length-@f$L@f$ row vector of rank
  * coefficients is multiplied from the right by the Hermitian
- * @f$L\times L@f$ block stored in packed triangular form (Multitasking
+ * @f$L\times L@f$ block stored in packed triangular form (Gram-block
  * convention), @f$y = v A@f$, i.e. @f$y_i = \sum_j v_j A_{ji}@f$, with the
  * unstored half reconstructed as @f$A_{ji} = \overline{A_{ij}}@f$.
  *

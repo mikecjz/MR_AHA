@@ -27,7 +27,7 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
 %   NUFFTs come from cufinufft's own MATLAB interface (CUFINUFFT_PLAN) and
 %   everything else is gpuArray code. The tests use it to validate
 %   MR_AHA.CREATE_OP(..., 'method', 'nufft'), which evaluates the same
-%   operator inside the library (cufinufft's C API, several GPUs if asked,
+%   operator inside the library (cufinufft's C API, multi-GPU if asked,
 %   no MATLAB per-coil loop). Use that operator in reconstructions. With the
 %   Metal backend (Apple silicon) this reference runs through the Python
 %   mr_aha.AhANufftPlan (MLX + mlx-nufft) on ordinary arrays.
@@ -35,12 +35,11 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
 %   INPUTS
 %     x       complex single gpuArray, [Nx, Ny, L] ('2D') or [Nx, Ny, Nz, L].
 %     SEs     complex single gpuArray, [Nx, Ny, Ncoils] or [Nx, Ny, Nz, Ncoils].
-%     phi2    complex single gpuArray of Gram blocks Phi*Phi' (MR-Multitasking
-%             convention: Phi is the rank-by-time basis Phi_rt, and the block
+%     phi2    complex single gpuArray of Gram blocks Phi*Phi' (Phi is the rank-by-time basis Phi_rt, and the block
 %             of a readout is Phi_rt(:,idx)*Phi_rt(:,idx)'),
 %               [Ntrajs, L, L]        '2D' / '3D'
 %               [Ntrajs, Nkz, L, L]   'stack' (centred kz order, Nkz == Nz)
-%             A MR-Multitasking Phi2 [L, L, Ntrajs, Nz] is
+%             Blocks stored [L, L, Ntrajs, Nz] are
 %             permute(Phi2, [3 4 1 2]) (fftshift along kz if needed).
 %     traj    real single gpuArray [Ntrajs, Nkx, ndim], radians in [-pi, pi).
 %             Ignored when plan is given.
@@ -52,7 +51,7 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
 %   OUTPUT
 %     AhAx    complex single gpuArray, the same size as x.
 %
-%   The block-diagonal product follows MR-Multitasking: the L rank
+%   The block-diagonal product: the L rank
 %   coefficients of a k-space sample form a row vector multiplied from the
 %   right by the Gram block, k(1,:) <- k(1,:) * Phi2, i.e.
 %   k_l <- sum_m k_m Phi2(m, l). It is evaluated with PAGEMTIMES, one
@@ -94,7 +93,7 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
     phi2 = gpuArray(single(phi2));
 
     % Rearrange the Gram blocks once into L-by-L pages so that
-    % pagemtimes(k_page, P_page) = k_page * Phi2 (MR-Multitasking), with the
+    % pagemtimes(k_page, P_page) = k_page * Phi2, with the
     % rank coefficients of each sample along the rows of k_page.
     if stack
         Nz = img(3);

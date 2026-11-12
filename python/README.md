@@ -1,7 +1,7 @@
 # mr_aha (Python interface)
 
 Python bindings for **MR_AHA**, a GPU library (CUDA or Apple-silicon Metal) that evaluates the
-forward normal operator `AᴴA` for non-Cartesian MRI with low-rank (subspace / MR-Multitasking)
+forward normal operator `AᴴA` for non-Cartesian MRI with low-rank (subspace)
 modelling, using a Toeplitz embedding.
 
 Documentation: <https://mikecjz.github.io/MR_AHA_docs/>
@@ -43,4 +43,4 @@ with mr_aha.create_op(cfg, SEs, phi2, traj) as op:   # Toeplitz kernel computed 
 Arrays are CuPy arrays on the CUDA backend and NumPy arrays on Apple silicon
 (`mr_aha.backend()` reports which), in row-major order: `x` is `(L, Nz, Ny, Nx)`, `SEs` is
 `(Ncoils, Nz, Ny, Nx)`, `traj` is `(ndim, Nkx, Ntrajs)`. The documentation covers the masked
-operator, the NUFFT method, several GPUs and the low-level primitives.
+operator, the NUFFT method, multi-GPU and the low-level primitives.

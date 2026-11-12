@@ -39,11 +39,11 @@ classdef mr_aha < handle
 %   (finufft's own MATLAB interface, no library code); the tests use it to
 %   validate this object.
 %
-%   Whether the operator uses one GPU or several is decided at creation
-%   ('devices'). A'A is a sum over coils, so on several GPUs each GPU
+%   Whether the operator is single- or multi-GPU is decided at creation
+%   ('devices'). A'A is a sum over coils, so multi-GPU, each GPU
 %   applies a contiguous range of whole coils and the partial sums are added
 %   on the primary GPU; x is copied to every GPU at each APPLY. With the
-%   Toeplitz method every GPU holds the whole kernel, so several GPUs make
+%   Toeplitz method every GPU holds the whole kernel, so multi-GPU makes
 %   the operator faster but do not raise the largest problem size; 'toep_dist'
 %   chooses how the copies are produced.
 %
@@ -57,8 +57,8 @@ classdef mr_aha < handle
 %             rank (see AHA_TOEPLITZ):
 %               [Nx, Ny, Ncoils]        for '2D'
 %               [Nx, Ny, Nz, Ncoils]    for '3D' and 'stack'
-%     phi2    complex single Gram blocks Phi*Phi' (MR-Multitasking
-%             convention, see CALC_TOEP):
+%     phi2    complex single Gram blocks Phi*Phi' (convention: see
+%             CALC_TOEP):
 %               [Ntrajs, L, L]          for '2D' and '3D'
 %               [Ntrajs, Nkz, L, L]     for 'stack' (centred kz order)
 %     traj    real single trajectory [Ntrajs, Nkx, ndim] in radians, as for
@@ -97,7 +97,7 @@ classdef mr_aha < handle
 %                      config.phi2_dim (as for CALC_TOEP and AHA_TOEPLITZ).
 %                      When omitted, the mask is derived from traj with
 %                      CALC_MASK, as CALC_TOEP does.
-%     'toep_dist'      'toeplitz' on several GPUs: how every GPU gets its
+%     'toep_dist'      multi-GPU 'toeplitz': how every GPU gets its
 %                      copy of the kernel. The (L^2+L)/2 triangular
 %                      components of phi2_toep are independent.
 %                        'auto'       (default) 'split' or 'replicate',

@@ -74,7 +74,7 @@ without asking their users.
 * **Array layout and Gram blocks.** Follow the conventions in the
   [documentation](https://mikecjz.github.io/MR_AHA_docs/guide/conventions.html):
   column-major shapes in the documentation, centred k-space and image space,
-  and the MR-Multitasking Gram-block convention (`v <- v * Phi2`).
+  and the Gram-block convention (`v <- v * Phi2`).
 * **Documentation in the code.** The comments are published as the API
   documentation, so write them generously: Doxygen comments (`/** ... */`,
   `@param`, `@return`) for C, C++ and CUDA, and docstrings for Python and

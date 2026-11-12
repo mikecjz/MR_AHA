@@ -11,7 +11,7 @@ where :math:`F_{-}` is a type-2 NUFFT (uniform image to non-uniform k-space,
 sign :math:`-1`), :math:`F_{+} = F_{-}^H` is the matching type-1 NUFFT
 (non-uniform k-space to uniform image, sign :math:`+1`) and
 :math:`\\mathcal{B}` multiplies the length-:math:`L` rank vector of every
-non-uniform sample, as a row vector from the right (MR-Multitasking's
+non-uniform sample, as a row vector from the right (MATLAB
 ``reshape(k, [], L) * Phi2``), by the Gram block
 :math:`\\Phi_2 = \\Phi\\Phi^H` of its readout, :math:`\\Phi` being the
 rank x time temporal basis (see :mod:`mr_aha.api`). Both
@@ -24,7 +24,7 @@ This is the **independent reference**: no C/CUDA/Metal code of the library is
 involved (it uses the cufinufft Python package and CuPy), so the tests use it
 to validate both methods of :func:`mr_aha.create_op`, in particular
 ``method='nufft'``, which runs the same algorithm inside the library (in C,
-on one or several GPUs). For reconstructions use :func:`mr_aha.create_op`;
+single- or multi-GPU). For reconstructions use :func:`mr_aha.create_op`;
 this module is kept for validation and as the baseline of the
 benchmarks. The engine follows the loaded backend (:func:`mr_aha.backend`):
 
@@ -347,7 +347,7 @@ class AhANufftPlan:
         """Apply the per-readout Gram blocks to non-uniform k-space data.
 
         For every readout ``t`` (and kz encode ``z`` of a stack) this computes
-        the MR-Multitasking product ``k[:, kx] <- k[:, kx] * Phi2_t``, i.e.
+        the product ``k[:, kx] <- k[:, kx] * Phi2_t``, i.e.
         ``k[i, kx] <- sum_j k[j, kx] Phi2_t[j, i]`` (row-major
         ``phi2[i, j, ...]`` is ``Phi2_t[j, i]``), with a single
         :func:`cupy.einsum`, which CuPy maps onto a batched GEMM without

@@ -3,7 +3,7 @@
  * @brief Pre-computation of the block-diagonal Toeplitz operator `phi2_toep`.
  *
  * Given the Gram blocks @f$\Phi\Phi^H@f$ (rank x time @f$\Phi@f$,
- * MR-Multitasking convention, see @ref mr_gram) sampled along the non-Cartesian
+ * see @ref mr_gram) sampled along the non-Cartesian
  * trajectory, this file evaluates the Toeplitz multiplier that
  * ::mr_aha_plan_execute applies between its two cuFFTs.
  *
