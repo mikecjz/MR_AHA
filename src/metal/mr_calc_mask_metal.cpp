@@ -2,23 +2,15 @@
  * @file mr_calc_mask_metal.cpp
  * @brief Automatic k-space mask on Metal.
  *
- * Same constructions as `src/cuda/mr_calc_mask.cu` (see its file comment for
- * the rationale of both methods):
+ * Same construction as `src/cuda/mr_calc_mask.cu` (see its file comment for
+ * the rationale): mark the grid point nearest to every sample and dilate the
+ * marks by a @f$(2r+1)^d@f$ box, @f$r@f$ = ::mr_config::mask_radius. No NUFFT
+ * is involved, so ::mr_calc_mask runs entirely here; the marking uses the
+ * same rounding as CUDA and the mask is identical.
  *
- * - **Neighbourhood mask** (::MR_MASK_NEIGHBOUR, default): mark the grid point
- *   nearest to every sample and dilate by a @f$(2r+1)^d@f$ box. No NUFFT, so
- *   ::mr_calc_mask computes it entirely here; the marking uses the same
- *   rounding as CUDA and the mask is identical.
- * - **Threshold mask** (::MR_MASK_THRESHOLD): needs the unit-weight Toeplitz
- *   kernel, i.e. a NUFFT, which the Metal backend runs in Python (mlx-nufft).
- *   Python's `mr_aha.calc_mask` computes the kernel and calls
- *   ::mr_calc_mask_from_kernel, which dilates, thresholds and compacts it here.
- *   ::mr_calc_mask_kernel and the threshold method of ::mr_calc_mask therefore
- *   return ::MR_ERR_UNSUPPORTED with directions.
- *
- * The GPU builds the selection grid (marks or kernel, then the separable
- * dilation) in a shared buffer; the sorted index list is then compacted on the
- * CPU directly from unified memory, which is a single pass over at most a few
+ * The GPU builds the grid of marks (the marking, then the separable dilation)
+ * in a shared buffer; the sorted index list is then compacted on the CPU
+ * directly from unified memory, which is a single pass over at most a few
  * ten million floats and yields ascending indices by construction.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
@@ -41,8 +33,8 @@ static_assert(sizeof(mr_mark_params) == 40,
 namespace {
 
 /**
- * @brief Argument checks shared by the mask entry points (masking off, since
- *        the number of masked locations is what is being computed).
+ * @brief Argument checks of ::mr_calc_mask (masking off, since the number of
+ *        masked locations is what is being computed).
  */
 int mr_mask_check(const char *fn, const mr_config *cfg)
 {
@@ -54,17 +46,17 @@ int mr_mask_check(const char *fn, const mr_config *cfg)
 }
 
 /**
- * @brief Build the selection grid on the GPU, then compact it on the CPU.
+ * @brief Build the grid of dilated sample marks on the GPU, then compact it
+ *        on the CPU.
  *
  * @param cfg        Validated configuration.
- * @param traj       Trajectory (neighbourhood method), or NULL.
- * @param n_samples  `Ntrajs * Nkx` (neighbourhood method).
- * @param kernel     Unit-weight kernel (threshold method), or NULL.
+ * @param traj       Trajectory `[Ntrajs, Nkx, ndim]`.
+ * @param n_samples  `Ntrajs * Nkx`.
  * @param d_mask     Output indices or NULL to count.
  * @param n_out      Number of retained locations.
  */
 int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
-                  const float *kernel, int64_t *d_mask, int64_t *n_out)
+                  int64_t *d_mask, int64_t *n_out)
 {
     *n_out = 0;
     mr_metal_pool pool;
@@ -75,7 +67,8 @@ int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
     const bool three = cfg->traj_type == MR_TRAJ_3D;
     const int m[3] = {cfg->phi2_dim[0], cfg->phi2_dim[1],
                       three ? cfg->phi2_dim[2] : 1};
-    const int64_t n = mr_mask_kernel_size(cfg);
+    /* Transformed axes only: a stack's kz is handled by replication. */
+    const int64_t n = (int64_t)m[0] * m[1] * m[2];
     if (n > 0xFFFFFFFFLL || n_samples > 0xFFFFFFFFLL)
         MR_FAIL(MR_ERR_UNSUPPORTED, "mask grid too large for the Metal backend");
 
@@ -98,30 +91,21 @@ int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
     MTL::CommandBuffer *cb = ctx->queue->commandBuffer();
     MTL::ComputeCommandEncoder *enc = cb->computeCommandEncoder();
     mr_metal_view tv;
-    int radius;
-    float thr;
-    if (kernel) {
-        std::memcpy(a->contents(), kernel, (size_t)bytes);
-        radius = 1;
-        thr = (float)cfg->mask_threshold;
-    } else {
-        std::memset(a->contents(), 0, (size_t)bytes);
-        const int ndim = three ? 3 : 2;
-        rc = mr_metal_view_make(ctx, traj,
-                                (size_t)n_samples * ndim * sizeof(float), false, &tv);
-        if (rc == MR_SUCCESS) {
-            const double tau = 6.283185307179586; /* 2*pi */
-            mr_mark_params p = {(long long)n_samples, ndim, {m[0], m[1], m[2]},
-                                {(float)(m[0] / tau), (float)(m[1] / tau),
-                                 (float)(m[2] / tau)}};
-            enc->setComputePipelineState(k_mark);
-            enc->setBuffer(a, 0, 0);
-            mr_metal_bind(enc, tv, 1);
-            enc->setBytes(&p, sizeof(p), 2);
-            mr_metal_dispatch_1d(enc, k_mark, (uint64_t)n_samples);
-        }
-        radius = cfg->mask_radius;
-        thr = 0.5f; /* marks are exactly 0 or 1 */
+    const int radius = cfg->mask_radius;
+    std::memset(a->contents(), 0, (size_t)bytes);
+    const int ndim = three ? 3 : 2;
+    rc = mr_metal_view_make(ctx, traj,
+                            (size_t)n_samples * ndim * sizeof(float), false, &tv);
+    if (rc == MR_SUCCESS) {
+        const double tau = 6.283185307179586; /* 2*pi */
+        mr_mark_params p = {(long long)n_samples, ndim, {m[0], m[1], m[2]},
+                            {(float)(m[0] / tau), (float)(m[1] / tau),
+                             (float)(m[2] / tau)}};
+        enc->setComputePipelineState(k_mark);
+        enc->setBuffer(a, 0, 0);
+        mr_metal_bind(enc, tv, 1);
+        enc->setBytes(&p, sizeof(p), 2);
+        mr_metal_dispatch_1d(enc, k_mark, (uint64_t)n_samples);
     }
 
     /* Separable periodic dilation, ping-ponging between a and b. */
@@ -149,9 +133,9 @@ int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
     int64_t k = 0;
     if (rc == MR_SUCCESS) {
         /* Ascending compaction straight from unified memory. */
-        const float *sel = static_cast<const float *>(a->contents());
+        const float *marks = static_cast<const float *>(a->contents());
         for (int64_t i = 0; i < n; ++i)
-            if (sel[i] > thr) {
+            if (marks[i] > 0.5f) { /* marks are exactly 0 or 1 */
                 if (d_mask) d_mask[k] = i;
                 ++k;
             }
@@ -172,8 +156,9 @@ int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
 
     if (cfg->verbose)
         printf("[mr_aha] calc_mask: kept %lld of %lld upsampled locations "
-               "(%.1f%%) (Metal)\n", (long long)k, (long long)mr_pad_size(cfg),
-               100.0 * (double)k / (double)mr_pad_size(cfg));
+               "(%.1f%%) within radius %d of a sample (Metal)\n", (long long)k,
+               (long long)mr_pad_size(cfg),
+               100.0 * (double)k / (double)mr_pad_size(cfg), cfg->mask_radius);
     *n_out = k;
     return MR_SUCCESS;
 }
@@ -192,37 +177,5 @@ extern "C" int mr_calc_mask(const mr_config *cfg, const float *d_traj,
     MR_REQUIRE(d_traj != NULL, "mr_calc_mask: d_traj is NULL");
     MR_REQUIRE(Ntrajs > 0 && Nkx > 0, "mr_calc_mask: Ntrajs = %lld, Nkx = %lld",
                (long long)Ntrajs, (long long)Nkx);
-    if (cfg->mask_method == MR_MASK_THRESHOLD)
-        MR_FAIL(MR_ERR_UNSUPPORTED, "the threshold mask needs a NUFFT, which the "
-                "Metal backend runs outside the library: compute the kernel "
-                "(Python's mr_aha.calc_mask does it with mlx-nufft) and call "
-                "mr_calc_mask_from_kernel");
-    return mr_mask_metal(cfg, d_traj, Ntrajs * Nkx, nullptr, d_mask,
-                         num_masked_out);
-}
-
-extern "C" int mr_calc_mask_from_kernel(const mr_config *cfg,
-                                        const float *d_kernel, int64_t *d_mask,
-                                        int64_t *num_masked_out)
-{
-    mr_clear_error();
-    MR_REQUIRE(num_masked_out != NULL,
-               "mr_calc_mask_from_kernel: num_masked_out is NULL");
-    *num_masked_out = 0;
-    int rc = mr_mask_check("mr_calc_mask_from_kernel", cfg);
-    if (rc != MR_SUCCESS) return rc;
-    MR_REQUIRE(d_kernel != NULL, "mr_calc_mask_from_kernel: d_kernel is NULL");
-    return mr_mask_metal(cfg, nullptr, 0, d_kernel, d_mask, num_masked_out);
-}
-
-extern "C" int mr_calc_mask_kernel(const mr_config *cfg, const float *d_traj,
-                                   int64_t Ntrajs, int64_t Nkx, float *d_kernel)
-{
-    (void)d_traj; (void)Ntrajs; (void)Nkx; (void)d_kernel;
-    mr_clear_error();
-    const int rc = mr_mask_check("mr_calc_mask_kernel", cfg);
-    if (rc != MR_SUCCESS) return rc;
-    MR_FAIL(MR_ERR_UNSUPPORTED, "mr_calc_mask_kernel needs a NUFFT, which the "
-            "Metal backend runs outside the library (Python's "
-            "mr_aha.calc_mask_kernel does it with mlx-nufft)");
+    return mr_mask_metal(cfg, d_traj, Ntrajs * Nkx, d_mask, num_masked_out);
 }

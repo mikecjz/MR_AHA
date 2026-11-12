@@ -4,16 +4,12 @@
  *
  * Usage from MATLAB:
  * @code
- *   mask   = calc_mask_mex(traj, config)            % int64, 0-based
- *   kernel = calc_mask_mex(traj, config, 'kernel')  % single, |T|
+ *   mask = calc_mask_mex(traj, config)            % int64, 0-based
  * @endcode
  *
- * `traj` is a real single gpuArray `[Ntrajs, Nkx, ndim]` in radians. The first
- * form returns the sorted 0-based linear indices of the retained upsampled
- * k-space locations (see ::mr_calc_mask); the second the magnitude of the
- * unit-weight Toeplitz kernel the mask is derived from (see
- * ::mr_calc_mask_kernel), shaped `[Mx, My]` for '2D'/'stack' or
- * `[Mx, My, Mz]` for '3D'.
+ * `traj` is a real single gpuArray `[Ntrajs, Nkx, ndim]` in radians. The
+ * result holds the sorted 0-based linear indices of the retained upsampled
+ * k-space locations (see ::mr_calc_mask).
  *
  * Prefer the `calc_mask.m` wrapper, which converts to MATLAB's 1-based
  * indices.
@@ -32,26 +28,15 @@
  * @brief MEX entry point.
  *
  * @param[in]  nlhs Number of requested outputs (0 or 1).
- * @param[out] plhs `plhs[0]` receives the mask or the kernel as a gpuArray.
- * @param[in]  nrhs Number of inputs (2 or 3).
- * @param[in]  prhs `{traj, config[, 'kernel']}`.
+ * @param[out] plhs `plhs[0]` receives the mask as a gpuArray.
+ * @param[in]  nrhs Number of inputs (2).
+ * @param[in]  prhs `{traj, config}`.
  */
 void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
 {
-    if (nrhs != 2 && nrhs != 3)
-        mexErrMsgIdAndTxt(MR_ID,
-                          "Usage: mask = calc_mask_mex(traj, config) or "
-                          "kernel = calc_mask_mex(traj, config, 'kernel').");
+    if (nrhs != 2)
+        mexErrMsgIdAndTxt(MR_ID, "Usage: mask = calc_mask_mex(traj, config).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID, "Too many output arguments.");
-
-    int want_kernel = 0;
-    if (nrhs == 3) {
-        char mode[16];
-        if (!mxIsChar(prhs[2]) || mxGetString(prhs[2], mode, sizeof(mode)) != 0 ||
-            strcmp(mode, "kernel") != 0)
-            mexErrMsgIdAndTxt(MR_ID, "The third argument must be 'kernel'.");
-        want_kernel = 1;
-    }
 
     mxInitGPU();
 
@@ -82,27 +67,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
                           ndim_traj);
     const float *d_traj = (const float *)mxGPUGetDataReadOnly(g_traj);
 
-    /* ---- Kernel mode ---------------------------------------------------- */
-    if (want_kernel) {
-        mwSize dims[3] = {(mwSize)cfg.phi2_dim[0], (mwSize)cfg.phi2_dim[1],
-                          (mwSize)cfg.phi2_dim[2]};
-        const mwSize ndk = (cfg.traj_type == MR_TRAJ_3D) ? 3 : 2;
-        mxGPUArray *g_k = mxGPUCreateGPUArray(ndk, dims, mxSINGLE_CLASS, mxREAL,
-                                              MX_GPU_DO_NOT_INITIALIZE);
-        const int rc = mr_calc_mask_kernel(&cfg, d_traj, Ntrajs, Nkx,
-                                           (float *)mxGPUGetData(g_k));
-        if (rc != MR_SUCCESS) {
-            mxGPUDestroyGPUArray(g_k);
-            mxGPUDestroyGPUArray(g_traj);
-            mr_mex_fail(MR_ID, rc);
-        }
-        plhs[0] = mxGPUCreateMxArrayOnGPU(g_k);
-        mxGPUDestroyGPUArray(g_k);
-        mxGPUDestroyGPUArray(g_traj);
-        return;
-    }
-
-    /* ---- Mask mode: fill a worst-case buffer, then shrink to fit -------- */
+    /* ---- Mask: fill a worst-case buffer, then shrink to fit ------------- */
     mwSize cap = (mwSize)mr_pad_size(&cfg);
     mxGPUArray *g_buf = mxGPUCreateGPUArray(1, &cap, mxINT64_CLASS, mxREAL,
                                             MX_GPU_DO_NOT_INITIALIZE);

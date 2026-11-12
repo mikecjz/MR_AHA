@@ -146,9 +146,9 @@ int mr_toep_push_device(const mr_config *cfg, int *prev);
 /**
  * @brief Body of ::mr_calc_toep without argument checking or device switching.
  *
- * Shared with ::mr_calc_mask_kernel, which evaluates the unit-weight kernel by
- * running the very same pipeline with @f$L = 1@f$. The caller must have
- * validated @p cfg and made the target device current.
+ * Shared with the operator object (`mr_op.cu`), which computes the kernel of a
+ * single-device Toeplitz operator with it. The caller must have validated
+ * @p cfg and made the target device current.
  *
  * @param[in]  cfg         Validated configuration.
  * @param[in]  d_phi2      Gram blocks, see ::mr_calc_toep.

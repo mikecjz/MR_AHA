@@ -12,7 +12,7 @@ piece by piece while it is being ported:
 
 ``aha``
     :func:`mr_aha.aha_toeplitz` on the stored ``x``, ``SEs`` and each stored
-    ``phi2_toep`` variant (lower/upper, unmasked and both masks), compared to
+    ``phi2_toep`` variant (lower/upper, unmasked and masked), compared to
     the stored ``AhAx_*``. Independent of ``calc_toep`` and ``calc_mask``.
 ``toep``
     :func:`mr_aha.calc_toep` on the stored ``phi2`` and ``traj`` (and stored
@@ -23,8 +23,8 @@ piece by piece while it is being ported:
     each new kernel and compares it with the stored ``AhAx_*`` at the ``aha``
     tolerance, which is the accuracy that matters.
 ``mask``
-    :func:`mr_aha.calc_mask_kernel` and :func:`mr_aha.calc_mask` (both
-    methods), compared to the stored kernel and masks.
+    :func:`mr_aha.calc_mask`, compared to the stored mask (which must match
+    exactly).
 ``nufft``
     The NUFFT reference operator :class:`mr_aha.AhANufftPlan` (cufinufft on
     CUDA, mlx-nufft on Metal) on the stored inputs, compared to the stored
@@ -60,7 +60,9 @@ sys.path.insert(0, str(ROOT / "python"))
 import mr_aha  # noqa: E402
 
 TRIS = ("lower", "upper")
-MASKS = ("neighbour", "threshold")
+#: Suffix of the stored masked variants (``mask_neighbour``,
+#: ``phi2_toep_<tri>_neighbour``, ``AhAx_<tri>_neighbour``).
+MASKS = ("neighbour",)
 STAGES = ("aha", "toep", "mask", "nufft", "op")
 
 
@@ -120,7 +122,6 @@ def configs(z) -> dict:
         n_coils=int(z["n_coils"]),
         eps=float(z["eps"]),
         mask_radius=int(z["cfg_mask_radius"]),
-        mask_threshold=float(z["cfg_mask_threshold"]),
     )
 
 
@@ -186,28 +187,19 @@ def check_toep(z, bk: Backend, c: dict, tol: float, nufft=None,
     return rows
 
 
-def check_mask(z, bk: Backend, c: dict, tol: float, nufft=None) -> list:
-    """Stage ``mask``: kernel (relative error) and masks (fraction differing).
+def check_mask(z, bk: Backend, c: dict) -> list:
+    """Stage ``mask``: the mask of :func:`mr_aha.calc_mask` vs the stored one.
 
-    ``nufft`` selects the engine of the unit-weight kernel, as for ``toep``.
+    Masks are index sets, so the share of indices in one but not the other is
+    reported. No NUFFT is involved and both backends round the samples the
+    same way, so the mask must match exactly.
     """
-    rows = []
     traj = bk.put(z["traj"])
-    base = make_cfg(c)
-    kern = bk.get(mr_aha.calc_mask_kernel(base, traj, nufft=nufft))
-    rows.append(("mask_kernel", rel(kern, z["mask_kernel"]), tol))
-    got = {
-        "neighbour": mr_aha.calc_mask(base, traj, radius=c["mask_radius"]),
-        "threshold": mr_aha.calc_mask(base, traj, threshold=c["mask_threshold"],
-                                      nufft=nufft),
-    }
+    got = bk.get(mr_aha.calc_mask(make_cfg(c), traj, radius=c["mask_radius"]))
+    rows = []
     for m in MASKS:
-        a, b = bk.get(got[m]), z[f"mask_{m}"]
-        # Masks are index sets: report the share of indices in one but not the
-        # other. The neighbour mask must match exactly; the threshold mask may
-        # flip a few locations whose kernel value sits at the threshold.
-        diff = np.setxor1d(a, b).size / max(b.size, 1)
-        rows.append((f"mask_{m}", diff, 0.0 if m == "neighbour" else 1e-3))
+        ref = z[f"mask_{m}"]
+        rows.append((f"mask_{m}", np.setxor1d(got, ref).size / max(ref.size, 1), 0.0))
     return rows
 
 
@@ -260,7 +252,6 @@ def main() -> int:
     ap.add_argument("--tol-toep", type=float, default=None,
                     help="default 1e-5 for the library's own NUFFT, 5e-5 "
                          "for an external one (see the toep stage)")
-    ap.add_argument("--tol-kernel", type=float, default=1e-5)
     ap.add_argument("--nufft", default=None, choices=["library", "mlx", "finufft"],
                     help="NUFFT engine of the toep stage (default: backend's)")
     args = ap.parse_args()
@@ -291,10 +282,8 @@ def main() -> int:
             ext = args.nufft not in (None, "library") or bk.name != "cuda"
             tol_toep = args.tol_toep or (5e-5 if ext else 1e-5)
             rows += check_toep(z, bk, c, tol_toep, args.nufft, args.tol_aha)
-        if "mask" in args.stages and "mask_kernel" in z.files:
-            ext = args.nufft not in (None, "library") or bk.name != "cuda"
-            rows += check_mask(z, bk, c, 5e-5 if ext else args.tol_kernel,
-                               args.nufft)
+        if "mask" in args.stages:
+            rows += check_mask(z, bk, c)
         if "nufft" in args.stages:
             rows += check_nufft(z, bk, c, args.tol_aha)
         if "op" in args.stages:

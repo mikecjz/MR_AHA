@@ -4,10 +4,7 @@
  *
  * A masked @f$A^H A@f$ stores `phi2_toep` only on a subset of the upsampled
  * Cartesian k-space grid. This file derives that subset from the trajectory
- * alone, without any knowledge of the temporal basis. Two constructions are
- * implemented, selected by ::mr_config::mask_method.
- *
- * **Neighbourhood mask (::MR_MASK_NEIGHBOUR, default).**
+ * alone, without any knowledge of the temporal basis:
  *
  *   1. Every sample is mapped to its nearest point on the upsampled grid and
  *      that point is marked, see ::mr_k_mark_samples.
@@ -15,36 +12,13 @@
  *      ::mr_config::mask_radius, see ::mr_k_dilate_axis.
  *   3. Every marked location is kept.
  *
- * **Kernel-threshold mask (::MR_MASK_THRESHOLD).**
- *
- *   1. Every Gram block is replaced by the scalar one (@f$L = 1@f$), which
- *      turns ::mr_calc_toep into the Toeplitz multiplier
- *      @f$T(\mathbf{k})@f$ of the plain normal operator @f$F^H F@f$ of the
- *      trajectory ("Toeplitz weights with all weights set to one").
- *   2. @f$|T|@f$ is max-filtered over the immediate (3^d) neighbourhood of
- *      every location (the same box dilation with @f$r = 1@f$).
- *   3. The dilated kernel is compared with the absolute threshold
- *      ::mr_config::mask_threshold; locations above it are kept.
- *
- * The threshold is absolute because the unit-weight kernel has a natural
- * unit: a single isolated sample lying on the upsampled grid contributes
- * exactly 1 at its own location (a sample between grid points spreads over
- * its neighbours through the Dirichlet kernel). A threshold of 0.05 therefore
- * means "less than 5 % of one sample's worth". A threshold relative to the
- * maximum would not transfer between trajectories: for radial sampling the
- * maximum sits at the centre of k-space, where every spoke contributes, so it
- * grows with the number of spokes while the outer k-space level does not
- * (378 vs. 280 vs. 15680 for the 2D, stack and 3D test trajectories).
- *
- * Why both are sound: for arbitrary Gram blocks the Toeplitz multiplier is
+ * Why this is sound: for arbitrary Gram blocks the Toeplitz multiplier is
  * @f$\hat{T}(\mathbf{k}) = \sum_m (\Phi\Phi^H)_m\,
  * D(\mathbf{k}-\mathbf{k}_m)@f$, where @f$D@f$ is the Dirichlet kernel of the
  * upsampled grid. Its main lobe around each sample spans a few cells, which
- * the neighbourhood mask keeps; its tails decay slowly, which the threshold
- * mask follows. The unit-weight kernel is the same sum with every block set
- * to one, so wherever @f$|T|@f$ is negligible no sample lies nearby and
- * @f$\hat{T}@f$ is negligible as well, whatever the subspace. Measurements of
- * both are in the documentation
+ * the neighbourhood of radius @f$r@f$ keeps; far from every sample only the
+ * slowly decaying tails remain, and @f$\hat{T}@f$ is small there whatever the
+ * subspace. Measurements are in the documentation
  * (https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html).
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
@@ -67,29 +41,6 @@
 /* ------------------------------------------------------------------------ */
 /* Kernels                                                                  */
 /* ------------------------------------------------------------------------ */
-
-/**
- * @brief Fill a complex array with the value one.
- * @param[out] d_out Array to fill.
- * @param[in]  n     Number of elements.
- */
-__global__ void mr_k_fill_ones(mr_complex *d_out, long long n)
-{
-    long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid < n) d_out[tid] = make_cuFloatComplex(1.0f, 0.0f);
-}
-
-/**
- * @brief Elementwise magnitude of a complex array.
- * @param[out] d_abs Real output, @f$|z|@f$.
- * @param[in]  d_z   Complex input.
- * @param[in]  n     Number of elements.
- */
-__global__ void mr_k_abs(float *d_abs, const mr_complex *d_z, long long n)
-{
-    long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid < n) d_abs[tid] = cuCabsf(d_z[tid]);
-}
 
 /**
  * @brief Mark the upsampled grid point nearest to every sample.
@@ -137,12 +88,8 @@ __global__ void mr_k_mark_samples(float *d_marks, const float *d_traj,
  * grid. Applying it along every axis gives the max over a @f$(2r+1)^d@f$ box,
  * i.e. over all locations within Chebyshev distance @p r.
  *
- * It serves both mask methods: with 0/1 marks it grows each sample's point
- * into a box of radius ::mr_config::mask_radius; with the unit-weight kernel
- * (@f$r = 1@f$) it fills the isolated pockets where the Dirichlet kernels of
- * unit weights cancel inside the sampled region but those of real Gram blocks
- * do not, which lowers the thresholding error by about an order of magnitude
- * at the same number of retained locations.
+ * Applied to the 0/1 sample marks it grows each sample's point into a box of
+ * radius ::mr_config::mask_radius.
  *
  * @param[out] d_out  Filtered array, same shape as @p d_in.
  * @param[in]  d_in   Input array of @p n elements.
@@ -191,108 +138,17 @@ __global__ void mr_k_replicate_planes(int64_t *d_mask, long long n_plane,
     d_mask[i + n_plane * kz] = d_mask[i] + plane_size * kz;
 }
 
-/** @brief Thrust predicate: is the value at linear index @p i above threshold? */
-struct mr_above_threshold {
-    const float *kernel; /**< Kernel magnitudes or 0/1 marks, centred order. */
-    float        thr;    /**< Absolute threshold.                            */
+/** @brief Thrust predicate: is the location at linear index @p i marked? */
+struct mr_is_marked {
+    const float *marks; /**< Dilated 0/1 sample marks, centred order. */
 
     /** @brief Evaluate the predicate at linear index @p i. */
-    __host__ __device__ bool operator()(int64_t i) const { return kernel[i] > thr; }
+    __host__ __device__ bool operator()(int64_t i) const { return marks[i] > 0.5f; }
 };
 
 /* ------------------------------------------------------------------------ */
 /* Implementation                                                           */
 /* ------------------------------------------------------------------------ */
-
-/**
- * @brief Build the configuration of the unit-weight problem.
- *
- * A stack trajectory is reduced to its 2D in-plane problem, since every kz
- * encode shares the same in-plane kernel; the rank becomes one and masking is
- * switched off so the full grid is produced.
- *
- * @param[in]  cfg Caller's configuration.
- * @param[out] k   Configuration for the unit-weight kernel.
- */
-static void mr_unit_config(const mr_config *cfg, mr_config *k)
-{
-    *k = *cfg;
-    k->L          = 1;
-    k->is_masked  = 0;
-    k->num_masked = 0;
-    k->n_coils    = 1;
-    if (cfg->traj_type == MR_TRAJ_STACK) {
-        k->traj_type   = MR_TRAJ_2D;
-        k->n_spatial   = 2;
-        k->n_dim[2]    = 1;
-        k->phi2_dim[2] = 1;
-    }
-}
-
-/**
- * @brief Compute @f$|T|@f$ with the target device already current.
- * @param[in]  cfg      Validated caller configuration.
- * @param[in]  d_traj   Trajectory `[Ntrajs, Nkx, ndim]`.
- * @param[in]  Ntrajs   Number of trajectories.
- * @param[in]  Nkx      Samples per trajectory.
- * @param[out] d_kernel Output of ::mr_mask_kernel_size floats.
- * @return ::MR_SUCCESS or a negative ::mr_status.
- */
-static int mr_calc_mask_kernel_impl(const mr_config *cfg, const float *d_traj,
-                                    int64_t Ntrajs, int64_t Nkx, float *d_kernel)
-{
-    mr_config kcfg;
-    mr_unit_config(cfg, &kcfg);
-    const int status = mr_config_validate(&kcfg);
-    if (status != MR_SUCCESS) return status;
-
-    cudaStream_t  s = (cudaStream_t)cfg->stream;
-    const int64_t n = mr_pad_size(&kcfg);
-
-    mr_complex *d_ones = NULL, *d_T = NULL;
-    if (cudaMalloc((void **)&d_ones, (size_t)Ntrajs * sizeof(mr_complex)) !=
-            cudaSuccess ||
-        cudaMalloc((void **)&d_T, (size_t)n * sizeof(mr_complex)) != cudaSuccess) {
-        cudaFree(d_ones);
-        cudaFree(d_T);
-        MR_FAIL(MR_ERR_ALLOC, "failed to allocate the unit-weight kernel buffers");
-    }
-
-    mr_k_fill_ones<<<(int)mr_ceil_div(Ntrajs, MR_BLOCK), MR_BLOCK, 0, s>>>(
-        d_ones, (long long)Ntrajs);
-    int rc = MR_SUCCESS;
-    if (cudaGetLastError() != cudaSuccess) {
-        mr_set_error("mr_k_fill_ones failed to launch");
-        rc = MR_ERR_CUDA;
-    }
-
-    /* The unit-weight Toeplitz multiplier, scaled exactly like phi2_toep. */
-    if (rc == MR_SUCCESS)
-        rc = mr_calc_toep_impl(&kcfg, d_ones, d_traj, Ntrajs, Nkx, NULL, d_T);
-    cudaFree(d_ones); /* mr_calc_toep_impl synchronises before returning */
-
-    if (rc == MR_SUCCESS) {
-        mr_k_abs<<<(int)mr_ceil_div(n, MR_BLOCK), MR_BLOCK, 0, s>>>(d_kernel, d_T,
-                                                                    (long long)n);
-        const cudaError_t ce = cudaGetLastError();
-        if (ce != cudaSuccess) {
-            mr_set_error("mr_k_abs failed to launch: %s", cudaGetErrorString(ce));
-            rc = MR_ERR_CUDA;
-        }
-    }
-    if (rc == MR_SUCCESS) {
-        /* d_T is freed next, so wait for the magnitude pass to read it. */
-        const cudaError_t ce = (s != NULL) ? cudaStreamSynchronize(s)
-                                           : cudaDeviceSynchronize();
-        if (ce != cudaSuccess) {
-            mr_set_error("synchronisation after mr_k_abs failed: %s",
-                         cudaGetErrorString(ce));
-            rc = MR_ERR_CUDA;
-        }
-    }
-    cudaFree(d_T);
-    return rc;
-}
 
 /**
  * @brief Dilate a grid in place by a periodic @f$(2r+1)^d@f$ box.
@@ -327,33 +183,39 @@ static int mr_dilate_box(float **d_a, float **d_b, const int m[3], int r,
 }
 
 /**
- * @brief Build the selection grid of the chosen method, device already current.
+ * @brief Number of elements of the grid the samples are marked on.
  *
- * On success @p *d_sel holds ::mr_mask_kernel_size floats (owned by the
- * caller) and @p *thr the value a location must exceed to be kept: the
- * dilated unit-weight kernel and ::mr_config::mask_threshold for
- * ::MR_MASK_THRESHOLD, the dilated 0/1 sample marks and 0.5 for
- * ::MR_MASK_NEIGHBOUR.
+ * Only the transformed axes count: `Mx*My*Mz` for ::MR_TRAJ_3D and `Mx*My`
+ * for ::MR_TRAJ_2D and ::MR_TRAJ_STACK (a stack's kz planes share the
+ * in-plane mask, which is replicated afterwards).
  *
- * @param[in]  cfg    Validated caller configuration.
- * @param[in]  d_traj Trajectory `[Ntrajs, Nkx, ndim]` (unused when
- *                    @p d_kernel_in is given).
- * @param[in]  Ntrajs Number of trajectories.
- * @param[in]  Nkx    Samples per trajectory.
- * @param[in]  d_kernel_in Optional precomputed unit-weight kernel
- *                    (::mr_calc_mask_from_kernel); when non-NULL the
- *                    threshold method is used with it instead of evaluating
- *                    the kernel here.
- * @param[out] d_sel  Receives the selection grid.
- * @param[out] thr    Receives the selection threshold.
+ * @param[in] cfg Validated configuration.
+ * @return Element count.
+ */
+static int64_t mr_mask_grid_size(const mr_config *cfg)
+{
+    const int64_t plane = (int64_t)cfg->phi2_dim[0] * cfg->phi2_dim[1];
+    return (cfg->traj_type == MR_TRAJ_3D) ? plane * cfg->phi2_dim[2] : plane;
+}
+
+/**
+ * @brief Build the grid of dilated sample marks, device already current.
+ *
+ * On success @p *d_marks holds ::mr_mask_grid_size floats (owned by the
+ * caller): 1 at every location within ::mr_config::mask_radius cells of the
+ * grid point nearest to a sample, 0 elsewhere.
+ *
+ * @param[in]  cfg     Validated caller configuration.
+ * @param[in]  d_traj  Trajectory `[Ntrajs, Nkx, ndim]`.
+ * @param[in]  Ntrajs  Number of trajectories.
+ * @param[in]  Nkx     Samples per trajectory.
+ * @param[out] d_marks Receives the grid of marks.
  * @return ::MR_SUCCESS or a negative ::mr_status.
  */
-static int mr_mask_selection(const mr_config *cfg, const float *d_traj,
-                             int64_t Ntrajs, int64_t Nkx,
-                             const float *d_kernel_in, float **d_sel,
-                             float *thr)
+static int mr_mask_marks(const mr_config *cfg, const float *d_traj,
+                         int64_t Ntrajs, int64_t Nkx, float **d_marks)
 {
-    const int64_t n     = mr_mask_kernel_size(cfg);
+    const int64_t n     = mr_mask_grid_size(cfg);
     const int     three = (cfg->traj_type == MR_TRAJ_3D);
     /* Transformed axes only: a stack's kz is handled by replication. */
     const int m[3] = {cfg->phi2_dim[0], cfg->phi2_dim[1],
@@ -366,45 +228,25 @@ static int mr_mask_selection(const mr_config *cfg, const float *d_traj,
                 (long long)n);
 
     int rc = MR_SUCCESS;
-    int radius;
-    if (d_kernel_in != NULL) {
-        if (cudaMemcpyAsync(d_a, d_kernel_in, (size_t)n * sizeof(float),
-                            cudaMemcpyDeviceToDevice, s) != cudaSuccess) {
-            mr_set_error("copying the unit-weight kernel failed");
-            rc = MR_ERR_CUDA;
-        }
-        radius = 1;
-        *thr   = (float)cfg->mask_threshold;
-    } else if (cfg->mask_method == MR_MASK_THRESHOLD) {
-        rc     = mr_calc_mask_kernel_impl(cfg, d_traj, Ntrajs, Nkx, d_a);
-        radius = 1;
-        /* Absolute threshold: the unit-weight kernel is measured in samples
-         * (one isolated on-grid sample contributes exactly 1). */
-        *thr   = (float)cfg->mask_threshold;
+    const long long ns  = (long long)Ntrajs * Nkx;
+    const double    tau = 6.283185307179586; /* 2*pi */
+    if (cudaMemsetAsync(d_a, 0, (size_t)n * sizeof(float), s) != cudaSuccess) {
+        mr_set_error("clearing the mask grid failed");
+        rc = MR_ERR_CUDA;
     } else {
-        const long long ns  = (long long)Ntrajs * Nkx;
-        const double    tau = 6.283185307179586; /* 2*pi */
-        if (cudaMemsetAsync(d_a, 0, (size_t)n * sizeof(float), s) != cudaSuccess) {
-            mr_set_error("clearing the mask grid failed");
+        mr_k_mark_samples<<<(int)mr_ceil_div(ns, MR_BLOCK), MR_BLOCK, 0, s>>>(
+            d_a, d_traj, ns, three ? 3 : 2, m[0], m[1], m[2],
+            (float)(m[0] / tau), (float)(m[1] / tau), (float)(m[2] / tau));
+        const cudaError_t ce = cudaGetLastError();
+        if (ce != cudaSuccess) {
+            mr_set_error("mr_k_mark_samples failed to launch: %s",
+                         cudaGetErrorString(ce));
             rc = MR_ERR_CUDA;
-        } else {
-            mr_k_mark_samples<<<(int)mr_ceil_div(ns, MR_BLOCK), MR_BLOCK, 0, s>>>(
-                d_a, d_traj, ns, three ? 3 : 2, m[0], m[1], m[2],
-                (float)(m[0] / tau), (float)(m[1] / tau), (float)(m[2] / tau));
-            const cudaError_t ce = cudaGetLastError();
-            if (ce != cudaSuccess) {
-                mr_set_error("mr_k_mark_samples failed to launch: %s",
-                             cudaGetErrorString(ce));
-                rc = MR_ERR_CUDA;
-            }
         }
-        radius = cfg->mask_radius;
-        *thr   = 0.5f; /* marks are exactly 0 or 1 */
     }
     if (rc != MR_SUCCESS) { cudaFree(d_a); return rc; }
 
-    /* The scratch grid is allocated only now, after the threshold method's
-     * NUFFT buffers are gone, to keep the peak memory down. */
+    const int radius = cfg->mask_radius;
     if (radius > 0) {
         if (cudaMalloc((void **)&d_b, (size_t)n * sizeof(float)) != cudaSuccess) {
             cudaFree(d_a);
@@ -424,32 +266,27 @@ static int mr_mask_selection(const mr_config *cfg, const float *d_traj,
         cudaFree(d_b);
         if (rc != MR_SUCCESS) { cudaFree(d_a); return rc; }
     }
-    *d_sel = d_a;
+    *d_marks = d_a;
     return MR_SUCCESS;
 }
 
 /**
- * @brief Build the selection grid and emit the sorted mask, device already current.
+ * @brief Build the marks and emit the sorted mask, device already current.
  * @param[in]  cfg            Validated caller configuration.
  * @param[in]  d_traj         Trajectory `[Ntrajs, Nkx, ndim]`.
  * @param[in]  Ntrajs         Number of trajectories.
  * @param[in]  Nkx            Samples per trajectory.
- * @param[in]  d_kernel_in    Optional precomputed unit-weight kernel, see
- *                            ::mr_mask_selection.
  * @param[out] d_mask         Output indices, capacity ::mr_pad_size, or NULL.
  * @param[out] num_masked_out Number of retained locations.
  * @return ::MR_SUCCESS or a negative ::mr_status.
  */
 static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
-                             int64_t Ntrajs, int64_t Nkx,
-                             const float *d_kernel_in, int64_t *d_mask,
+                             int64_t Ntrajs, int64_t Nkx, int64_t *d_mask,
                              int64_t *num_masked_out)
 {
-    const int64_t n = mr_mask_kernel_size(cfg);
-    float *d_kernel = NULL;
-    float  thr      = 0.0f;
-    int rc = mr_mask_selection(cfg, d_traj, Ntrajs, Nkx, d_kernel_in, &d_kernel,
-                               &thr);
+    const int64_t n = mr_mask_grid_size(cfg);
+    float *d_marks = NULL;
+    int rc = mr_mask_marks(cfg, d_traj, Ntrajs, Nkx, &d_marks);
     if (rc != MR_SUCCESS) return rc;
 
     cudaStream_t s = (cudaStream_t)cfg->stream;
@@ -459,7 +296,7 @@ static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
         /* thrust reports failures by exception, which must not cross the C
          * boundary, hence the try block. */
         auto policy = thrust::cuda::par.on(s);
-        const mr_above_threshold pred = {d_kernel, thr};
+        const mr_is_marked pred = {d_marks};
         thrust::counting_iterator<int64_t> first(0), last(n);
         if (d_mask != NULL) {
             /* copy_if preserves order, so the indices come out ascending. */
@@ -469,13 +306,13 @@ static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
             n_kept = (int64_t)thrust::count_if(policy, first, last, pred);
         }
     } catch (const thrust::system_error &e) {
-        cudaFree(d_kernel);
+        cudaFree(d_marks);
         MR_FAIL(MR_ERR_CUDA, "compacting the mask failed: %s", e.what());
     } catch (...) {
-        cudaFree(d_kernel);
+        cudaFree(d_marks);
         MR_FAIL(MR_ERR_INTERNAL, "compacting the mask failed");
     }
-    cudaFree(d_kernel);
+    cudaFree(d_marks);
 
     /* Stack: every kz plane shares the in-plane mask. */
     if (cfg->traj_type == MR_TRAJ_STACK) {
@@ -500,27 +337,19 @@ static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
                     cudaGetErrorString(ce));
     }
 
-    if (cfg->verbose) {
-        if (cfg->mask_method == MR_MASK_THRESHOLD || d_kernel_in != NULL)
-            printf("[mr_aha] calc_mask: kept %lld of %lld upsampled locations "
-                   "(%.1f%%) at threshold %g\n",
-                   (long long)n_kept, (long long)mr_pad_size(cfg),
-                   100.0 * (double)n_kept / (double)mr_pad_size(cfg),
-                   cfg->mask_threshold);
-        else
-            printf("[mr_aha] calc_mask: kept %lld of %lld upsampled locations "
-                   "(%.1f%%) within radius %d of a sample\n",
-                   (long long)n_kept, (long long)mr_pad_size(cfg),
-                   100.0 * (double)n_kept / (double)mr_pad_size(cfg),
-                   cfg->mask_radius);
-    }
+    if (cfg->verbose)
+        printf("[mr_aha] calc_mask: kept %lld of %lld upsampled locations "
+               "(%.1f%%) within radius %d of a sample\n",
+               (long long)n_kept, (long long)mr_pad_size(cfg),
+               100.0 * (double)n_kept / (double)mr_pad_size(cfg),
+               cfg->mask_radius);
 
     *num_masked_out = n_kept;
     return MR_SUCCESS;
 }
 
 /**
- * @brief Argument checks shared by the two public entry points.
+ * @brief Argument checks of ::mr_calc_mask.
  *
  * Validates a copy of @p cfg with masking switched off, because the number of
  * masked locations is exactly what is being computed.
@@ -545,22 +374,6 @@ static int mr_mask_check_args(const char *fn, const mr_config *cfg,
     return mr_config_validate(&c);
 }
 
-extern "C" int mr_calc_mask_kernel(const mr_config *cfg, const float *d_traj,
-                                   int64_t Ntrajs, int64_t Nkx, float *d_kernel)
-{
-    mr_clear_error();
-    MR_REQUIRE(d_kernel != NULL, "mr_calc_mask_kernel: d_kernel is NULL");
-    int rc = mr_mask_check_args("mr_calc_mask_kernel", cfg, d_traj, Ntrajs, Nkx);
-    if (rc != MR_SUCCESS) return rc;
-
-    int prev = -1;
-    rc = mr_toep_push_device(cfg, &prev);
-    if (rc == MR_SUCCESS)
-        rc = mr_calc_mask_kernel_impl(cfg, d_traj, Ntrajs, Nkx, d_kernel);
-    if (prev >= 0) cudaSetDevice(prev);
-    return rc;
-}
-
 extern "C" int mr_calc_mask(const mr_config *cfg, const float *d_traj,
                             int64_t Ntrajs, int64_t Nkx, int64_t *d_mask,
                             int64_t *num_masked_out)
@@ -574,32 +387,7 @@ extern "C" int mr_calc_mask(const mr_config *cfg, const float *d_traj,
     int prev = -1;
     rc = mr_toep_push_device(cfg, &prev);
     if (rc == MR_SUCCESS)
-        rc = mr_calc_mask_impl(cfg, d_traj, Ntrajs, Nkx, NULL, d_mask,
-                               num_masked_out);
-    if (prev >= 0) cudaSetDevice(prev);
-    return rc;
-}
-
-extern "C" int mr_calc_mask_from_kernel(const mr_config *cfg,
-                                        const float *d_kernel, int64_t *d_mask,
-                                        int64_t *num_masked_out)
-{
-    mr_clear_error();
-    MR_REQUIRE(num_masked_out != NULL,
-               "mr_calc_mask_from_kernel: num_masked_out is NULL");
-    *num_masked_out = 0;
-    MR_REQUIRE(cfg != NULL, "mr_calc_mask_from_kernel: cfg is NULL");
-    MR_REQUIRE(d_kernel != NULL, "mr_calc_mask_from_kernel: d_kernel is NULL");
-    mr_config c = *cfg;
-    c.is_masked  = 0;
-    c.num_masked = 0;
-    int rc = mr_config_validate(&c);
-    if (rc != MR_SUCCESS) return rc;
-
-    int prev = -1;
-    rc = mr_toep_push_device(cfg, &prev);
-    if (rc == MR_SUCCESS)
-        rc = mr_calc_mask_impl(cfg, NULL, 0, 0, d_kernel, d_mask, num_masked_out);
+        rc = mr_calc_mask_impl(cfg, d_traj, Ntrajs, Nkx, d_mask, num_masked_out);
     if (prev >= 0) cudaSetDevice(prev);
     return rc;
 }

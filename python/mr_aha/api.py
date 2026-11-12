@@ -20,7 +20,6 @@ column-major (docs, MATLAB)   row-major (this module, CuPy)
 ``phi2[Ntrajs, L, L]``        ``phi2[L, L, Ntrajs]``
 ``phi2[Ntrajs, Nkz, L, L]``   ``phi2[L, L, Nkz, Ntrajs]`` (stack)
 ``traj[Ntrajs, Nkx, ndim]``   ``traj[ndim, Nkx, Ntrajs]``
-``mask_kernel[Mx, My, Mz]``   ``mask_kernel[Mz, My, Mx]``
 ============================  =======================================
 
 Every array must be a C-contiguous CuPy array resident on the GPU; ``complex64``
@@ -62,11 +61,9 @@ from typing import Optional, Sequence
 
 from ._lib import (
     DEFAULT_MASK_RADIUS,
-    DEFAULT_MASK_THRESHOLD,
     OP_ALL_DEVICES,
     OP_SHARE_PRIMARY,
     OP_TOEP_SOURCES,
-    MaskMethod,
     MRConfig,
     MRError,
     MROpInfo,
@@ -83,8 +80,6 @@ from ._lib import (
 
 __all__ = [
     "DEFAULT_MASK_RADIUS",
-    "DEFAULT_MASK_THRESHOLD",
-    "MaskMethod",
     "MRConfig",
     "MRError",
     "TrajType",
@@ -92,8 +87,6 @@ __all__ = [
     "make_config",
     "num_tri",
     "phi2_toep_shape",
-    "mask_kernel_shape",
-    "calc_mask_kernel",
     "calc_mask",
     "calc_toep",
     "aha_toeplitz",
@@ -192,9 +185,7 @@ def make_config(
     stream=None,
     mem_fraction: float = 0.5,
     verbose: bool = False,
-    mask_method="neighbour",
     mask_radius: int = DEFAULT_MASK_RADIUS,
-    mask_threshold: float = DEFAULT_MASK_THRESHOLD,
 ) -> MRConfig:
     """Build a validated :class:`MRConfig`.
 
@@ -218,16 +209,9 @@ def make_config(
         stream: A :class:`cupy.cuda.Stream`, a raw stream handle, or ``None``.
         mem_fraction: Share of the free device memory :func:`calc_toep` may use.
         verbose: Print per-stage progress.
-        mask_method: How :func:`calc_mask` builds the mask: ``'neighbour'``
-            (default) keeps the locations within ``mask_radius`` cells of a
-            sample; ``'threshold'`` thresholds the unit-weight Toeplitz kernel
-            at ``mask_threshold``. See :func:`calc_mask`.
-        mask_radius: Neighbourhood radius in upsampled grid cells for the
-            ``'neighbour'`` method (>= 0).
-        mask_threshold: Absolute threshold for the ``'threshold'`` method, in
-            units of samples; a location is kept when the (locally
-            max-filtered) unit-weight Toeplitz kernel there exceeds it. One
-            isolated on-grid sample contributes exactly 1.
+        mask_radius: Neighbourhood radius of :func:`calc_mask` in upsampled
+            grid cells (>= 0): the locations within this many cells of a
+            sample are kept.
 
     Returns:
         A populated and validated :class:`MRConfig`.
@@ -272,8 +256,6 @@ def make_config(
     cfg.gpu_device_id = int(gpu_device_id)
     cfg.mem_fraction = float(mem_fraction)
     cfg.verbose = 1 if verbose else 0
-    cfg.mask_threshold = float(mask_threshold)
-    cfg.mask_method = MaskMethod.parse(mask_method)
     cfg.mask_radius = int(mask_radius)
     cfg.stream = _stream_ptr(stream)
 
@@ -378,114 +360,20 @@ def _check_traj(cfg: MRConfig, traj):
     return int(Ntrajs), int(Nkx)
 
 
-def mask_kernel_shape(cfg: MRConfig) -> tuple:
-    """Row-major shape of the unit-weight kernel of :func:`calc_mask_kernel`.
-
-    Args:
-        cfg: A configuration from :func:`make_config`.
-
-    Returns:
-        ``(Mz, My, Mx)`` for a 3D trajectory, else ``(My, Mx)``: the kernel of
-        a stack trajectory is the same for every kz plane, so only the in-plane
-        kernel is returned.
-    """
-    if cfg.traj_type == TrajType.THREE_D:
-        return (int(cfg.phi2_dim[2]), int(cfg.phi2_dim[1]), int(cfg.phi2_dim[0]))
-    return (int(cfg.phi2_dim[1]), int(cfg.phi2_dim[0]))
-
-
-def calc_mask_kernel(cfg: MRConfig, traj, nufft: Optional[str] = None):
-    """Magnitude of the unit-weight Toeplitz kernel of a trajectory.
-
-    This is what :func:`calc_toep` would return for ``L = 1`` with every Gram
-    block set to one -- the Toeplitz multiplier of the plain normal operator of
-    the trajectory -- in absolute value. It is large where the trajectory
-    samples k-space and decays to (nearly) zero away from it, and is the
-    quantity :func:`calc_mask` thresholds.
-
-    Args:
-        cfg: Configuration from :func:`make_config`. ``L`` and the masking
-            fields are ignored.
-        traj: ``float32`` trajectory shaped ``(ndim, Nkx, Ntrajs)``.
-        nufft: As for :func:`calc_toep`: ``None`` uses the library's own
-            cufinufft on CUDA and mlx-nufft (two-stage :func:`calc_toep` with
-            ``L = 1`` and unit Gram blocks) on Metal; ``'finufft'`` selects
-            CPU FINUFFT for the two-stage path.
-
-    Returns:
-        A ``float32`` array (CuPy on CUDA, NumPy on Metal) shaped as
-        :func:`mask_kernel_shape`, in centred order.
-
-    Raises:
-        ValueError: If ``traj`` is malformed.
-        MRError: If the library reports a failure.
-    """
-    xp = _xp()
-    Ntrajs, Nkx = _check_traj(cfg, traj)
-    if nufft is None:
-        nufft = "library" if backend() == "cuda" else "mlx"
-    if nufft != "library":
-        return _unit_kernel(cfg, traj, Ntrajs, nufft, xp)
-    out = xp.empty(mask_kernel_shape(cfg), dtype=xp.float32)
-    check(
-        lib.mr_calc_mask_kernel(
-            ctypes.byref(cfg),
-            _ptr(traj, "traj", "float32"),
-            ctypes.c_int64(Ntrajs),
-            ctypes.c_int64(Nkx),
-            _ptr(out, "out", "float32"),
-        ),
-        "mr_calc_mask_kernel",
-    )
-    return out
-
-
-def _unit_kernel(cfg: MRConfig, traj, Ntrajs: int, nufft: str, xp):
-    """Unit-weight kernel through the two-stage :func:`calc_toep`.
-
-    Mirrors ``mr_unit_config`` in ``src/cuda/mr_calc_mask.cu``: rank one,
-    unmasked, every Gram block equal to one, and a stack trajectory reduced to
-    its in-plane 2D problem.
-    """
-    stack = cfg.traj_type == TrajType.STACK
-    ns = 2 if (stack or cfg.traj_type == TrajType.TWO_D) else 3
-    ucfg = make_config(
-        TrajType.TWO_D if stack else cfg.traj_type,
-        [cfg.n_dim[i] for i in range(ns)], 1,
-        phi2_dim=[cfg.phi2_dim[i] for i in range(ns)],
-        eps=cfg.eps, gpu_device_id=cfg.gpu_device_id,
-        mem_fraction=cfg.mem_fraction, verbose=bool(cfg.verbose))
-    ones = xp.ones((1, 1, Ntrajs), dtype=xp.complex64)
-    T = calc_toep(ucfg, ones, traj, nufft=nufft)
-    return xp.abs(T).astype(xp.float32).reshape(mask_kernel_shape(cfg))
-
-
-def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
-              radius: Optional[int] = None, nufft: Optional[str] = None):
+def calc_mask(cfg: MRConfig, traj, *, radius: Optional[int] = None):
     """Derive the masked-operator sample set from the trajectory alone.
 
-    Two methods are available (``cfg.mask_method``):
-
-    ``'neighbour'`` (default)
-        Every sample is mapped to its nearest point on the upsampled grid
-        (``rint(k * M / (2 pi)) + M // 2`` per axis, periodic) and every
-        location within ``radius`` cells of such a point (Chebyshev distance,
-        i.e. a ``(2r+1)^d`` box) is kept. No NUFFT is needed. The default
-        radius 2 matches the unmasked accuracy on densely sampled radial and 3D
-        trajectories while keeping roughly the sampled disc or ball.
-    ``'threshold'``
-        The unit-weight kernel of :func:`calc_mask_kernel` is max-filtered
-        over the immediate 3x3 (3x3x3 in 3D) neighbourhood of every location
-        and compared with the absolute ``threshold``. The kernel is measured
-        in samples (one isolated on-grid sample contributes exactly 1), so
-        0.05 drops locations receiving less than 5 % of one sample's worth.
-        It follows the kernel's slowly decaying, axis-aligned tails, which
-        makes it more accurate per retained location for very sparse
-        trajectories such as few-arm spirals.
+    Every sample is mapped to its nearest point on the upsampled grid
+    (``rint(k * M / (2 pi)) + M // 2`` per axis, periodic) and every location
+    within ``radius`` cells of such a point (Chebyshev distance, i.e. a
+    ``(2r+1)^d`` box) is kept. No NUFFT is needed. The default radius 2
+    matches the unmasked accuracy on densely sampled radial and 3D
+    trajectories while keeping roughly the sampled disc or ball; sparse
+    trajectories need a larger radius.
 
     For a stack trajectory the in-plane mask is repeated over all kz planes.
     https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html
-    compares the two methods.
+    has the measurements.
 
     Typical use::
 
@@ -497,18 +385,10 @@ def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
 
     Args:
         cfg: Configuration from :func:`make_config`. Not modified.
-        traj: ``float32`` CuPy trajectory shaped ``(ndim, Nkx, Ntrajs)``.
-        threshold: If given, use the ``'threshold'`` method with this
-            absolute threshold (>= 0, in samples) regardless of
-            ``cfg.mask_method``.
-        radius: If given, use the ``'neighbour'`` method with this radius
-            (>= 0, in grid cells) regardless of ``cfg.mask_method``.
-        nufft: NUFFT of the ``'threshold'`` method's kernel, see
-            :func:`calc_mask_kernel`. On Metal (or with an external engine)
-            the kernel is computed in Python and the library's
-            ``mr_calc_mask_from_kernel`` finishes the mask; the
-            ``'neighbour'`` method needs no NUFFT and always runs in the
-            library.
+        traj: ``float32`` trajectory shaped ``(ndim, Nkx, Ntrajs)`` (CuPy on
+            CUDA, NumPy on Metal).
+        radius: Neighbourhood radius in upsampled grid cells (>= 0), keyword
+            only. Defaults to ``cfg.mask_radius``.
 
     Returns:
         An ``int64`` array (CuPy on CUDA, NumPy on Metal) of sorted, 0-based
@@ -516,40 +396,17 @@ def calc_mask(cfg: MRConfig, traj, threshold: Optional[float] = None,
         (column-major).
 
     Raises:
-        ValueError: If ``traj`` is malformed or both ``threshold`` and
-            ``radius`` are given.
+        ValueError: If ``traj`` is malformed.
         MRError: If the library reports a failure.
     """
     xp = _xp()
     Ntrajs, Nkx = _check_traj(cfg, traj)
-    if threshold is not None and radius is not None:
-        raise ValueError("pass at most one of threshold and radius")
     c = MRConfig.from_buffer_copy(cfg)  # private copy; the caller's is untouched
-    if threshold is not None:
-        c.mask_method = MaskMethod.THRESHOLD
-        c.mask_threshold = float(threshold)
     if radius is not None:
-        c.mask_method = MaskMethod.NEIGHBOUR
         c.mask_radius = int(radius)
 
     buf = xp.empty(int(lib.mr_pad_size(ctypes.byref(c))), dtype=xp.int64)
     n = ctypes.c_int64(0)
-    if nufft is None:
-        nufft = "library" if backend() == "cuda" else "mlx"
-    if c.mask_method == MaskMethod.THRESHOLD and nufft != "library":
-        kernel = calc_mask_kernel(c, traj, nufft=nufft)
-        check(
-            lib.mr_calc_mask_from_kernel(
-                ctypes.byref(c),
-                _ptr(kernel, "kernel", "float32"),
-                _ptr(buf, "mask", "int64"),
-                ctypes.byref(n),
-            ),
-            "mr_calc_mask_from_kernel",
-        )
-        mask = buf[: n.value].copy()
-        del buf, kernel
-        return mask
     check(
         lib.mr_calc_mask(
             ctypes.byref(c),

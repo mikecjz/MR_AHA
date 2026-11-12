@@ -19,14 +19,9 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
 %     'n_coils'        left empty by default and inferred from size(SEs).
 %     'eps'            NUFFT tolerance for CALC_TOEP, MR_AHA (both
 %                      methods) and AHA_CUFINUFFT, default 1e-6.
-%     'mask_method'    how CALC_MASK builds the mask: 'neighbour' (default,
-%                      keep locations within mask_radius grid cells of a
-%                      sample) or 'threshold' (threshold the unit-weight
-%                      Toeplitz kernel at mask_threshold).
 %     'mask_radius'    neighbourhood radius of CALC_MASK in upsampled grid
-%                      cells, default 2.
-%     'mask_threshold' absolute threshold of CALC_MASK's 'threshold' method
-%                      (in samples), default 0.05.
+%                      cells (locations within this many cells of a sample
+%                      are kept), default 2.
 %     'mem_fraction'   share of free GPU memory CALC_TOEP and MR_AHA may
 %                      use for their working buffers, default 0.5.
 %     'gpu_device_id'  -1 (default) keeps MATLAB's currently selected GPU.
@@ -58,9 +53,7 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
     p.addParameter('is_masked', false);
     p.addParameter('n_coils', []);
     p.addParameter('eps', 1e-6);
-    p.addParameter('mask_method', 'neighbour');
     p.addParameter('mask_radius', 2);
-    p.addParameter('mask_threshold', 0.05);
     p.addParameter('mem_fraction', 0.5);
     p.addParameter('gpu_device_id', -1);
     p.addParameter('verbose', false);
@@ -100,9 +93,7 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
         'phi2_dim',        phi2_dim, ...
         'is_masked',       logical(opt.is_masked), ...
         'eps',             double(opt.eps), ...
-        'mask_method',     lower(opt.mask_method), ...
         'mask_radius',     double(opt.mask_radius), ...
-        'mask_threshold',  double(opt.mask_threshold), ...
         'mem_fraction',    double(opt.mem_fraction), ...
         'gpu_device_id',   double(opt.gpu_device_id), ...
         'verbose',         double(opt.verbose));

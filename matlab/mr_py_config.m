@@ -23,9 +23,7 @@ function cfg = mr_py_config(config)
     if isfield(config, 'eps'),            args = [args, {'eps', double(config.eps)}]; end
     if isfield(config, 'mem_fraction'),   args = [args, {'mem_fraction', double(config.mem_fraction)}]; end
     if isfield(config, 'verbose'),        args = [args, {'verbose', logical(config.verbose)}]; end
-    if isfield(config, 'mask_method'),    args = [args, {'mask_method', char(config.mask_method)}]; end
     if isfield(config, 'mask_radius'),    args = [args, {'mask_radius', int64(config.mask_radius)}]; end
-    if isfield(config, 'mask_threshold'), args = [args, {'mask_threshold', double(config.mask_threshold)}]; end
     cfg = mr.make_config(char(config.traj_type), ints(config.n_dim), ...
                          int64(config.L), pyargs(args{:}));
 end

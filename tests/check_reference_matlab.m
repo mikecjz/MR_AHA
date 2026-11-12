@@ -5,15 +5,15 @@ function check_reference_matlab(ref_dir)
 %   data/ref_mlx_mat (written by tests/export_reference_mat.py from the CUDA
 %   reference data of tests/make_reference.py) and compares:
 %
-%     AhA_Toeplitz   with each stored phi2_toep (lower/upper, unmasked and both
-%                    masks) against the stored AhAx;
+%     AhA_Toeplitz   with each stored phi2_toep (lower/upper, unmasked and
+%                    masked) against the stored AhAx;
 %     calc_toep      against the stored phi2_toep, and the operator built from
 %                    it against the stored AhAx (the operator-level check that
 %                    matters when the NUFFT differs from the reference's);
-%     calc_mask      'neighbour' (must match exactly) and 'threshold';
+%     calc_mask      against the stored mask (must match exactly);
 %     mr_aha         MR_AHA.CREATE_OP with method 'toeplitz' (kernel
-%                    computed by the operator; lower/upper, unmasked and both
-%                    masks) against the stored AhAx, and with method 'nufft'
+%                    computed by the operator; lower/upper, unmasked and
+%                    masked) against the stored AhAx, and with method 'nufft'
 %                    against the stored NUFFT result and against AHA_CUFINUFFT;
 %     AhA_cufinufft  (the independent NUFFT reference operator: finufft's own
 %                    MATLAB interface, no library code) against the stored
@@ -51,8 +51,7 @@ function check_reference_matlab(ref_dir)
         end
         base = mr_default_config(z.traj_type, z.n_dim, double(z.L), ...
             'phi2_dim', z.phi2_dim, 'n_coils', double(z.n_coils), ...
-            'eps', double(z.eps), 'mask_radius', double(z.cfg_mask_radius), ...
-            'mask_threshold', double(z.cfg_mask_threshold));
+            'eps', double(z.eps), 'mask_radius', double(z.cfg_mask_radius));
         rows = {};
         for tri = {'lower', 'upper'}
             t = tri{1};
@@ -70,28 +69,24 @@ function check_reference_matlab(ref_dir)
             rows(end+1, :) = {['AhAx_' t ' (create_op)'], rel(op * z.x, ...
                 z.(['AhAx_' t])), tol_aha}; %#ok<AGROW>
             delete(op);
-            for m = {'neighbour', 'threshold'}
-                mm = m{1};
-                cfgm = cfg; cfgm.is_masked = true;
-                mask = z.(['mask_' mm]) + 1;
-                suf = [t '_' mm];
-                rows(end+1, :) = {['AhAx_' suf], rel(AhA_Toeplitz(z.x, z.SEs, ...
-                    z.(['phi2_toep_' suf]), cfgm, mask), z.(['AhAx_' suf])), tol_aha}; %#ok<AGROW>
-                Om = calc_toep(z.phi2, z.traj, cfgm, mask);
-                rows(end+1, :) = {['AhAx_' suf ' (new toep)'], rel(AhA_Toeplitz( ...
-                    z.x, z.SEs, Om, cfgm, mask), z.(['AhAx_' suf])), tol_aha}; %#ok<AGROW>
-                op = mr_aha.create_op(z.SEs, z.phi2, z.traj, cfgm, 'mask', mask);
-                rows(end+1, :) = {['AhAx_' suf ' (create_op)'], rel(op * z.x, ...
-                    z.(['AhAx_' suf])), tol_aha}; %#ok<AGROW>
-                delete(op);
-            end
+            % Masked variants: the stored keys carry the suffix 'neighbour'
+            % (the neighbourhood mask of CALC_MASK).
+            cfgm = cfg; cfgm.is_masked = true;
+            mask = z.mask_neighbour + 1;
+            suf = [t '_neighbour'];
+            rows(end+1, :) = {['AhAx_' suf], rel(AhA_Toeplitz(z.x, z.SEs, ...
+                z.(['phi2_toep_' suf]), cfgm, mask), z.(['AhAx_' suf])), tol_aha}; %#ok<AGROW>
+            Om = calc_toep(z.phi2, z.traj, cfgm, mask);
+            rows(end+1, :) = {['AhAx_' suf ' (new toep)'], rel(AhA_Toeplitz( ...
+                z.x, z.SEs, Om, cfgm, mask), z.(['AhAx_' suf])), tol_aha}; %#ok<AGROW>
+            op = mr_aha.create_op(z.SEs, z.phi2, z.traj, cfgm, 'mask', mask);
+            rows(end+1, :) = {['AhAx_' suf ' (create_op)'], rel(op * z.x, ...
+                z.(['AhAx_' suf])), tol_aha}; %#ok<AGROW>
+            delete(op);
         end
-        % Masks.
-        cn = base; cn.mask_method = 'neighbour';
-        ct = base; ct.mask_method = 'threshold';
-        mn = gather(calc_mask(z.traj, cn)); mt = gather(calc_mask(z.traj, ct));
+        % Mask.
+        mn = gather(calc_mask(z.traj, base));
         rows(end+1, :) = {'mask_neighbour', setdiff_frac(mn, z.mask_neighbour + 1), 0}; %#ok<AGROW>
-        rows(end+1, :) = {'mask_threshold', setdiff_frac(mt, z.mask_threshold + 1), 1e-3}; %#ok<AGROW>
         % NUFFT operator (library) and the independent NUFFT reference
         % (CUDA: needs cufinufft's MATLAB interface).
         has_nufft = metal || exist('cufinufft_plan', 'file') == 2;

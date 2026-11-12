@@ -5,10 +5,9 @@ inputs and outputs of each public entry point in one ``.npz`` file under
 ``data/ref_mlx/``, so that another backend can be checked against them without
 a CUDA GPU:
 
-* :func:`mr_aha.calc_mask_kernel` and :func:`mr_aha.calc_mask` (both the
-  ``'neighbour'`` and the ``'threshold'`` method),
+* :func:`mr_aha.calc_mask`,
 * :func:`mr_aha.calc_toep` for ``'lower'`` and ``'upper'`` triangulation,
-  unmasked and with each of the two masks,
+  unmasked and with that mask,
 * :func:`mr_aha.aha_toeplitz` for every one of those ``phi2_toep`` variants,
 * the NUFFT reference :class:`mr_aha.AhANufftPlan` (cufinufft) when the
   ``cufinufft`` package is importable, as an independent check of the
@@ -34,25 +33,25 @@ key                   row-major shape (saved)          column-major (C API docs)
 ``x``, ``AhAx_*``     ``(L, [Nz,] Ny, Nx)``            ``[Nx, Ny, [Nz,] L]``
 ``SEs``               ``(Nc, [Nz,] Ny, Nx)``           ``[Nx, Ny, [Nz,] Nc]``
 ``phi2_toep_<tri>``   ``(T, [Mz,] My, Mx)``            ``[Mx, My, [Mz,] T]``
-``phi2_toep_<tri>_<mask>`` ``(T, num_masked)``         ``[num_masked, T]``
-``mask_kernel``       ``([Mz,] My, Mx)`` float32       ``[Mx, My, [Mz]]``
-``mask_<method>``     ``(num_masked,)`` int64          0-based linear indices
+``phi2_toep_<tri>_neighbour`` ``(T, num_masked)``      ``[num_masked, T]``
+``mask_neighbour``    ``(num_masked,)`` int64          0-based linear indices
 ====================  ===============================  =========================
 
 ``T = L (L + 1) / 2``. ``phi2[j, i, ...]`` holds entry ``(i, j)`` of the
 Hermitian Gram block ``Phi Phi^H`` (rank x time ``Phi``, MR-Multitasking
 convention, recorded as ``gram_convention`` in ``config_json``). Mask indices are 0-based linear indices into the
 centred upsampled grid ``[Mx, My, Mz]`` in column-major order, which equals
-the flat index of the row-major ``(Mz, My, Mx)`` array. For a stack the
-``mask_kernel`` is the in-plane kernel only ``(My, Mx)``; the mask repeats it
-over all ``Mz = Nz`` planes. All k-space arrays have the centre in the middle
+the flat index of the row-major ``(Mz, My, Mx)`` array. For a stack the mask
+repeats the in-plane selection over all ``Mz = Nz`` planes. The masked
+variants carry the suffix ``neighbour``, after the neighbourhood construction
+of :func:`mr_aha.calc_mask`. All k-space arrays have the centre in the middle
 of the array (index ``M // 2``).
 
 Scalar metadata is stored both as individual keys (``traj_type``, ``n_dim``,
-``phi2_dim``, ``L``, ``n_coils``, ``eps``, ``cfg_mask_radius``,
-``cfg_mask_threshold``; ``n_dim``/``phi2_dim`` in column-major order ``(Nx,
-Ny, [Nz])``; the ``cfg_`` prefix avoids a clash with the ``mask_threshold``
-index array) and as one JSON string ``config_json`` that also records the full
+``phi2_dim``, ``L``, ``n_coils``, ``eps``, ``cfg_mask_radius``;
+``n_dim``/``phi2_dim`` in column-major order ``(Nx, Ny, [Nz])``; the ``cfg_``
+prefix keeps the scalar apart from the ``mask_*`` index arrays) and as one
+JSON string ``config_json`` that also records the full
 ``MRConfig`` of every call, the layout note, the GPU and the software
 versions.
 
@@ -117,7 +116,9 @@ CASES = [
 ]
 
 TRIS = ("lower", "upper")
-MASKS = ("neighbour", "threshold")
+#: Suffix of the masked variants (the neighbourhood mask of
+#: :func:`mr_aha.calc_mask`).
+MASKS = ("neighbour",)
 GOLDEN = (np.sqrt(5.0) - 1.0) / 2.0  # golden-angle fraction
 
 
@@ -234,10 +235,8 @@ def run_case(traj_type, n_dim, L, n_coils, traj, phi2, x, SEs, phi2_dim=None,
 
     base = mr_aha.make_config(traj_type, n_dim, L, **kw)
     meta["base_config"] = cfg_dict(base)
-    out["mask_kernel"] = mr_aha.calc_mask_kernel(base, g_traj).get()
     masks = {
         "neighbour": mr_aha.calc_mask(base, g_traj, radius=int(base.mask_radius)),
-        "threshold": mr_aha.calc_mask(base, g_traj, threshold=float(base.mask_threshold)),
     }
     for m, v in masks.items():
         out[f"mask_{m}"] = v.get()
@@ -313,7 +312,6 @@ def scalar_inputs(traj_type, n_dim, L, n_coils, phi2_dim, base_cfg) -> dict:
         L=np.int64(L), n_coils=np.int64(n_coils),
         eps=np.float64(base_cfg["eps"]),
         cfg_mask_radius=np.int64(base_cfg["mask_radius"]),
-        cfg_mask_threshold=np.float64(base_cfg["mask_threshold"]),
     )
 
 

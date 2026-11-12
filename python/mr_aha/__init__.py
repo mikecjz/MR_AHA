@@ -18,8 +18,8 @@ Low-level, stateless, single-GPU primitives:
 ``aha_toeplitz``
     Applies :math:`A^H A` once with a given kernel.
 
-``calc_mask`` / ``calc_mask_kernel``
-    Derive the masked-operator sample set from the trajectory alone.
+``calc_mask``
+    Derives the masked-operator sample set from the trajectory alone.
 
 Independent reference (no library code):
 
@@ -41,20 +41,16 @@ Example:
 
 from .api import (
     DEFAULT_MASK_RADIUS,
-    DEFAULT_MASK_THRESHOLD,
     AhAOp,
-    MaskMethod,
     MRConfig,
     MRError,
     TrajType,
     Triangulation,
     aha_toeplitz,
     calc_mask,
-    calc_mask_kernel,
     calc_toep,
     create_op,
     make_config,
-    mask_kernel_shape,
     num_tri,
     phi2_toep_shape,
 )
@@ -63,10 +59,8 @@ from .nufft import AhANufftPlan, aha_nufft
 
 __all__ = [
     "DEFAULT_MASK_RADIUS",
-    "DEFAULT_MASK_THRESHOLD",
     "AhANufftPlan",
     "AhAOp",
-    "MaskMethod",
     "MRConfig",
     "MRError",
     "TrajType",
@@ -75,11 +69,9 @@ __all__ = [
     "aha_toeplitz",
     "backend",
     "calc_mask",
-    "calc_mask_kernel",
     "calc_toep",
     "create_op",
     "make_config",
-    "mask_kernel_shape",
     "num_tri",
     "phi2_toep_shape",
 ]

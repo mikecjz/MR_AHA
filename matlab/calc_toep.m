@@ -46,8 +46,7 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
 %                2*config.n_dim, except along kz of a stack where Mz == Nz).
 %                Optional: .eps (NUFFT tolerance, default 1e-6),
 %                .mem_fraction (share of free GPU memory the chunking may use,
-%                default 0.5), .mask_method, .mask_radius, .mask_threshold
-%                (see CALC_MASK), .verbose.
+%                default 0.5), .mask_radius (see CALC_MASK), .verbose.
 %
 %     mask       (optional) 1-based linear indices into the centred upsampled
 %                grid config.phi2_dim at which the operator is retained. Only

@@ -324,8 +324,8 @@ endif()
 # ----------------------------------------------------------------------------
 # MATLAB MEX interface
 #   CUDA : gpuArray gateways (matlab/*.cu), need the Parallel Computing Toolbox
-#   METAL: host-array gateways (matlab/metal/*.cpp); calc_toep and the
-#          threshold mask go through MATLAB's Python interface (pyenv)
+#   METAL: host-array gateways (matlab/metal/*.cpp); calc_toep goes through
+#          MATLAB's Python interface (pyenv)
 #   both : mr_backend_mex, which the .m wrappers use to pick the data path
 # ----------------------------------------------------------------------------
 

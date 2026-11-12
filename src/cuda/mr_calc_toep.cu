@@ -511,7 +511,7 @@ int mr_toep_ctx_destroy(mr_toep_ctx *ctx)
 }
 
 /* Body of ::mr_calc_toep, run with the target device current. Documented in
- * mr_internal.cuh because ::mr_calc_mask_kernel reuses it. */
+ * mr_internal.cuh because the operator object (mr_op.cu) reuses it. */
 int mr_calc_toep_impl(const mr_config *cfg, const mr_complex *d_phi2,
                       const float *d_traj, int64_t Ntrajs, int64_t Nkx,
                       const int64_t *d_mask, mr_complex *d_phi2_toep)

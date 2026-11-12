@@ -48,7 +48,7 @@ def main() -> None:
                 out[k] = a.item()
             elif k in ("n_dim", "phi2_dim"):
                 out[k] = a.astype(np.float64)[None, :]     # row vector
-            elif k.startswith("mask_") and k != "mask_kernel":
+            elif k.startswith("mask_") and a.dtype.kind == "i":
                 out[k] = a.astype(np.int64)[:, None]       # column, 0-based
             else:
                 out[k] = a.T
