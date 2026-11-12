@@ -11,7 +11,7 @@ function check_reference_matlab(ref_dir)
 %                    it against the stored AhAx (the operator-level check that
 %                    matters when the NUFFT differs from the reference's);
 %     calc_mask      'neighbour' (must match exactly) and 'threshold';
-%     mr_aha_op      MR_AHA_OP.CREATE_OP with method 'toeplitz' (kernel
+%     mr_aha         MR_AHA.CREATE_OP with method 'toeplitz' (kernel
 %                    computed by the operator; lower/upper, unmasked and both
 %                    masks) against the stored AhAx, and with method 'nufft'
 %                    against the stored NUFFT result and against AHA_CUFINUFFT;
@@ -66,7 +66,7 @@ function check_reference_matlab(ref_dir)
             rows(end+1, :) = {['AhAx_' t ' (new toep)'], rel(AhA_Toeplitz( ...
                 z.x, z.SEs, Om, cfg), z.(['AhAx_' t])), tol_aha}; %#ok<AGROW>
             % The operator object, kernel computed from the Gram blocks.
-            op = mr_aha_op.create_op(z.SEs, z.phi2, z.traj, cfg);
+            op = mr_aha.create_op(z.SEs, z.phi2, z.traj, cfg);
             rows(end+1, :) = {['AhAx_' t ' (create_op)'], rel(op * z.x, ...
                 z.(['AhAx_' t])), tol_aha}; %#ok<AGROW>
             delete(op);
@@ -80,7 +80,7 @@ function check_reference_matlab(ref_dir)
                 Om = calc_toep(z.phi2, z.traj, cfgm, mask);
                 rows(end+1, :) = {['AhAx_' suf ' (new toep)'], rel(AhA_Toeplitz( ...
                     z.x, z.SEs, Om, cfgm, mask), z.(['AhAx_' suf])), tol_aha}; %#ok<AGROW>
-                op = mr_aha_op.create_op(z.SEs, z.phi2, z.traj, cfgm, 'mask', mask);
+                op = mr_aha.create_op(z.SEs, z.phi2, z.traj, cfgm, 'mask', mask);
                 rows(end+1, :) = {['AhAx_' suf ' (create_op)'], rel(op * z.x, ...
                     z.(['AhAx_' suf])), tol_aha}; %#ok<AGROW>
                 delete(op);
@@ -95,7 +95,7 @@ function check_reference_matlab(ref_dir)
         % NUFFT operator (library) and the independent NUFFT reference
         % (CUDA: needs cufinufft's MATLAB interface).
         has_nufft = metal || exist('cufinufft_plan', 'file') == 2;
-        op = mr_aha_op.create_op(z.SEs, z.phi2, z.traj, base, 'method', 'nufft');
+        op = mr_aha.create_op(z.SEs, z.phi2, z.traj, base, 'method', 'nufft');
         y_op = op * z.x;
         delete(op);
         if isfield(z, 'AhAx_nufft')

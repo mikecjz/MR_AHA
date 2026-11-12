@@ -12,9 +12,9 @@
 %   AHA_CUFINUFFT (opt-in: on some machines that MEX file aborts MATLAB on
 %   some of the reference trajectories). Runs
 %
-%     CHECK_REFERENCE_MATLAB  the public functions and MR_AHA_OP.CREATE_OP
+%     CHECK_REFERENCE_MATLAB  the public functions and MR_AHA.CREATE_OP
 %                             (both methods) against the stored references;
-%     CHECK_OP_MATLAB         the operator object MR_AHA_OP on the current
+%     CHECK_OP_MATLAB         the operator object MR_AHA on the current
 %                             gpuDevice. Its multi-GPU checks run only when
 %                             the environment variable MR_AHA_TEST_MGPU is 1
 %                             (opt-in because they occupy every visible GPU

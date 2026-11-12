@@ -12,8 +12,8 @@
 #    AhA_Toeplitz_mex  - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
 #    calc_toep_mex     - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
 #    calc_mask_mex     - MATLAB MEX gateway (optional, MR_AHA_BUILD_MATLAB)
-#    mr_aha_op_mex     - MATLAB MEX gateway of the multi-GPU operator class
-#                        mr_aha_op (optional, MR_AHA_BUILD_MATLAB, CUDA only)
+#    mr_aha_mex        - MATLAB MEX gateway of the multi-GPU operator class
+#                        mr_aha (optional, MR_AHA_BUILD_MATLAB, CUDA only)
 #    cufinufft (MEX)   - finufft's own MATLAB GPU interface, used by the
 #                        NUFFT reference AhA_cufinufft.m (optional,
 #                        MR_AHA_BUILD_CUFINUFFT_MATLAB, CUDA only)
@@ -354,10 +354,10 @@ if(MR_AHA_BUILD_MATLAB)
                   "${Matlab_ROOT_DIR}/bin/win64"
             REQUIRED)
 
-        # mr_aha_op_mex: plan-based multi-GPU A^H A behind the mr_aha_op
-        # handle class (matlab/mr_aha_op.m); CUDA only.
+        # mr_aha_mex: plan-based multi-GPU A^H A behind the mr_aha
+        # handle class (matlab/mr_aha.m); CUDA only.
         foreach(MR_MEX_NAME AhA_Toeplitz_mex calc_toep_mex calc_mask_mex
-                            mr_aha_op_mex)
+                            mr_aha_mex)
             matlab_add_mex(
                 NAME ${MR_MEX_NAME}
                 SRC matlab/${MR_MEX_NAME}.cu

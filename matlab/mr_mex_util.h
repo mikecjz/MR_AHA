@@ -89,10 +89,10 @@ static void mr_mex_check_traj(const mxGPUArray *g_traj, const mr_config *cfg,
 }
 
 /**
- * @brief Read the device list of `mr_aha_op_mex('create', ...)` for
+ * @brief Read the device list of `mr_aha_mex('create', ...)` for
  *        ::mr_op_options::devices.
  *
- * Accepts an `int32` vector of **CUDA ordinals** (0-based; `mr_aha_op.m`
+ * Accepts an `int32` vector of **CUDA ordinals** (0-based; `mr_aha.m`
  * converts the 1-based `gpuDevice` indices of its `'devices'` argument), the
  * character vector `'all'` (every visible device) or `[]` (the primary
  * device only).

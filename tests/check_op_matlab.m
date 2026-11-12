@@ -1,11 +1,11 @@
 function check_op_matlab(varargin)
-%CHECK_OP_MATLAB  Validate the A'A operator object MR_AHA_OP.
+%CHECK_OP_MATLAB  Validate the A'A operator object MR_AHA.
 %
 %   CHECK_OP_MATLAB()
 %   CHECK_OP_MATLAB('multi', true)              % also the multi-GPU sections
 %   CHECK_OP_MATLAB('multi', true, 'device_sets', {[1 2], 1:4})
 %
-%   Builds operators with MR_AHA_OP.CREATE_OP on small random problems and
+%   Builds operators with MR_AHA.CREATE_OP on small random problems and
 %   errors if any check fails, so `matlab -batch check_op_matlab` exits
 %   non-zero on failure. The MEX files, the matlab/ folder and, for the NUFFT
 %   reference, cufinufft's MATLAB interface (<build>/finufft/matlab, built
@@ -54,8 +54,8 @@ function check_op_matlab(varargin)
 %                  memory used by this MATLAB process on every GPU unchanged
 %                  (nvidia-smi; falls back to the primary's AvailableMemory).
 %     reset        after reset(gpuDevice), apply raises
-%                  'MR_AHA:mr_aha_op:deviceReset', info().valid is false and
-%                  delete warns 'MR_AHA:mr_aha_op:staleDestroy' and releases
+%                  'MR_AHA:mr_aha:deviceReset', info().valid is false and
+%                  delete warns 'MR_AHA:mr_aha:staleDestroy' and releases
 %                  the operator (mr_op_abandon), for both methods.
 %
 %   MULTI-GPU CHECKS ('multi'; skipped by default unless more than one GPU is
@@ -166,7 +166,7 @@ function check_op_matlab(varargin)
                     for share = [false true]
                         bad = {};
                         % Supplied kernel: bit-identical to AhA_Toeplitz.
-                        op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, cfg, ...
+                        op = mr_aha.create_op(g.SEs, g.phi2, g.traj, cfg, ...
                             'mask', mask, 'share_primary', share, '_phi2_toep', Om);
                         y1 = op.apply(g.x);
                         y2 = op * g.x;
@@ -183,7 +183,7 @@ function check_op_matlab(varargin)
                                                'supplied', share, metal)]; %#ok<AGROW>
                         if share && ~metal
                             % Supplied kernel without the Gram blocks.
-                            op = mr_aha_op.create_op(g.SEs, [], [], cfg, ...
+                            op = mr_aha.create_op(g.SEs, [], [], cfg, ...
                                 'mask', mask, '_phi2_toep', Om);
                             y3 = op * g.x;
                             delete(op);
@@ -192,7 +192,7 @@ function check_op_matlab(varargin)
                             end
                         end
                         % Kernel computed by the operator.
-                        op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, cfg, ...
+                        op = mr_aha.create_op(g.SEs, g.phi2, g.traj, cfg, ...
                             'mask', mask, 'share_primary', share);
                         y = op * g.x;
                         ek = rel(op.kernel(), Om);
@@ -245,7 +245,7 @@ function check_op_matlab(varargin)
             y0 = [];
             for io = 1:numel(opt_sets)
                 bad = {};
-                op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, ...
+                op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, ...
                     'method', 'nufft', 'nufft_opts', opt_sets{io});
                 y1 = op.apply(g.x);
                 y2 = op * g.x;
@@ -264,7 +264,7 @@ function check_op_matlab(varargin)
                                        true, metal)]; %#ok<AGROW>
                 if io == 1
                     y0 = y1;
-                    opt_t = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg);
+                    opt_t = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg);
                     et = rel(y1, opt_t * g.x);
                     delete(opt_t);
                     worst_t = max(worst_t, et);
@@ -302,46 +302,46 @@ function check_op_matlab(varargin)
     cfgm = g.cfg; cfgm.is_masked = true;
     n0 = op_count(metal);
     errs = {
-        'unknown method', 'MR_AHA:mr_aha_op:method', ...
-            @() mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'direct');
-        'masked config with nufft', 'MR_AHA:mr_aha_op:maskedNufft', ...
-            @() mr_aha_op.create_op(g.SEs, g.phi2, g.traj, cfgm, 'method', 'nufft');
-        'devices 0', 'MR_AHA:mr_aha_op:devices', ...
-            @() mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', 0);
-        'devices beyond the last GPU', 'MR_AHA:mr_aha_op:devices', ...
-            @() mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', n_gpu + 1);
-        'devices 1.5', 'MR_AHA:mr_aha_op:devices', ...
-            @() mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', 1.5);
-        'devices ''some''', 'MR_AHA:mr_aha_op:devices', ...
-            @() mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', 'some');
-        'nufft_opts with toeplitz', 'MR_AHA:mr_aha_op:nufftOpts', ...
-            @() mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, ...
+        'unknown method', 'MR_AHA:mr_aha:method', ...
+            @() mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'direct');
+        'masked config with nufft', 'MR_AHA:mr_aha:maskedNufft', ...
+            @() mr_aha.create_op(g.SEs, g.phi2, g.traj, cfgm, 'method', 'nufft');
+        'devices 0', 'MR_AHA:mr_aha:devices', ...
+            @() mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', 0);
+        'devices beyond the last GPU', 'MR_AHA:mr_aha:devices', ...
+            @() mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', n_gpu + 1);
+        'devices 1.5', 'MR_AHA:mr_aha:devices', ...
+            @() mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', 1.5);
+        'devices ''some''', 'MR_AHA:mr_aha:devices', ...
+            @() mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', 'some');
+        'nufft_opts with toeplitz', 'MR_AHA:mr_aha:nufftOpts', ...
+            @() mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, ...
                                     'nufft_opts', struct('upsampfac', 2));
-        'unknown nufft_opts field', 'MR_AHA:mr_aha_op:nufftOpts', ...
-            @() mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft', ...
+        'unknown nufft_opts field', 'MR_AHA:mr_aha:nufftOpts', ...
+            @() mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft', ...
                                     'nufft_opts', struct('modeord', 1));
-        'bad toep_dist', 'MR_AHA:mr_aha_op:toepDist', ...
-            @() mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'toep_dist', 'gather');
-        '_phi2_toep with nufft', 'MR_AHA:mr_aha_op:phi2Toep', ...
-            @() mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft', ...
+        'bad toep_dist', 'MR_AHA:mr_aha:toepDist', ...
+            @() mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'toep_dist', 'gather');
+        '_phi2_toep with nufft', 'MR_AHA:mr_aha:phi2Toep', ...
+            @() mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft', ...
                                     '_phi2_toep', g.SEs);
-        'public constructor', 'MR_AHA:mr_aha_op:useCreateOp', ...
-            @() mr_aha_op(g.SEs, g.phi2, g.cfg);
-        'constructor without arguments', 'MR_AHA:mr_aha_op:useCreateOp', ...
-            @() mr_aha_op();
+        'public constructor', 'MR_AHA:mr_aha:useCreateOp', ...
+            @() mr_aha(g.SEs, g.phi2, g.cfg);
+        'constructor without arguments', 'MR_AHA:mr_aha:useCreateOp', ...
+            @() mr_aha();
         };
     for ie = 1:size(errs, 1)
         id = error_id(errs{ie, 3});
         nfail = nfail + report(['error: ' errs{ie, 1}], strcmp(id, errs{ie, 2}), id);
     end
-    id = error_id(@() mr_aha_op.from_gram(g.SEs, g.phi2, g.traj, g.cfg));
+    id = error_id(@() mr_aha.from_gram(g.SEs, g.phi2, g.traj, g.cfg));
     nfail = nfail + report('error: from_gram no longer exists', ~isempty(id), id);
-    op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft');
+    op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft');
     id = error_id(@() op.kernel());
     nfail = nfail + report('error: kernel() of a NUFFT operator', ...
-                           strcmp(id, 'MR_AHA:mr_aha_op:noKernel'), id);
+                           strcmp(id, 'MR_AHA:mr_aha:noKernel'), id);
     delete(op);
-    op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg);
+    op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg);
     id = error_id(@() op.kernel(op.info().n_devices + 1));
     nfail = nfail + report('error: kernel(k) beyond the operator''s GPUs', ~isempty(id), id);
     id = error_id(@() op * g.x(:, 1:end-1, :));
@@ -361,7 +361,7 @@ function check_op_matlab(varargin)
     Om = calc_toep(g.phi2, g.traj, g.cfg);
     ref = AhA_Toeplitz(g.x, g.SEs, Om, g.cfg);
     idx0 = current_index();
-    op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg);
+    op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg);
     i1 = current_index();
     y = op.apply(g.x);
     i2 = current_index();
@@ -372,12 +372,12 @@ function check_op_matlab(varargin)
     nfail = nfail + report('device unchanged by create/apply/info/kernel/delete', ...
         all([i1 i2 i3 i4] == idx0) && rel(y, ref) < opt.tol, ...
         sprintf('indices %s', num2str([idx0 i1 i2 i3 i4])));
-    op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', opt.primary);
+    op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', opt.primary);
     s = op.info(); y = op * g.x; delete(op);
     nfail = nfail + report('''devices'', <current gpuDevice>', ...
         s.n_devices == 1 && s.devices == opt.primary && rel(y, ref) < opt.tol, '');
     if n_gpu == 1
-        op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', 'all');
+        op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', 'all');
         s = op.info(); y = op * g.x; delete(op);
         nfail = nfail + report('''devices'', ''all'' with one visible GPU', ...
             s.n_devices == 1 && rel(y, ref) < opt.tol, '');
@@ -389,7 +389,7 @@ function check_op_matlab(varargin)
     for method = {'toeplitz', 'nufft'}
         m = method{1};
         if strcmp(m, 'nufft')
-            refm = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft');
+            refm = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft');
             refy = refm * g.x;
             delete(refm);
         else
@@ -402,9 +402,9 @@ function check_op_matlab(varargin)
         ok_alive = rel(op.apply(g.x), refy) < opt.tol;
         SEs2 = g.SEs; Om2 = Om;
         if strcmp(m, 'nufft')
-            op2 = mr_aha_op.create_op(SEs2, g.phi2, g.traj, g.cfg, 'method', 'nufft');
+            op2 = mr_aha.create_op(SEs2, g.phi2, g.traj, g.cfg, 'method', 'nufft');
         else
-            op2 = mr_aha_op.create_op(SEs2, g.phi2, g.traj, g.cfg, '_phi2_toep', Om2);
+            op2 = mr_aha.create_op(SEs2, g.phi2, g.traj, g.cfg, '_phi2_toep', Om2);
         end
         SEs2(:) = 0; Om2(1:10) = 1e6;                     %#ok<NASGU> caller modifies
         clear SEs2 Om2
@@ -419,35 +419,35 @@ function check_op_matlab(varargin)
     % ------------------------------------------------------------------
     % Handles: deleted operator, unknown handle, live-operator count
     % ------------------------------------------------------------------
-    op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg);
+    op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg);
     delete(op);
     % MATLAB itself rejects methods of a deleted handle object ...
     id = error_id(@() op.apply(g.x));
     % ... and the gateway rejects handles that are not live operators.
-    id2 = error_id(@() mr_aha_op_mex('apply', uint64(12345), g.x));
+    id2 = error_id(@() mr_aha_mex('apply', uint64(12345), g.x));
     ok_del = strcmp(id, 'MATLAB:class:InvalidHandle') && ...
-             strcmp(id2, 'MR_AHA:mr_aha_op:invalidHandle');
+             strcmp(id2, 'MR_AHA:mr_aha:invalidHandle');
     id = [id ' / ' id2];
-    mr_aha_op_mex('destroy', uint64(12345));            % unknown handle: no-op
-    op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft'); %#ok<NASGU>
+    mr_aha_mex('destroy', uint64(12345));            % unknown handle: no-op
+    op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft'); %#ok<NASGU>
     clear op
     nfail = nfail + report('apply after delete / on a bad handle errors', ok_del, id);
     nfail = nfail + report('clear op destroys the operator', ...
-        mr_aha_op_mex('count') == 0 && ~mislocked('mr_aha_op_mex'), ...
-        sprintf('count=%d', mr_aha_op_mex('count')));
+        mr_aha_mex('count') == 0 && ~mislocked('mr_aha_mex'), ...
+        sprintf('count=%d', mr_aha_mex('count')));
 
     % ------------------------------------------------------------------
     % clear mex with a live operator
     % ------------------------------------------------------------------
-    op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg);
-    locked_before = mislocked('mr_aha_op_mex');
+    op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg);
+    locked_before = mislocked('mr_aha_mex');
     clear mex %#ok<CLMEX>
-    locked_after = mislocked('mr_aha_op_mex');
+    locked_after = mislocked('mr_aha_mex');
     y = op.apply(g.x);
     ok_clear = locked_before && locked_after && rel(y, ref) < opt.tol && ...
-               mr_aha_op_mex('count') == 1;
+               mr_aha_mex('count') == 1;
     delete(op);
-    ok_unlock = ~mislocked('mr_aha_op_mex') && mr_aha_op_mex('count') == 0;
+    ok_unlock = ~mislocked('mr_aha_mex') && mr_aha_mex('count') == 0;
     nfail = nfail + report('clear mex keeps the locked MEX and the operator usable', ...
                            ok_clear, '');
     nfail = nfail + report('deleting the last operator unlocks the MEX', ok_unlock, '');
@@ -462,7 +462,7 @@ function check_op_matlab(varargin)
     % ------------------------------------------------------------------
     for method = {'toeplitz', 'nufft'}
         g = make_problem('3D', [16 16 12], 2, 5);
-        op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', method{1});
+        op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', method{1});
         xh = gather(g.x);
         reset(gpuDevice());
         id = error_id(@() op.apply(xh));
@@ -471,13 +471,13 @@ function check_op_matlab(varargin)
         delete(op);                         % must not crash; warns staleDestroy
         [~, wid] = lastwarn();
         nfail = nfail + report(['reset(gpuDevice) then apply errors (' method{1} ')'], ...
-            strcmp(id, 'MR_AHA:mr_aha_op:deviceReset') && ~s.valid, id);
+            strcmp(id, 'MR_AHA:mr_aha:deviceReset') && ~s.valid, id);
         nfail = nfail + report(['delete after reset is safe (' method{1} ')'], ...
-            strcmp(wid, 'MR_AHA:mr_aha_op:staleDestroy') && ...
-            mr_aha_op_mex('count') == 0 && ~mislocked('mr_aha_op_mex'), wid);
+            strcmp(wid, 'MR_AHA:mr_aha:staleDestroy') && ...
+            mr_aha_mex('count') == 0 && ~mislocked('mr_aha_mex'), wid);
     end
     g = make_problem('2D', [32 32], 3, 5);
-    op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg);
+    op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg);
     Om = calc_toep(g.phi2, g.traj, g.cfg);
     e = rel(op * g.x, AhA_Toeplitz(g.x, g.SEs, Om, g.cfg));
     delete(op);
@@ -495,7 +495,7 @@ function check_op_matlab(varargin)
     end
 
     nfail = nfail + report('registry empty and MEX unlocked at the end', ...
-        mr_aha_op_mex('count') == 0 && ~mislocked('mr_aha_op_mex'), '');
+        mr_aha_mex('count') == 0 && ~mislocked('mr_aha_mex'), '');
     gpuDevice(opt.primary);
     finish(nfail, 'all checks');
 end
@@ -557,7 +557,7 @@ function nfail = check_multi(opt, n_gpu)
                                 share = strcmp(dist{1}, 'split');   % vary it cheaply
                                 k0 = current_index();
                                 bad = {};
-                                op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, cfg, ...
+                                op = mr_aha.create_op(g.SEs, g.phi2, g.traj, cfg, ...
                                     'devices', devs, 'mask', mask, ...
                                     'toep_dist', dist{1}, 'share_primary', share);
                                 y = op * g.x;
@@ -606,7 +606,7 @@ function nfail = check_multi(opt, n_gpu)
                                 end
                             end
                             % Supplied kernel: copied as is to every GPU.
-                            op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, cfg, ...
+                            op = mr_aha.create_op(g.SEs, g.phi2, g.traj, cfg, ...
                                 'devices', devs, 'mask', mask, '_phi2_toep', Om);
                             e = rel(op * g.x, ref); worst = max(worst, e);
                             s = op.info();
@@ -639,14 +639,14 @@ function nfail = check_multi(opt, n_gpu)
     for ic = 1:size(cases, 1)
         for nc = [5 8]
             g = make_problem(cases{ic, :}, nc);
-            op1 = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft');
+            op1 = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft');
             ref = op1 * g.x;
             delete(op1);
             for ids = 1:numel(opt.device_sets)
                 devs = opt.device_sets{ids};
                 multi = numel(unique([devs opt.primary])) > 1;
                 for share = [false true]
-                    op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, ...
+                    op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, ...
                         'method', 'nufft', 'devices', devs, 'share_primary', share);
                     y = op * g.x;
                     s = op.info();
@@ -672,7 +672,7 @@ function nfail = check_multi(opt, n_gpu)
 
     % 'all' uses every visible GPU (up to the ceil(C/G) rule).
     g = make_problem('stack', [32 30 8], 3, 8);
-    op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', 'all');
+    op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', 'all');
     s = op.info();
     disp(s);
     delete(op);
@@ -686,7 +686,7 @@ function nfail = check_multi(opt, n_gpu)
     if opt.device_change && n_gpu > 1
         gpuDevice(opt.primary);
         g = make_problem('3D', [16 16 12], 2, 8);
-        op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', big_set);
+        op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', big_set);
         xh = gather(g.x);
         other = setdiff(1:n_gpu, opt.primary);
         gpuDevice(other(1));
@@ -695,9 +695,9 @@ function nfail = check_multi(opt, n_gpu)
         id2 = error_id(@() op.apply(xh));
         delete(op);
         nfail = nfail + report('gpuDevice(k) then apply errors (deviceChanged)', ...
-            strcmp(id1, 'MR_AHA:mr_aha_op:deviceChanged'), id1);
+            strcmp(id1, 'MR_AHA:mr_aha:deviceChanged'), id1);
         nfail = nfail + report('back on the primary: apply errors (deviceReset)', ...
-            strcmp(id2, 'MR_AHA:mr_aha_op:deviceReset'), id2);
+            strcmp(id2, 'MR_AHA:mr_aha:deviceReset'), id2);
     end
     setenv('MR_AHA_MGPU_MIN_WORK', '');
 end
@@ -768,11 +768,11 @@ function op = make_shared_op(g, Om, method, primary)
 %   of scope on return, so only the operator keeps them alive.
     SEs = g.SEs + 0;              % fresh storage
     if strcmp(method, 'nufft')
-        op = mr_aha_op.create_op(SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft', ...
+        op = mr_aha.create_op(SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft', ...
                                  'devices', primary, 'share_primary', true);
     else
         toep = Om * 1;
-        op = mr_aha_op.create_op(SEs, g.phi2, g.traj, g.cfg, 'devices', primary, ...
+        op = mr_aha.create_op(SEs, g.phi2, g.traj, g.cfg, 'devices', primary, ...
                                  'share_primary', true, '_phi2_toep', toep);
     end
 end
@@ -817,7 +817,7 @@ end
 
 function leak_once(g, method, devs, share)
 %LEAK_ONCE  One create / apply / delete cycle.
-    op = mr_aha_op.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', method, ...
+    op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', method, ...
                              'devices', devs, 'share_primary', share);
     op.apply(g.x);
     delete(op);
@@ -825,7 +825,7 @@ end
 
 function n = op_count(metal)
 %OP_COUNT  Live operators of the MEX registry (0 on Metal).
-    if metal, n = 0; else, n = mr_aha_op_mex('count'); end
+    if metal, n = 0; else, n = mr_aha_mex('count'); end
 end
 
 function finish(nfail, what)

@@ -1,19 +1,19 @@
 /**
- * @file mr_aha_op_mex.cu
- * @brief MATLAB MEX gateway of the @f$A^H A@f$ operator class `mr_aha_op`
+ * @file mr_aha_mex.cu
+ * @brief MATLAB MEX gateway of the @f$A^H A@f$ operator class `mr_aha`
  *        (CUDA backend).
  *
- * This gateway owns the library operators (::mr_op) behind the `mr_aha_op`
+ * This gateway owns the library operators (::mr_op) behind the `mr_aha`
  * handle class and is driven by a command string:
  * @code
- *   h    = mr_aha_op_mex('create',  SEs, phi2, traj, config, mask, opts)
- *   AhAx = mr_aha_op_mex('apply',   h, x)
- *   info = mr_aha_op_mex('info',    h)
- *   Om   = mr_aha_op_mex('kernel',  h, k)
- *          mr_aha_op_mex('destroy', h)
- *   n    = mr_aha_op_mex('count')
+ *   h    = mr_aha_mex('create',  SEs, phi2, traj, config, mask, opts)
+ *   AhAx = mr_aha_mex('apply',   h, x)
+ *   info = mr_aha_mex('info',    h)
+ *   Om   = mr_aha_mex('kernel',  h, k)
+ *          mr_aha_mex('destroy', h)
+ *   n    = mr_aha_mex('count')
  * @endcode
- * Use the `mr_aha_op.create_op` method of the class, which validates the
+ * Use the `mr_aha.create_op` method of the class, which validates the
  * name-value arguments, fills in the derived `config` fields, converts a
  * 1-based MATLAB mask and 1-based `gpuDevice` indices, and destroys the
  * operator when the object is deleted or cleared.
@@ -52,7 +52,7 @@
  *   `k`-th device (0-based position in `info.devices`, 0 is the primary),
  *   returned as a new gpuArray on the primary device, shaped like
  *   `calc_toep`'s output. NUFFT operators have no kernel
- *   (`MR_AHA:mr_aha_op:noKernel`).
+ *   (`MR_AHA:mr_aha:noKernel`).
  * - `destroy`: releases an operator. Unknown or already destroyed handles are
  *   ignored, so the call is idempotent.
  * - `count`: number of live operators (used by the tests).
@@ -65,10 +65,10 @@
  *   error instead of being dereferenced.
  * - **mexLock.** While at least one operator is alive the MEX file is
  *   locked, so `clear mex` / `clear functions` / `clear all` cannot unload
- *   the code and the registry that the live operators and `mr_aha_op`
+ *   the code and the registry that the live operators and `mr_aha`
  *   objects depend on. Once the last operator is destroyed the MEX file is
  *   unlocked again. `clear all` also clears the variables, which deletes the
- *   `mr_aha_op` objects (and hence their operators) first.
+ *   `mr_aha` objects (and hence their operators) first.
  * - **mexAtExit.** When MATLAB exits (or unloads the unlocked MEX file), any
  *   operator still alive is destroyed.
  * - **Stale operators.** An operator whose primary device was reset is never
@@ -119,7 +119,7 @@
 #include <vector>
 
 /** @brief MATLAB error identifier used throughout this gateway. */
-#define MR_ID "MR_AHA:mr_aha_op"
+#define MR_ID "MR_AHA:mr_aha"
 
 /* ------------------------------------------------------------------------ */
 /* Registry of live operators                                               */
@@ -220,7 +220,7 @@ static void mex_op_remove(int i)
     if (stale)
         mexWarnMsgIdAndTxt(MR_ID ":staleDestroy",
                            "gpuDevice(%d) was reset or deselected while this "
-                           "mr_aha_op existed; the operator had become unusable "
+                           "mr_aha existed; the operator had become unusable "
                            "and has been released.", primary + 1);
 }
 
@@ -254,7 +254,7 @@ static mex_op_entry *mex_op_lookup(const mxArray *a, const char *cmd)
     const int i = mex_op_find(h);
     if (i < 0)
         mexErrMsgIdAndTxt(MR_ID ":invalidHandle",
-                          "%s: this mr_aha_op has been destroyed (or the "
+                          "%s: this mr_aha has been destroyed (or the "
                           "handle is not a live operator).", cmd);
     return g_entries[(size_t)i];
 }
@@ -273,7 +273,7 @@ static void mex_op_require_device(const mex_op_entry *e, const char *cmd)
                           cudaGetErrorString(cudaGetLastError()));
     if (cur != e->primary)
         mexErrMsgIdAndTxt(MR_ID ":deviceChanged",
-                          "%s: this mr_aha_op was created on gpuDevice(%d), but "
+                          "%s: this mr_aha was created on gpuDevice(%d), but "
                           "the current device is gpuDevice(%d). Select "
                           "gpuDevice(%d) again (which resets it, see below) or "
                           "delete the operator and create a new one.",
@@ -281,7 +281,7 @@ static void mex_op_require_device(const mex_op_entry *e, const char *cmd)
     if (!mex_op_device_valid(e))
         mexErrMsgIdAndTxt(MR_ID ":deviceReset",
                           "%s: gpuDevice(%d) has been reset or deselected since "
-                          "this mr_aha_op was created, which freed its GPU "
+                          "this mr_aha was created, which freed its GPU "
                           "data. Delete the operator and create a new one.",
                           cmd, e->primary + 1);
 }
@@ -396,7 +396,7 @@ static void mex_op_parse_options(const mxArray *opts, mr_op_options *o,
 /* ------------------------------------------------------------------------ */
 
 /**
- * @brief `h = mr_aha_op_mex('create', SEs, phi2, traj, config, mask, opts)`.
+ * @brief `h = mr_aha_mex('create', SEs, phi2, traj, config, mask, opts)`.
  *
  * Validates the inputs exactly like `AhA_Toeplitz_mex` and `calc_toep_mex`,
  * creates the operator with ::mr_op_create on the current (primary) device,
@@ -408,7 +408,7 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
 {
     if (nrhs != 7)
         mexErrMsgIdAndTxt(MR_ID ":usage",
-                          "Usage: h = mr_aha_op_mex('create', SEs, phi2, traj, "
+                          "Usage: h = mr_aha_mex('create', SEs, phi2, traj, "
                           "config, mask, opts).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID ":usage", "Too many outputs.");
     const mxArray *mx_cfg = prhs[4], *mx_mask = prhs[5], *mx_opts = prhs[6];
@@ -480,7 +480,7 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
         if (mxGPUGetClassID(g_mask) != mxINT64_CLASS)
             MR_OP_CREATE_FAIL(MR_ID ":mask",
                               "mask must be an int64 gpuArray of 0-based linear "
-                              "indices; mr_aha_op.create_op performs the "
+                              "indices; mr_aha.create_op performs the "
                               "conversion.");
         if (cfg.num_masked == 0)
             cfg.num_masked = (int64_t)mxGPUGetNumberOfElements(g_mask);
@@ -581,7 +581,7 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
 }
 
 /**
- * @brief `AhAx = mr_aha_op_mex('apply', h, x)`.
+ * @brief `AhAx = mr_aha_mex('apply', h, x)`.
  *
  * Refuses to run when the operator is not registered, when MATLAB's current
  * device is not the operator's primary device, or when that device has been
@@ -592,7 +592,7 @@ static void mex_op_apply(int nlhs, mxArray *plhs[], int nrhs,
 {
     if (nrhs != 3)
         mexErrMsgIdAndTxt(MR_ID ":usage",
-                          "Usage: AhAx = mr_aha_op_mex('apply', h, x).");
+                          "Usage: AhAx = mr_aha_mex('apply', h, x).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID ":usage", "Too many outputs.");
 
     mex_op_entry *e = mex_op_lookup(prhs[1], "apply");
@@ -623,7 +623,7 @@ static void mex_op_apply(int nlhs, mxArray *plhs[], int nrhs,
 }
 
 /**
- * @brief `info = mr_aha_op_mex('info', h)`: the description of
+ * @brief `info = mr_aha_mex('info', h)`: the description of
  *        ::mr_op_info as a struct (0-based CUDA ordinals and coil indices, as
  *        the library reports them), plus `primary`, `n_coils`,
  *        `share_primary` and `valid` (false once the primary device was reset
@@ -634,7 +634,7 @@ static void mex_op_info(int nlhs, mxArray *plhs[], int nrhs,
 {
     if (nrhs != 2)
         mexErrMsgIdAndTxt(MR_ID ":usage",
-                          "Usage: info = mr_aha_op_mex('info', h).");
+                          "Usage: info = mr_aha_mex('info', h).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID ":usage", "Too many outputs.");
 
     mex_op_entry *e = mex_op_lookup(prhs[1], "info");
@@ -691,7 +691,7 @@ static void mex_op_info(int nlhs, mxArray *plhs[], int nrhs,
 }
 
 /**
- * @brief `Om = mr_aha_op_mex('kernel', h, k)`: a copy of the `phi2_toep` the
+ * @brief `Om = mr_aha_mex('kernel', h, k)`: a copy of the `phi2_toep` the
  *        operator holds on its device `k` (0-based position in
  *        `info.devices`; 0 is the primary), on the primary device, shaped
  *        like `calc_toep`'s output.
@@ -699,14 +699,14 @@ static void mex_op_info(int nlhs, mxArray *plhs[], int nrhs,
  * A copy (not a view): MATLAB cannot wrap memory it does not own in a
  * gpuArray, and a gpuArray can only live on the current device. Refuses to
  * run when the primary device was reset or deselected, and raises
- * `MR_AHA:mr_aha_op:noKernel` for a NUFFT operator.
+ * `MR_AHA:mr_aha:noKernel` for a NUFFT operator.
  */
 static void mex_op_kernel(int nlhs, mxArray *plhs[], int nrhs,
                           const mxArray *prhs[])
 {
     if (nrhs != 3)
         mexErrMsgIdAndTxt(MR_ID ":usage",
-                          "Usage: Om = mr_aha_op_mex('kernel', h, k).");
+                          "Usage: Om = mr_aha_mex('kernel', h, k).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID ":usage", "Too many outputs.");
     mex_op_entry *e = mex_op_lookup(prhs[1], "kernel");
     mex_op_require_device(e, "kernel");
@@ -747,7 +747,7 @@ static void mex_op_kernel(int nlhs, mxArray *plhs[], int nrhs,
 }
 
 /**
- * @brief `mr_aha_op_mex('destroy', h)`: release an operator; a handle that is
+ * @brief `mr_aha_mex('destroy', h)`: release an operator; a handle that is
  *        not (or no longer) registered is ignored.
  */
 static void mex_op_destroy(int nlhs, mxArray *plhs[], int nrhs,
@@ -756,7 +756,7 @@ static void mex_op_destroy(int nlhs, mxArray *plhs[], int nrhs,
     (void)plhs;
     if (nrhs != 2)
         mexErrMsgIdAndTxt(MR_ID ":usage",
-                          "Usage: mr_aha_op_mex('destroy', h).");
+                          "Usage: mr_aha_mex('destroy', h).");
     if (nlhs > 0) mexErrMsgIdAndTxt(MR_ID ":usage", "destroy has no outputs.");
     if (!mxIsUint64(prhs[1]) || mxGetNumberOfElements(prhs[1]) != 1)
         mexErrMsgIdAndTxt(MR_ID ":badHandle",

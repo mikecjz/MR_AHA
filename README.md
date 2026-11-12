@@ -65,7 +65,7 @@ MATLAB (`gpuArray` inputs; ordinary arrays on Apple silicon):
 ```matlab
 config = mr_default_config('stack', [320 320 56], 16);
 
-op = mr_aha_op.create_op(SEs, phi2, traj, config);   % Toeplitz kernel computed here
+op = mr_aha.create_op(SEs, phi2, traj, config);   % Toeplitz kernel computed here
 for it = 1:n_iter
     AhAx = op * x;
 end

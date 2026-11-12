@@ -10,9 +10,9 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
 %   AHA_TOEPLITZ is the stateless low-level primitive: it applies a finished
 %   kernel once, on the current GPU, and allocates its working buffers on
 %   every call. For repeated application (iterative reconstruction), or on
-%   several GPUs, build the operator once with MR_AHA_OP.CREATE_OP, which
+%   several GPUs, build the operator once with MR_AHA.CREATE_OP, which
 %   computes the kernel itself from the Gram blocks and keeps it, the maps
-%   and the buffers: op = mr_aha_op.create_op(SEs, phi2, traj, config);
+%   and the buffers: op = mr_aha.create_op(SEs, phi2, traj, config);
 %   AhAx = op * x.
 %
 %   INPUTS
@@ -59,7 +59,7 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
 %   that are real or double precision are cast, so passing data in the exact
 %   expected form (complex single) avoids all copies.
 %
-%   See also MR_AHA_OP, CALC_TOEP, MR_DEFAULT_CONFIG.
+%   See also MR_AHA, CALC_TOEP, MR_DEFAULT_CONFIG.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 

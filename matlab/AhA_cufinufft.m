@@ -26,7 +26,7 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
 %   production implementation. No MR_AHA library code is involved: the
 %   NUFFTs come from cufinufft's own MATLAB interface (CUFINUFFT_PLAN) and
 %   everything else is gpuArray code. The tests use it to validate
-%   MR_AHA_OP.CREATE_OP(..., 'method', 'nufft'), which evaluates the same
+%   MR_AHA.CREATE_OP(..., 'method', 'nufft'), which evaluates the same
 %   operator inside the library (cufinufft's C API, several GPUs if asked,
 %   no MATLAB per-coil loop). Use that operator in reconstructions. With the
 %   Metal backend (Apple silicon) this reference runs through the Python
@@ -59,7 +59,7 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
 %   Nkx-by-L times L-by-L product per readout, which avoids materialising the
 %   [Ntrajs, Nkx, L, L] broadcast intermediate.
 %
-%   See also MR_AHA_OP, MR_NUFFT_PLAN, AHA_TOEPLITZ, CALC_TOEP.
+%   See also MR_AHA, MR_NUFFT_PLAN, AHA_TOEPLITZ, CALC_TOEP.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 

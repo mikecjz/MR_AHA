@@ -4,7 +4,7 @@ function mr = mr_python()
 %   mr = MR_PYTHON() returns the Python module mr_aha, loaded in MATLAB's own
 %   process. On Apple silicon there is no C/C++ NUFFT the MEX files could
 %   call, so CALC_TOEP, the 'threshold' method of CALC_MASK, AHA_CUFINUFFT
-%   and MR_AHA_OP.CREATE_OP (which wraps Python's mr_aha.create_op) run their
+%   and MR_AHA.CREATE_OP (which wraps Python's mr_aha.create_op) run their
 %   non-uniform FFTs through mlx-nufft in Python, then hand the rest to the
 %   same library (libmr_aha_c) the MEX files link.
 %

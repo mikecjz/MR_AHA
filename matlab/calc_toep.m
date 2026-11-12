@@ -11,7 +11,7 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
 %
 %   CALC_TOEP and AHA_TOEPLITZ are the stateless low-level primitives. To
 %   apply A'A repeatedly (iterative reconstruction), or on several GPUs, use
-%   MR_AHA_OP.CREATE_OP instead: it computes the kernel itself from the same
+%   MR_AHA.CREATE_OP instead: it computes the kernel itself from the same
 %   phi2 and traj (on every GPU it uses) and keeps it, with the sensitivity
 %   maps, for every application.
 %
@@ -76,7 +76,7 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
 %            Apple GPU. The outputs are ordinary arrays (mask: int64 column).
 %
 %   See also AHA_TOEPLITZ, CALC_MASK, MR_DEFAULT_CONFIG, AHA_CUFINUFFT,
-%   MR_AHA_OP.
+%   MR_AHA.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 

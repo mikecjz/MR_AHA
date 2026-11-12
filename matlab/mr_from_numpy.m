@@ -1,5 +1,5 @@
 function A = mr_from_numpy(p)
-%MR_FROM_NUMPY  NumPy array in mr_aha's row-major layout -> MATLAB array.
+%MR_FROM_NUMPY  NumPy array in Python mr_aha's row-major layout -> MATLAB array.
 %
 %   A = MR_FROM_NUMPY(p) is the inverse of MR_TO_NUMPY: a C-contiguous NumPy
 %   (L, Nz, Ny, Nx) array becomes a MATLAB [Nx, Ny, Nz, L] array with the same
