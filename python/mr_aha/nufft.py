@@ -16,7 +16,7 @@ non-uniform sample, as a row vector from the right (MATLAB
 :math:`\\Phi_2 = \\Phi\\Phi^H` of its readout, :math:`\\Phi` being the
 rank x time temporal basis (see :mod:`mr_aha.api`). Both
 NUFFTs are unnormalised, which is precisely the convention the Toeplitz kernel
-of :func:`mr_aha.calc_toep` reproduces, so ``AhANufftPlan.apply`` and the
+of :func:`mr_aha.calc_toep` reproduces, so ``aha_nufft_plan.apply`` and the
 operator of :func:`mr_aha.create_op` (either method) agree to within the
 NUFFT tolerance.
 
@@ -78,14 +78,14 @@ from typing import Optional
 
 from ._lib import MRConfig, TrajType, backend
 
-__all__ = ["AhANufftPlan", "aha_nufft"]
+__all__ = ["aha_nufft_plan", "aha_nufft"]
 
 
 class _MlxNufft:
-    """Metal implementation of :class:`AhANufftPlan` (MLX + mlx-nufft).
+    """Metal implementation of :class:`aha_nufft_plan` (MLX + mlx-nufft).
 
     Same algorithm, conventions and array layout as the CuPy/cufinufft
-    implementation in :class:`AhANufftPlan`; see that class and the module
+    implementation in :class:`aha_nufft_plan`; see that class and the module
     docstring. Inputs and outputs are NumPy arrays; the work runs on the GPU
     as MLX arrays.
     """
@@ -137,7 +137,7 @@ class _MlxNufft:
             self._zmod = mx.array(np.exp(1j * ph).astype(np.complex64)[:, None, None])
 
     def apply(self, x, SEs, phi2, out=None):
-        """See :meth:`AhANufftPlan.apply` (NumPy arrays in and out)."""
+        """See :meth:`aha_nufft_plan.apply` (NumPy arrays in and out)."""
         np, mx = self._np, self._mx
         L, img = self._L, self._img_shape
         stack = self._tt == TrajType.STACK
@@ -213,14 +213,15 @@ def _modules():
     return cupy, cufinufft
 
 
-class AhANufftPlan:
+class aha_nufft_plan:  # noqa: N801  (same name as the MATLAB class)
     """Reusable NUFFT-based :math:`A^H A` operator.
 
     The constructor builds one type-2 and one type-1 cufinufft plan for the
     trajectory and sorts the non-uniform points once, so that
     :meth:`apply` can be called many times (e.g. inside conjugate gradient)
-    without any planning cost. Each plan transforms all :math:`L` ranks (and,
-    for a stack, all kz planes) of one coil in a single batched call.
+    without any planning cost. :meth:`execute` is an alias of :meth:`apply`.
+    Each plan transforms all :math:`L` ranks (and, for a stack, all kz
+    planes) of one coil in a single batched call.
 
     Args:
         cfg: Configuration from :func:`mr_aha.make_config`. Uses
@@ -441,6 +442,10 @@ class AhANufftPlan:
             del im, se
         return out
 
+    def execute(self, x, SEs, phi2, out=None):
+        """Alias of :meth:`apply`."""
+        return self.apply(x, SEs, phi2, out=out)
+
     def close(self) -> None:
         """Destroy the NUFFT plans. Idempotent."""
         if self._impl is not None:
@@ -450,7 +455,7 @@ class AhANufftPlan:
         self._t1 = None
         self._t2 = None
 
-    def __enter__(self) -> "AhANufftPlan":
+    def __enter__(self) -> "aha_nufft_plan":
         return self
 
     def __exit__(self, *exc) -> None:
@@ -460,20 +465,20 @@ class AhANufftPlan:
 def aha_nufft(cfg: MRConfig, x, SEs, phi2, traj, out=None, **nufft_opts):
     """One-shot NUFFT-based :math:`A^H A`.
 
-    Builds an :class:`AhANufftPlan`, applies it once and releases it. Prefer
+    Builds an :class:`aha_nufft_plan`, applies it once and releases it. Prefer
     the plan inside an iterative loop, since planning sorts the trajectory.
 
     Args:
         cfg: Configuration from :func:`mr_aha.make_config`.
-        x: See :meth:`AhANufftPlan.apply`.
-        SEs: See :meth:`AhANufftPlan.apply`.
-        phi2: See :meth:`AhANufftPlan.apply`.
-        traj: See :class:`AhANufftPlan`.
-        out: See :meth:`AhANufftPlan.apply`.
-        **nufft_opts: Forwarded to :class:`AhANufftPlan`.
+        x: See :meth:`aha_nufft_plan.apply`.
+        SEs: See :meth:`aha_nufft_plan.apply`.
+        phi2: See :meth:`aha_nufft_plan.apply`.
+        traj: See :class:`aha_nufft_plan`.
+        out: See :meth:`aha_nufft_plan.apply`.
+        **nufft_opts: Forwarded to :class:`aha_nufft_plan`.
 
     Returns:
         The ``complex64`` CuPy array ``AhAx``, shaped like ``x``.
     """
-    with AhANufftPlan(cfg, traj, **nufft_opts) as plan:
+    with aha_nufft_plan(cfg, traj, **nufft_opts) as plan:
         return plan.apply(x, SEs, phi2, out=out)

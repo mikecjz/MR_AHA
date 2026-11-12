@@ -14,7 +14,7 @@ number of GPUs, a rank above the specialised block-diagonal kernels' limit):
 * Toeplitz with its own kernel: ``op.kernel(0)`` matches
   :func:`mr_aha.calc_toep` and ``op(x)`` matches :func:`mr_aha.aha_toeplitz`
   to cufinufft's run-to-run noise.
-* NUFFT matches the reference :class:`mr_aha.AhANufftPlan` (CuPy + the
+* NUFFT matches the reference :class:`mr_aha.aha_nufft_plan` (CuPy + the
   cufinufft Python package, no library code) to ``1e-5``: the same transforms,
   only the summation order differs. NUFFT and Toeplitz agree to the NUFFT
   tolerance.
@@ -207,13 +207,13 @@ def single_gpu(rep: Report, rng, quick: bool) -> None:
                     rep.close_to(op(x), refm, TOL_SAME, "masked toeplitz: own kernel")
 
         cfg = make_cfg(kw)
-        with mr_aha.AhANufftPlan(cfg, traj) as P:
+        with mr_aha.aha_nufft_plan(cfg, traj) as P:
             r = P.apply(x, S, phi2)
         for share in (True, False):
             with mr_aha.create_op(cfg, S, phi2, traj, method="nufft",
                                   share_primary=share) as op:
                 y = op(x)
-                rep.close_to(y, r, TOL_REF, f"nufft share={share} vs AhANufftPlan")
+                rep.close_to(y, r, TOL_REF, f"nufft share={share} vs aha_nufft_plan")
                 rep.ok(op.info["toep_source"] == "none" and op.info["method"] == "nufft",
                        "nufft info")
                 rep.raises(mr_aha.MRError, lambda: op.kernel(0), "nufft kernel()",
@@ -223,7 +223,7 @@ def single_gpu(rep: Report, rng, quick: bool) -> None:
                      "nufft vs toeplitz")
         with mr_aha.create_op(cfg, S, phi2, traj, method="nufft",
                               nufft_opts={"upsampfac": 2.0, "gpu_method": 1}) as op:
-            rep.close_to(op(x), r, TOL_REF, "nufft gpu_method=1 vs AhANufftPlan")
+            rep.close_to(op(x), r, TOL_REF, "nufft gpu_method=1 vs aha_nufft_plan")
         rep.ok(cp.cuda.runtime.getDevice() == dev0, "current device unchanged")
 
     # --- argument errors ------------------------------------------------------
@@ -305,7 +305,7 @@ def multi_gpu(rep: Report, rng, devices: list, quick: bool) -> None:
             mask = mr_aha.calc_mask(cfg, traj) if masked else None
             K = mr_aha.calc_toep(cfg, phi2, traj, mask)
             ref = mr_aha.aha_toeplitz(cfg, x, S, K, mask)
-            with mr_aha.AhANufftPlan(make_cfg(kw), traj) as P:
+            with mr_aha.aha_nufft_plan(make_cfg(kw), traj) as P:
                 rnu = P.apply(x, S, phi2)
             for G in range(2, len(devices) + 1):
                 devs = devices[:G]
@@ -361,7 +361,7 @@ def multi_gpu(rep: Report, rng, devices: list, quick: bool) -> None:
                         y = op(x)
                         rep.close_to(y, rnu, TOL_REF,
                                      f"nufft on {len(op.info['devices'])} GPUs vs "
-                                     f"AhANufftPlan")
+                                     f"aha_nufft_plan")
                     with mr_aha.create_op(cfg, S, phi2, traj, method="nufft") as op1:
                         rep.close_to(y, op1(x), TOL_SAME, "nufft G GPUs vs 1 GPU")
 

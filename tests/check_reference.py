@@ -26,7 +26,7 @@ piece by piece while it is being ported:
     :func:`mr_aha.calc_mask`, compared to the stored mask (which must match
     exactly).
 ``nufft``
-    The NUFFT reference operator :class:`mr_aha.AhANufftPlan` (cufinufft on
+    The NUFFT reference operator :class:`mr_aha.aha_nufft_plan` (cufinufft on
     CUDA, mlx-nufft on Metal) on the stored inputs, compared to the stored
     cufinufft ``AhAx_nufft``.
 ``op``
@@ -34,7 +34,7 @@ piece by piece while it is being ported:
     both methods: ``method='toeplitz'`` (the kernel computed by the operator,
     every triangulation and mask) against the stored ``AhAx_*``, and
     ``method='nufft'`` against the stored ``AhAx_nufft`` (the reference made
-    by the independent :class:`mr_aha.AhANufftPlan`) and against the
+    by the independent :class:`mr_aha.aha_nufft_plan`) and against the
     Toeplitz ``AhAx_lower``, which agree to the NUFFT tolerance.
 
 Usage (from the repository root)::
@@ -207,7 +207,7 @@ def check_nufft(z, bk: Backend, c: dict, tol: float) -> list:
     """Stage ``nufft``: the NUFFT reference operator vs the stored one."""
     if "AhAx_nufft" not in z.files:
         return []
-    with mr_aha.AhANufftPlan(make_cfg(c), bk.put(z["traj"])) as plan:
+    with mr_aha.aha_nufft_plan(make_cfg(c), bk.put(z["traj"])) as plan:
         out = bk.get(plan.apply(bk.put(z["x"]), bk.put(z["SEs"]),
                                 bk.put(z["phi2"])))
     return [("AhAx_nufft", rel(out, z["AhAx_nufft"]), tol)]

@@ -17,7 +17,7 @@
  * methods of ::mr_op_create agree to within the NUFFT tolerance.
  *
  * It mirrors, step by step, the independent Python reference
- * `mr_aha.nufft.AhANufftPlan` (CuPy + the cufinufft Python package) and the
+ * `mr_aha.nufft.aha_nufft_plan` (CuPy + the cufinufft Python package) and the
  * MATLAB reference `AhA_cufinufft.m`, which the tests compare it against:
  *
  *  1. `im = x * (S_c * zmod)` for every rank (zmod: stack only, see below);

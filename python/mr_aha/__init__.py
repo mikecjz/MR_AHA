@@ -23,7 +23,7 @@ Low-level, stateless, single-GPU primitives:
 
 Independent reference (no library code):
 
-``aha_nufft`` / ``AhANufftPlan``
+``aha_nufft`` / ``aha_nufft_plan``
     :math:`A^H A` evaluated with the cufinufft Python package and CuPy (MLX on
     Metal), used by the tests to validate both methods of the operator.
 
@@ -55,11 +55,11 @@ from .api import (
     phi2_toep_shape,
 )
 from ._lib import backend
-from .nufft import AhANufftPlan, aha_nufft
+from .nufft import aha_nufft_plan, aha_nufft
 
 __all__ = [
     "DEFAULT_MASK_RADIUS",
-    "AhANufftPlan",
+    "aha_nufft_plan",
     "AhAOp",
     "MRConfig",
     "MRError",

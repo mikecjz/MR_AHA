@@ -9,7 +9,7 @@ a CUDA GPU:
 * :func:`mr_aha.calc_toep` for ``'lower'`` and ``'upper'`` triangulation,
   unmasked and with that mask,
 * :func:`mr_aha.aha_toeplitz` for every one of those ``phi2_toep`` variants,
-* the NUFFT reference :class:`mr_aha.AhANufftPlan` (cufinufft) when the
+* the NUFFT reference :class:`mr_aha.aha_nufft_plan` (cufinufft) when the
   ``cufinufft`` package is importable, as an independent check of the
   Toeplitz results.
 
@@ -260,9 +260,9 @@ def run_case(traj_type, n_dim, L, n_coils, traj, phi2, x, SEs, phi2_dim=None,
 
     if with_nufft:
         try:
-            with mr_aha.AhANufftPlan(base, g_traj) as plan:
+            with mr_aha.aha_nufft_plan(base, g_traj) as plan:
                 out["AhAx_nufft"] = plan.apply(g_x, g_SEs, g_phi2).get()
-            meta["nufft"] = "AhANufftPlan (cufinufft), eps = cfg.eps, upsampfac 2"
+            meta["nufft"] = "aha_nufft_plan (cufinufft), eps = cfg.eps, upsampfac 2"
         except Exception as e:  # cufinufft missing or libcudart not found
             meta["nufft"] = f"skipped: {type(e).__name__}: {e}"
     cp.get_default_memory_pool().free_all_blocks()
