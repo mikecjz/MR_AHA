@@ -148,10 +148,11 @@ __global__ void mr_k_scatter_masked(mr_complex *d_pad, const mr_complex *d_compa
 #define MR_BD_THREADS 256
 
 /** @brief Largest rank with a specialised block-diagonal kernel. Larger ranks
- *         use the generic shared-memory kernels: above about L = 30 one coil's
- *         vectors no longer fit the register file and the specialised kernels
- *         spill (TITAN RTX, 384^2 2D, 8 coils: L = 28 73 vs 79 ms, L = 30
- *         88 vs 89 ms, L = 32 105 vs 102 ms, specialised vs generic). */
+ *         use the tiled kernels (mr_kernels_bdt.cu). Above about L = 30 one
+ *         coil's vectors no longer fit the register file and the specialised
+ *         kernels spill (TITAN RTX, 384^2 2D, 8 coils: L = 28 73 vs 79 ms,
+ *         L = 30 88 vs 89 ms, L = 32 105 vs 102 ms, specialised vs the old
+ *         generic kernels). */
 #define MR_BD_MAX_L 30
 
 /** @brief Largest rank whose specialised kernels process coils in pairs (see
@@ -191,32 +192,83 @@ typedef void (*mr_bd_dense_fn)(mr_complex *, const mr_complex *, mr_dims, int,
 typedef void (*mr_bd_masked_fn)(mr_complex *, const mr_complex *, const int *,
                                 long long, mr_dims, int, mr_bd_range);
 
-/** @brief The specialised block-diagonal kernels of one rank. */
+/**
+ * @brief The in-place block-diagonal kernels of one rank: specialised on
+ *        @f$L@f$ (`mr_kernels_bd.cu`) or tiled (`mr_kernels_bdt.cu`).
+ *
+ * Both families share one contract (in place on the padded grids, masked
+ * mode through ::mr_k_mask_inverse's map, a group of coils per launch, a
+ * location range) and are launched with ::mr_bd_launch_dense /
+ * ::mr_bd_launch_masked. A zero-initialised struct means "none": the caller
+ * falls back to the generic kernels ::mr_k_blockdiag_dense /
+ * ::mr_k_blockdiag_masked. Use ::mr_bd_available to test.
+ */
 struct mr_bd_kernels {
-    mr_bd_dense_fn  dense;   /**< Dense kernel, or NULL if no specialisation. */
-    mr_bd_masked_fn masked;  /**< Masked kernel, or NULL likewise.            */
+    mr_bd_dense_fn  dense;   /**< Specialised dense kernel, or NULL.          */
+    mr_bd_masked_fn masked;  /**< Specialised masked kernel, or NULL.         */
     int             pair;    /**< Non-zero when coils are processed in pairs. */
+    int             tiled;   /**< Non-zero: use the tiled kernels instead.    */
 };
 
+/** @brief Whether @p k provides an in-place kernel (dense or, with
+ *         @p masked, masked). */
+inline bool mr_bd_available(const mr_bd_kernels &k, bool masked)
+{
+    return k.tiled != 0 || (masked ? k.masked != nullptr : k.dense != nullptr);
+}
+
+/** @brief Largest rank of the tiled kernels (8 locations per tile, 32 groups
+ *         of 16 outputs). */
+#define MR_BDT_MAX_L 512
+
 /**
- * @brief Look up the block-diagonal kernels specialised on rank @p L.
+ * @brief Look up the in-place block-diagonal kernels of rank @p L.
  *
- * The kernels (`mr_k_bd_dense_t<L>` / `mr_k_bd_masked_t<L>`, defined in
- * mr_kernels_bd.cu) differ from ::mr_k_blockdiag_dense /
- * ::mr_k_blockdiag_masked in three ways: the rank vectors live in registers
- * (no shared memory), each stored element of `phi2_toep` is read once per
- * triangle walk instead of twice, and one launch serves a group of `ncoil`
- * coils whose grids (and, masked, compact buffers) are stored back to back,
- * so `phi2_toep` is read from DRAM about once per group. The masked kernel
- * works in place on the padded grids (see ::mr_k_mask_inverse). Launch with
- * at most ::MR_BD_THREADS threads per block, no dynamic shared memory, and one
- * thread per location of the upsampled grid.
+ * For @f$L \le@f$ ::MR_BD_MAX_L these are the kernels specialised on
+ * @f$L@f$ (`mr_k_bd_dense_t<L>` / `mr_k_bd_masked_t<L>`, mr_kernels_bd.cu):
+ * the rank vectors live in registers, each stored element of `phi2_toep` is
+ * read once per triangle walk, and one launch serves a group of `ncoil`
+ * coils whose grids are stored back to back, so `phi2_toep` is read from DRAM
+ * about once per group. Above, up to ::MR_BDT_MAX_L, the tiled kernels
+ * (mr_kernels_bdt.cu) give the same guarantees with shared-memory tiles.
+ * `MR_AHA_CUDA_TILED_BD=1` selects the tiled kernels for every rank (for
+ * testing and A/B timing).
  *
  * @param[in] L Rank.
- * @return The kernels, with NULL pointers when @p L is outside
- *         `1..`::MR_BD_MAX_L.
+ * @return The kernels; a zero struct when @p L has neither (the caller then
+ *         uses the generic kernels).
  */
 mr_bd_kernels mr_bd_lookup(int L);
+
+/**
+ * @brief Launch the dense in-place kernel of @p k on the current device.
+ *
+ * @param[in]     k       Kernels from ::mr_bd_lookup (::mr_bd_available).
+ * @param[in]     threads Threads per block of a specialised kernel (at most
+ *                        ::MR_BD_THREADS); the tiled kernels choose their own.
+ * @param[in,out] d_pad   `[nloc, L, ncoil]` values, see ::mr_k_bd_dense_t.
+ * @param[in]     d_toep  `[Mx, My, Mz, (L^2+L)/2]`, centred order.
+ * @param[in]     dims    Geometry descriptor.
+ * @param[in]     ncoil   Coils in the group.
+ * @param[in]     rg      Location range (::mr_bd_range).
+ * @param[in]     s       Stream.
+ * @return ::MR_SUCCESS, ::MR_ERR_CUDA or ::MR_ERR_UNSUPPORTED.
+ */
+int mr_bd_launch_dense(const mr_bd_kernels &k, int threads, mr_complex *d_pad,
+                       const mr_complex *d_toep, const mr_dims &dims, int ncoil,
+                       mr_bd_range rg, cudaStream_t s);
+
+/**
+ * @brief Launch the masked in-place kernel of @p k on the current device.
+ *
+ * Parameters as ::mr_bd_launch_dense, plus the grid-to-mask map @p d_inv of
+ * ::mr_k_mask_inverse and the number of retained locations @p num_masked;
+ * @p d_toep is `[num_masked, (L^2+L)/2]`.
+ */
+int mr_bd_launch_masked(const mr_bd_kernels &k, int threads, mr_complex *d_pad,
+                        const mr_complex *d_toep, const int *d_inv,
+                        long long num_masked, const mr_dims &dims, int ncoil,
+                        mr_bd_range rg, cudaStream_t s);
 
 /* ------------------------------------------------------------------------ */
 /* calc_toep kernels                                                        */

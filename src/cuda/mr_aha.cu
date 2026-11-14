@@ -20,7 +20,8 @@
  *  - The block-diagonal stage is memory-bound on reading `phi2_toep`, the
  *    largest array of the operator. For @f$L \le@f$ ::MR_BD_MAX_L it uses
  *    kernels specialised on @f$L@f$ (register vectors, each stored element
- *    read once per triangle walk).
+ *    read once per triangle walk), and up to ::MR_BDT_MAX_L tiled kernels
+ *    with the same guarantees (`mr_kernels_bdt.cu`).
  *  - Coils are processed in groups of up to ::mr_aha_plan_s::group: the padded
  *    grids of a group sit side by side, one batched cuFFT transforms them all,
  *    and one block-diagonal launch serves the whole group, reading
@@ -30,7 +31,9 @@
  *    ::mr_config::mem_fraction of the free device memory.
  *  - Environment variables, read at plan creation:
  *    `MR_AHA_CUDA_GENERIC_BD=1` forces the generic shared-memory kernels (one
- *    coil at a time; for testing and A/B timing), `MR_AHA_CUDA_COIL_GROUP=n`
+ *    coil at a time; for testing and A/B timing), `MR_AHA_CUDA_TILED_BD=1`
+ *    the tiled kernels (`mr_kernels_bdt.cu`, normally used above
+ *    ::MR_BD_MAX_L) for every rank, `MR_AHA_CUDA_COIL_GROUP=n`
  *    sets the requested group size, `MR_AHA_CUDA_BD_THREADS=n` the threads
  *    per block of the specialised kernels (default ::MR_BD_THREADS, at most
  *    that). At execution, `MR_AHA_CUDA_PROFILE=1` prints the GPU time of each
@@ -267,9 +270,9 @@ static int mr_aha_plan_build_group(mr_aha_plan p, int group, size_t budget,
     const size_t pad_bytes = (size_t)p->dims.pad_size * cfg->L * group * c8;
     /* Masked: the generic kernels (one coil per group) need a compact
      * [num_masked, L] buffer, the specialised ones a [Mx,My,Mz] int32 map. */
-    const size_t cmp_bytes = (cfg->is_masked && p->bd.masked == NULL)
+    const size_t cmp_bytes = (cfg->is_masked && !mr_bd_available(p->bd, true))
                                  ? (size_t)cfg->num_masked * cfg->L * c8 : 0;
-    const size_t inv_bytes = (cfg->is_masked && p->bd.masked != NULL)
+    const size_t inv_bytes = (cfg->is_masked && mr_bd_available(p->bd, true))
                                  ? (size_t)p->dims.pad_size * sizeof(int) : 0;
 
     size_t work = 0, work_rem = 0;
@@ -329,14 +332,15 @@ static int mr_aha_plan_create_impl(const mr_config *cfg, mr_aha_plan *plan_out)
     mr_dims_from_config(cfg, &p->dims);
 
     /* Block-diagonal kernels: specialised on L (register vectors, each stored
-     * element read once, coil groups) for L <= MR_BD_MAX_L, the generic
+     * element read once, coil groups) for L <= MR_BD_MAX_L, tiled (shared-
+     * memory panels, same guarantees) up to MR_BDT_MAX_L; the generic
      * shared-memory kernels (one coil at a time) otherwise or when
      * MR_AHA_CUDA_GENERIC_BD=1. */
     if (mr_env_int("MR_AHA_CUDA_GENERIC_BD", 0) == 0) p->bd = mr_bd_lookup(cfg->L);
     if (cfg->is_masked && cfg->num_masked > 2147483647LL)
-        p->bd = mr_bd_kernels{NULL, NULL, 0}; /* the int32 index map is too small */
+        p->bd = mr_bd_kernels{}; /* the int32 index map is too small */
     int rc;
-    if (p->bd.dense != NULL) {
+    if (mr_bd_available(p->bd, false)) {
         int t = mr_env_int("MR_AHA_CUDA_BD_THREADS", MR_BD_THREADS);
         if (t < 32 || t > MR_BD_THREADS) t = MR_BD_THREADS;
         p->bd_block  = t;
@@ -351,7 +355,7 @@ static int mr_aha_plan_create_impl(const mr_config *cfg, mr_aha_plan *plan_out)
      * buffers fit mem_fraction of the free memory. A group of 1 (the plain
      * coil-by-coil operator) is always attempted. */
     int group = mr_env_int("MR_AHA_CUDA_COIL_GROUP", MR_CUDA_COIL_GROUP);
-    if (p->bd.dense == NULL || group < 1) group = 1;
+    if (!mr_bd_available(p->bd, false) || group < 1) group = 1;
     if (group > cfg->n_coils) group = cfg->n_coils;
 
     size_t free_bytes = 0, total_bytes = 0;
@@ -382,7 +386,8 @@ static int mr_aha_plan_create_impl(const mr_config *cfg, mr_aha_plan *plan_out)
 
     if (cfg->verbose)
         printf("[mr_aha] plan: %s block-diagonal kernels, %d coil(s) per group\n",
-               p->bd.dense ? "specialised" : "generic", p->group);
+               p->bd.tiled ? "tiled" : p->bd.dense ? "specialised" : "generic",
+               p->group);
 
     *plan_out = p;
     return MR_SUCCESS;
@@ -542,28 +547,21 @@ static int mr_aha_blockdiag(mr_aha_plan plan, int nc,
     const long long  nm = (long long)cfg->num_masked;
 
     if (!cfg->is_masked) {
+        if (mr_bd_available(plan->bd, false))
+            return mr_bd_launch_dense(plan->bd, plan->bd_block, plan->d_pad,
+                                      d_phi2_toep, dims, nc, mr_bd_whole(dims), s);
+        /* Generic kernels: one coil per group. */
         const int grid = (int)mr_ceil_div(dims.pad_size, plan->bd_block);
-        if (plan->bd.dense) {
-            plan->bd.dense<<<grid, plan->bd_block, 0, s>>>(
-                plan->d_pad, d_phi2_toep, dims, nc, mr_bd_whole(dims));
-            MR_KERNEL_CHECK("mr_k_bd_dense_t");
-        } else {
-            /* Generic kernels: one coil per group. */
-            mr_k_blockdiag_dense<<<grid, plan->bd_block, plan->bd_shared, s>>>(
-                plan->d_pad, d_phi2_toep, dims);
-            MR_KERNEL_CHECK("mr_k_blockdiag_dense");
-        }
+        mr_k_blockdiag_dense<<<grid, plan->bd_block, plan->bd_shared, s>>>(
+            plan->d_pad, d_phi2_toep, dims);
+        MR_KERNEL_CHECK("mr_k_blockdiag_dense");
         return MR_SUCCESS;
     }
 
-    if (plan->bd.masked) {
+    if (mr_bd_available(plan->bd, true))
         /* In place over the whole grid, zeroing outside the mask. */
-        const int grid = (int)mr_ceil_div(dims.pad_size, plan->bd_block);
-        plan->bd.masked<<<grid, plan->bd_block, 0, s>>>(
-            plan->d_pad, d_phi2_toep, plan->d_inv, nm, dims, nc, mr_bd_whole(dims));
-        MR_KERNEL_CHECK("mr_k_bd_masked_t");
-        return MR_SUCCESS;
-    }
+        return mr_bd_launch_masked(plan->bd, plan->bd_block, plan->d_pad, d_phi2_toep,
+                                   plan->d_inv, nm, dims, nc, mr_bd_whole(dims), s);
 
     /* Generic kernels (one coil per group): gather into the compact buffer,
      * then zero the grid (samples outside the mask contribute nothing) and

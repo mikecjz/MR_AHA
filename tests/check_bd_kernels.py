@@ -2,16 +2,20 @@
 
 Both backends use block-diagonal kernels specialised on ``L`` (CUDA:
 ``mr_k_bd_dense_t<L>`` / ``mr_k_bd_masked_t<L>``; Metal: ``mr_k_bd_dense<L>``
-/ ``mr_k_bd_masked<L>``; L = 1..30 on CUDA, 1..32 on Metal) and fall back to the generic
-shared/threadgroup-memory kernels otherwise or when
+/ ``mr_k_bd_masked<L>``; L = 1..30 on CUDA, 1..32 on Metal). CUDA uses tiled
+shared-memory kernels (``mr_k_bdt``) above L = 30, up to 512; both backends
+fall back to the generic shared/threadgroup-memory kernels otherwise or when
 ``MR_AHA_<BACKEND>_GENERIC_BD=1``. The reference data cover only a few ranks,
 so this test applies the operator with both kernel families on random inputs
-for many ranks (including the fallback at L = 33), both triangulations,
+for many ranks (including the tiled kernels at L = 31..130 with 32 and 16
+locations per tile), both triangulations,
 unmasked and masked, and checks that they agree to single-precision rounding.
 The specialised kernels also process coils in groups
 (``MR_AHA_<BACKEND>_COIL_GROUP``); with 5 coils, groups of 1, 2 and 4 (the last
 group smaller) are all checked against the generic kernels, which handle one
-coil at a time.
+coil at a time. On CUDA the tiled kernels are also forced for every rank
+(``MR_AHA_CUDA_TILED_BD=1``), with coil batches of 1, 2 and 4
+(``MR_AHA_CUDA_BDT_NC``).
 
 Usage (from the repository root)::
 
@@ -30,18 +34,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 
 import mr_aha  # noqa: E402
 
-RANKS = (1, 2, 5, 7, 12, 16, 20, 30, 31, 32, 33)
+RANKS = (1, 2, 5, 7, 12, 16, 20, 30, 31, 32, 33, 47, 72, 130)
 
 
-def apply(cfg, x, SEs, toep, mask, generic: bool, group: int = 4) -> np.ndarray:
+def apply(cfg, x, SEs, toep, mask, generic: bool, group: int = 4,
+          env: dict[str, str] | None = None) -> np.ndarray:
     """One operator application with the chosen kernel family and coil group.
 
     Inputs and output are NumPy arrays; on CUDA they are moved to the current
-    device (CuPy) and back.
+    device (CuPy) and back. @p env sets further environment variables for
+    this application only.
     """
     prefix = "MR_AHA_" + mr_aha.backend().upper()
-    os.environ[prefix + "_GENERIC_BD"] = "1" if generic else "0"
-    os.environ[prefix + "_COIL_GROUP"] = str(group)
+    env = dict(env or {})
+    env[prefix + "_GENERIC_BD"] = "1" if generic else "0"
+    env[prefix + "_COIL_GROUP"] = str(group)
+    os.environ.update(env)
     try:
         if mr_aha.backend() == "cuda":
             import cupy as cp  # noqa: PLC0415
@@ -49,15 +57,21 @@ def apply(cfg, x, SEs, toep, mask, generic: bool, group: int = 4) -> np.ndarray:
             return cp.asnumpy(mr_aha.aha_toeplitz(cfg, *dev[:3], mask=dev[3]))
         return mr_aha.aha_toeplitz(cfg, x, SEs, toep, mask=mask)
     finally:
-        os.environ.pop(prefix + "_GENERIC_BD", None)
-        os.environ.pop(prefix + "_COIL_GROUP", None)
+        for k in env:
+            os.environ.pop(k, None)
 
 
 def main() -> int:
     """Run every combination; return 1 on any mismatch."""
     rng = np.random.default_rng(1)
     n_dim, n_coils = (24, 20), 5
-    worst, failed = 0.0, 0
+    worst, failed, count = 0.0, 0, 0
+    # Variants checked against the generic kernels: (label, coil group, env).
+    variants = [(f"group={g}", g, {}) for g in (1, 2, 4)]
+    if mr_aha.backend() == "cuda":
+        variants += [(f"tiled nc={nc} group={g}", g,
+                      {"MR_AHA_CUDA_TILED_BD": "1", "MR_AHA_CUDA_BDT_NC": str(nc)})
+                     for nc in (1, 2, 4) for g in (1, 4)]
     for L in RANKS:
         for tri in ("lower", "upper"):
             for masked in (False, True):
@@ -75,15 +89,19 @@ def main() -> int:
                 SEs = crandn(n_coils, n_dim[1], n_dim[0])
                 toep = crandn(*mr_aha.phi2_toep_shape(cfg))
                 b = apply(cfg, x, SEs, toep, mask, generic=True)
-                for group in (1, 2, 4):
-                    a = apply(cfg, x, SEs, toep, mask, generic=False, group=group)
+                for label, group, env in variants:
+                    if L > 33 and mr_aha.backend() != "cuda":  # CUDA-only ranks
+                        break
+                    a = apply(cfg, x, SEs, toep, mask, generic=False, group=group,
+                              env=env)
+                    count += 1
                     err = float(np.linalg.norm((a - b).astype(np.complex128).ravel())
                                 / np.linalg.norm(b.astype(np.complex128).ravel()))
                     worst = max(worst, err)
                     if not err < 1e-5:
                         failed += 1
-                        print(f"FAIL L={L} {tri} masked={masked} group={group}: {err:.2e}")
-    print(f"{len(RANKS) * 4 * 3} combinations, worst relative difference {worst:.2e}, "
+                        print(f"FAIL L={L} {tri} masked={masked} {label}: {err:.2e}")
+    print(f"{count} combinations, worst relative difference {worst:.2e}, "
           f"{failed} failed")
     return 1 if failed else 0
 

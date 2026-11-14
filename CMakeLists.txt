@@ -140,6 +140,7 @@ add_library(mr_aha STATIC
     src/cuda/mr_backend_cuda.cu
     src/cuda/mr_kernels.cu
     src/cuda/mr_kernels_bd.cu
+    src/cuda/mr_kernels_bdt.cu
     src/cuda/mr_aha.cu
     src/cuda/mr_op.cu
     src/cuda/mr_nufft_op.cu
