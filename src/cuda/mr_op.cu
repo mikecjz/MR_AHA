@@ -930,7 +930,7 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
     const char *se = std::getenv("MR_AHA_MGPU_SPLIT");
     const int mode = (se && !strcmp(se, "on")) ? 1 : (se && !strcmp(se, "off")) ? 0 : 2;
     const int can_split = (toeplitz && mode != 0 && G > 1 && C % G != 0 && !small &&
-                           (cfg->is_masked ? p->bd.masked != NULL : p->bd.dense != NULL) &&
+                           mr_bd_available(p->bd, cfg->is_masked != 0) &&
                            cfg->num_masked <= 2147483647LL);
     int split = (mode == 1 && can_split);
 
@@ -1204,17 +1204,14 @@ static int mr_op_issue_split(mr_op p, const mr_complex *d_x, mr_complex *const *
                         (size_t)dh->nk * c8, dh->stream));
             }
             const mr_bd_range rg = {dh->k0, dh->nk, dh->nk};
-            const int grid = (int)mr_ceil_div(dh->nk, MR_BD_THREADS);
-            if (cfg->is_masked) {
-                p->bd.masked<<<grid, MR_BD_THREADS, 0, dh->stream>>>(
-                    dh->d_B, dh->d_toep, dh->d_inv, (long long)cfg->num_masked, dims,
-                    1, rg);
-                MR_KERNEL_CHECK("mr_k_bd_masked_t (split)");
-            } else {
-                p->bd.dense<<<grid, MR_BD_THREADS, 0, dh->stream>>>(
-                    dh->d_B, dh->d_toep, dims, 1, rg);
-                MR_KERNEL_CHECK("mr_k_bd_dense_t (split)");
-            }
+            const int brc =
+                cfg->is_masked
+                    ? mr_bd_launch_masked(p->bd, MR_BD_THREADS, dh->d_B, dh->d_toep,
+                                          dh->d_inv, (long long)cfg->num_masked, dims,
+                                          1, rg, dh->stream)
+                    : mr_bd_launch_dense(p->bd, MR_BD_THREADS, dh->d_B, dh->d_toep,
+                                         dims, 1, rg, dh->stream);
+            if (brc != MR_SUCCESS) return brc;
             MR_CUDA_CHECK(cudaEventRecord(dh->ev_bd, dh->stream));
         }
 

@@ -37,6 +37,8 @@
 
 #include "mr_kernels.cuh"
 
+#include <cstdlib>
+
 /* ------------------------------------------------------------------------ */
 /* Device helpers                                                           */
 /* ------------------------------------------------------------------------ */
@@ -320,8 +322,10 @@ mr_k_bd_masked_t(mr_complex *__restrict__ d_pad,
 
 mr_bd_kernels mr_bd_lookup(int L)
 {
-    mr_bd_kernels k = {nullptr, nullptr, 0};
-    switch (L) {
+    mr_bd_kernels k = {nullptr, nullptr, 0, 0};
+    const char *e = std::getenv("MR_AHA_CUDA_TILED_BD");
+    const bool force_tiled = e && e[0] && atoi(e) != 0;
+    if (!force_tiled) switch (L) {
         MR_BD_CASE(1)  MR_BD_CASE(2)  MR_BD_CASE(3)  MR_BD_CASE(4)
         MR_BD_CASE(5)  MR_BD_CASE(6)  MR_BD_CASE(7)  MR_BD_CASE(8)
         MR_BD_CASE(9)  MR_BD_CASE(10) MR_BD_CASE(11) MR_BD_CASE(12)
@@ -333,5 +337,7 @@ mr_bd_kernels mr_bd_lookup(int L)
         /* Keep in sync with MR_BD_MAX_L. */
         default: break;
     }
+    /* Tiled kernels (mr_kernels_bdt.cu) for the other ranks. */
+    if (k.dense == nullptr && L >= 1 && L <= MR_BDT_MAX_L) k.tiled = 1;
     return k;
 }
