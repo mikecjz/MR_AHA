@@ -48,7 +48,11 @@ struct mr_metal_ctx {
  * @brief Return the process-wide Metal context, creating it on first use.
  *
  * Thread-safe. Fails only when the machine has no Metal device (e.g. a
- * virtual machine without GPU passthrough).
+ * virtual machine without GPU passthrough). This is the Metal stand-in for
+ * the CUDA backend's device selection and `cudaStream_t`: there is a single
+ * GPU and a single queue, and since a queue executes its command buffers in
+ * commit order, work from consecutive calls is ordered like work on one
+ * CUDA stream. Defined in `mr_backend_metal.cpp`.
  *
  * @param[out] ctx_out Receives a pointer to the shared context.
  * @return ::MR_SUCCESS or ::MR_ERR_METAL (see ::mr_last_error).
@@ -152,7 +156,14 @@ int mr_metal_view_make(const mr_metal_ctx *ctx, const void *ptr, size_t bytes,
  */
 void mr_metal_view_finish(mr_metal_view *v);
 
-/** @brief Bind a view as buffer argument @p index of @p enc. */
+/**
+ * @brief Bind a view as buffer argument @p index of @p enc.
+ *
+ * Binds the view's buffer at its byte offset, so the kernel's pointer points
+ * at the caller's first element whether the array was wrapped in place
+ * (offset inside the page-aligned span) or copied (offset 0). This is what
+ * stands in for passing a device pointer to a CUDA kernel.
+ */
 inline void mr_metal_bind(MTL::ComputeCommandEncoder *enc,
                           const mr_metal_view &v, NS::UInteger index)
 {
@@ -222,6 +233,10 @@ void mr_metal_fft_destroy(mr_metal_fft *fft);
  */
 class mr_metal_pool {
 public:
+    /* Pools nest: the constructor pushes a new innermost pool on this
+     * thread and the destructor (release) drains and pops it. The guard
+     * must therefore be destroyed on the thread that created it, in LIFO
+     * order with any other pool, which a stack-scoped object guarantees. */
     mr_metal_pool() : pool_(NS::AutoreleasePool::alloc()->init()) {}
     ~mr_metal_pool() { pool_->release(); }
     mr_metal_pool(const mr_metal_pool &) = delete;

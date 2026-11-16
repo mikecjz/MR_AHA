@@ -14,10 +14,16 @@ function p = mr_to_numpy(A, nd)
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % Pad the size vector with trailing ones when nd is given, so the NumPy
+    % array keeps every axis the C layout expects.
     sz = size(A);
     if nargin > 1 && numel(sz) < nd
         sz(end+1:nd) = 1;
     end
+    % asarray wraps the MATLAB array as Fortran-ordered with MATLAB's shape.
+    % ravel('F') walks it in memory order, and reshaping that flat vector to
+    % the reversed shape gives a C-contiguous array whose layout matches the
+    % original column-major buffer element for element.
     p = py.numpy.asarray(A);                        % F-ordered, MATLAB's shape
     p = p.ravel('F').reshape(int64(fliplr(sz)));    % C-ordered, reversed shape
 end

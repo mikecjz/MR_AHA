@@ -29,6 +29,15 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
 %                      current gpuDevice; see its 'devices' argument.)
 %     'verbose'        false (default).
 %
+%   OUTPUT
+%     config     struct with the fields traj_type (lower case), n_dim, L,
+%                triangulation (lower case), phi2_dim, is_masked, eps,
+%                mask_radius, mem_fraction, gpu_device_id and verbose, all
+%                numeric values as double (is_masked logical). n_coils is
+%                added only when given; num_masked is never set here (the
+%                wrappers set it from the mask). The MEX gateways read this
+%                struct into the library's mr_config.
+%
 %   EXAMPLE
 %     config = mr_default_config('stack', [256 256 64], 16);
 %     op     = mr_aha.create_op(SEs, phi2, traj, config);
@@ -47,6 +56,10 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % ---- Name-value options ----------------------------------------------
+    % Defaults mirror mr_config_defaults of the C library, except
+    % gpu_device_id = -1 so the MEX files run on MATLAB's current gpuDevice
+    % (where its gpuArrays live) instead of forcing device 0.
     p = inputParser();
     p.addParameter('phi2_dim', []);
     p.addParameter('triangulation', 'lower');
@@ -60,6 +73,9 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
     p.parse(varargin{:});
     opt = p.Results;
 
+    % ---- Trajectory type and image size ------------------------------------
+    % n_dim is stored as a double row vector. The trajectory type fixes the
+    % number of spatial axes, which n_dim must match exactly.
     n_dim = double(n_dim(:)).';
     switch lower(traj_type)
         case '2d',    n_spatial = 2;
@@ -75,6 +91,10 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
               n_spatial, traj_type);
     end
 
+    % ---- Upsampled (Toeplitz) grid -----------------------------------------
+    % Twofold oversampling per non-Cartesian axis is the standard Toeplitz
+    % embedding size; an explicit phi2_dim is taken as given (the library
+    % validates it).
     if isempty(opt.phi2_dim)
         phi2_dim = 2 * n_dim;
         if strcmpi(traj_type, 'stack')
@@ -85,6 +105,9 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
         phi2_dim = double(opt.phi2_dim(:)).';
     end
 
+    % ---- Assemble the struct ------------------------------------------------
+    % Strings are lower-cased (the MEX parser also lower-cases them) and
+    % numeric values are stored as double; is_masked stays logical.
     config = struct( ...
         'traj_type',       lower(traj_type), ...
         'n_dim',           n_dim, ...
@@ -98,5 +121,7 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
         'gpu_device_id',   double(opt.gpu_device_id), ...
         'verbose',         double(opt.verbose));
 
+    % n_coils stays absent unless given, so every consumer infers it from
+    % the trailing dimension of SEs.
     if ~isempty(opt.n_coils), config.n_coils = double(opt.n_coils); end
 end

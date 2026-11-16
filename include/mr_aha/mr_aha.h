@@ -97,9 +97,28 @@
 #ifndef MR_AHA_MR_AHA_H
 #define MR_AHA_MR_AHA_H
 
+/* The header deliberately depends only on the C standard library: `int64_t`
+ * (all element counts and mask indices are 64-bit so that grids above 2^31
+ * voxels can be described) and `size_t`. No CUDA or Metal header is pulled in
+ * unless the including translation unit asks for the CUDA complex type below. */
 #include <stddef.h>
 #include <stdint.h>
 
+/* ------------------------------------------------------------------------ */
+/* Export / alignment macros                                                */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * @def MR_EXPORT
+ * @brief Marks a function as part of the library's exported ABI.
+ *
+ * - Windows: `__declspec(dllexport)` while the shared library itself is being
+ *   built (the build defines `MR_AHA_BUILD_SHARED`), and empty otherwise, so
+ *   static builds and consumers of the import library need no annotation.
+ * - Other platforms: default ELF / Mach-O symbol visibility, so the symbols
+ *   stay exported even when the library is compiled with
+ *   `-fvisibility=hidden`.
+ */
 #ifdef _WIN32
 #  ifdef MR_AHA_BUILD_SHARED
 #    define MR_EXPORT __declspec(dllexport)
@@ -110,16 +129,37 @@
 #  define MR_EXPORT __attribute__((visibility("default")))
 #endif
 
+/* Every declaration below has C linkage so that the symbol names are not
+ * mangled: MATLAB MEX gateways, Python `ctypes` and plain C callers look them
+ * up by their literal names. */
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/**
+ * @def MR_ALIGN8
+ * @brief Forces 8-byte alignment of a type (MSVC and GCC/Clang spellings).
+ *
+ * Used on the fallback ::mr_complex so that its alignment matches CUDA's
+ * `cuFloatComplex` (`float2`, 8-byte aligned); otherwise a host-compiled
+ * struct of two floats would be only 4-byte aligned and arrays could not be
+ * shared safely between the two definitions.
+ */
 #if defined(_MSC_VER)
 #  define MR_ALIGN8 __declspec(align(8))
 #else
 #  define MR_ALIGN8 __attribute__((aligned(8)))
 #endif
 
+/* ------------------------------------------------------------------------ */
+/* Complex scalar type                                                      */
+/* ------------------------------------------------------------------------ */
+
+/* Two definitions of the same 8-byte {float re, float im} layout: CUDA code
+ * gets the native `cuFloatComplex` so kernels can call cuCmulf() & co. on
+ * array elements without casts, everyone else gets a dependency-free struct.
+ * Because the layouts are identical, a pointer produced by one side can be
+ * passed to the other. */
 #if defined(MR_AHA_CUDA_COMPLEX) || defined(__CUDACC__)
 #  include <cuComplex.h>
 /** @brief Single-precision complex scalar used by every MR_AHA array.
@@ -142,8 +182,14 @@ typedef struct MR_ALIGN8 mr_complex_s {
 } mr_complex;
 #endif
 
+/* ------------------------------------------------------------------------ */
+/* Library-wide constants                                                   */
+/* ------------------------------------------------------------------------ */
+
 /**
  * @brief Default neighbourhood radius of ::mr_calc_mask, in upsampled grid cells.
+ *
+ * Installed into ::mr_config::mask_radius by ::mr_config_defaults.
  *
  * Measured in the documentation
  * (https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html):
@@ -167,6 +213,14 @@ typedef struct MR_ALIGN8 mr_complex_s {
  *
  * Every function returns ::MR_SUCCESS (== 0) on success and a negative value on
  * failure. Use ::mr_status_string to obtain a human readable description.
+ *
+ * The functions return a plain `int` (not ::mr_status) so that the ABI does
+ * not depend on the compiler's choice of enum width; compare the result
+ * against these enumerators. The codes are grouped by origin: argument and
+ * configuration errors (-1, -2, -7) are detected on the host before any GPU
+ * work is issued; -3 to -6 come from the CUDA backend and its libraries;
+ * -9 and -10 only from the Metal backend. A failure is accompanied by a
+ * detailed message in ::mr_last_error.
  */
 typedef enum mr_status {
     MR_SUCCESS            =  0, /**< Operation completed successfully.        */
@@ -185,7 +239,9 @@ typedef enum mr_status {
 /**
  * @brief Human readable description of an ::mr_status value.
  * @param[in] status Value previously returned by an MR_AHA function.
- * @return Pointer to a static, NUL-terminated string. Never NULL.
+ * @return Pointer to a static, NUL-terminated string. Never NULL; values that
+ *         are not ::mr_status enumerators map to `"unknown status"`. The
+ *         string must not be freed or modified.
  */
 MR_EXPORT const char *mr_status_string(int status);
 
@@ -197,6 +253,12 @@ MR_EXPORT const char *mr_status_string(int status);
  * storage whenever it returns a non-zero status. The buffer is overwritten by
  * the next failing call.
  *
+ * Every status-returning entry point also clears the buffer when it starts
+ * (and, on CUDA, resets the runtime's per-thread last error), so read the
+ * message right after the failing call, before calling into the library
+ * again. Because the storage is thread-local, concurrent callers on
+ * different host threads never see each other's diagnostics.
+ *
  * @return Pointer to a thread-local, NUL-terminated string. Never NULL; empty
  *         if no failure has been recorded on this thread.
  */
@@ -204,6 +266,11 @@ MR_EXPORT const char *mr_last_error(void);
 
 /**
  * @brief Name of the GPU backend this library was built for.
+ *
+ * Lets a binding decide at run time how to pass arrays (device pointers for
+ * CUDA, host pointers for Metal, see @ref mr_memory) and which features exist
+ * (see @ref mr_op_backends).
+ *
  * @return `"cuda"` or `"metal"`; a pointer to a static string, never NULL.
  */
 MR_EXPORT const char *mr_backend(void);
@@ -212,7 +279,15 @@ MR_EXPORT const char *mr_backend(void);
 /* Configuration                                                            */
 /* ------------------------------------------------------------------------ */
 
-/** @brief Trajectory family, selecting how ::mr_calc_toep interprets its input. */
+/**
+ * @brief Trajectory family, selecting how ::mr_calc_toep interprets its input.
+ *
+ * Determines the number of spatial dimensions (::mr_config::n_spatial), the
+ * number of trajectory coordinates `ndim` (2 for ::MR_TRAJ_2D and
+ * ::MR_TRAJ_STACK, 3 for ::MR_TRAJ_3D), the dimensionality of the type-1
+ * NUFFT that builds the kernel, and whether the z axis is non-uniform (3D) or
+ * already Cartesian (stack, where no upsampling or shift is applied along z).
+ */
 typedef enum mr_traj_type {
     MR_TRAJ_2D    = 0, /**< Planar 2D trajectory; image is `[Nx, Ny, L]`.      */
     MR_TRAJ_3D    = 1, /**< Fully 3D trajectory; image is `[Nx, Ny, Nz, L]`.   */
@@ -247,6 +322,12 @@ typedef enum mr_triangulation {
  * Fill with ::mr_config_defaults first, then override the fields you need. Use
  * ::mr_config_validate to check consistency before creating a plan (the plan
  * constructors validate as well).
+ *
+ * The struct is plain data passed by pointer; every function that keeps it
+ * (plans, operators) stores its own copy, so the caller's instance may be
+ * modified or freed afterwards. Fields fall into three groups: the problem
+ * geometry (::traj_type to ::num_masked), the coil count (::n_coils) and the
+ * execution environment (::eps to ::mask_radius).
  */
 typedef struct mr_config {
     /** Trajectory family. See ::mr_traj_type. */
@@ -254,18 +335,28 @@ typedef struct mr_config {
 
     /** Number of *spatial* dimensions of the image: 2 or 3. Derived from
      *  ::traj_type by ::mr_config_defaults but may be set explicitly:
-     *  ::MR_TRAJ_2D uses 2, ::MR_TRAJ_3D and ::MR_TRAJ_STACK use 3. */
+     *  ::MR_TRAJ_2D uses 2, ::MR_TRAJ_3D and ::MR_TRAJ_STACK use 3.
+     *  ::mr_config_validate rejects any other combination, so an explicit
+     *  value must agree with ::traj_type. It is also the rank of the cuFFT
+     *  over the upsampled grid. */
     int n_spatial;
 
-    /** Image matrix size `[Nx, Ny, Nz]`. Entries beyond ::n_spatial must be 1. */
+    /** Image matrix size `[Nx, Ny, Nz]`. Entries beyond ::n_spatial must be 1.
+     *  Every entry must be >= 1. Defines the shape of `x`, `AhAx` and the
+     *  sensitivity maps; the image centre is at `floor(N/2)` on each axis. */
     int n_dim[3];
 
     /** Upsampled (Toeplitz) matrix size `[Mx, My, Mz]`. Entries beyond
      *  ::n_spatial must be 1. Typically `M = 2*N`. For ::MR_TRAJ_STACK,
-     *  `Mz` must equal `Nz` because kz is already Cartesian. */
+     *  `Mz` must equal `Nz` because kz is already Cartesian. `M >= N` is
+     *  required on every axis. `M = 2*N` makes the circulant embedding of
+     *  the Toeplitz operator exact; a smaller `M` wraps the point-spread
+     *  function around and introduces aliasing in @f$A^H A@f$. */
     int phi2_dim[3];
 
-    /** Number of ranks / subspace coefficients @f$L@f$. Must be >= 1. */
+    /** Number of ranks / subspace coefficients @f$L@f$. Must be >= 1. Sets
+     *  the trailing extent of `x` / `AhAx`, the size of each Hermitian
+     *  block and hence the `(L^2+L)/2` components of `phi2_toep`. */
     int L;
 
     /** Triangle stored in `phi2_toep`. See ::mr_triangulation. */
@@ -276,14 +367,18 @@ typedef struct mr_config {
      *  `mask` of ::num_masked linear indices must be supplied. */
     int is_masked;
 
-    /** Number of retained samples when ::is_masked is non-zero, else ignored. */
+    /** Number of retained samples when ::is_masked is non-zero, else ignored.
+     *  Must then satisfy `0 < num_masked <= Mx*My*Mz`. Typically the count
+     *  returned by ::mr_calc_mask. */
     int64_t num_masked;
 
     /** Number of receive coils @f$N_{coils}@f$. Must be >= 1. Used only by
      *  ::mr_aha_toeplitz / ::mr_aha_plan_execute. */
     int n_coils;
 
-    /** Requested cufinufft tolerance for ::mr_calc_toep. Default `1e-6`. */
+    /** Requested cufinufft tolerance for ::mr_calc_toep (and for both
+     *  transforms of an ::MR_OP_NUFFT operator). Default `1e-6`; must lie
+     *  in the open interval (0, 1). */
     double eps;
 
     /** CUDA device to run on. Default 0. Set to -1 to keep the caller's
@@ -299,10 +394,16 @@ typedef struct mr_config {
 
     /** Fraction of the *free* device memory ::mr_calc_toep may use for its
      *  working buffers, and that ::mr_aha_plan_create may use for its coil
-     *  groups (CUDA). Default 0.5. Clamped to (0, 0.95]. */
+     *  groups (CUDA). Default 0.5. Clamped to (0, 0.95]: values above 0.95
+     *  are reduced to 0.95 (headroom for the CUDA runtime and cuFFT), and
+     *  non-positive or NaN values fall back to 0.5. The free memory is
+     *  queried when the call starts, so buffers the caller has already
+     *  allocated are excluded from it. */
     double mem_fraction;
 
-    /** Non-zero to print per-stage timing to stdout. Default 0. */
+    /** Non-zero to print per-stage timing to stdout. Default 0. In
+     *  ::mr_aha_plan_execute this also synchronises ::stream before
+     *  printing, so leave it off in timing-critical loops. */
     int verbose;
 
     /** Neighbourhood radius of ::mr_calc_mask, in upsampled grid cells: every
@@ -320,6 +421,11 @@ typedef struct mr_config {
  * `mask_radius = MR_DEFAULT_MASK_RADIUS`, all sizes to 1 and ::n_spatial
  * according to @p traj_type.
  *
+ * The struct is zeroed first, so `num_masked = 0` and `verbose = 0` as well,
+ * and `L = 1`. The sizes (::mr_config::n_dim, ::mr_config::phi2_dim,
+ * ::mr_config::L, ::mr_config::n_coils) must then be set by the caller; the
+ * result of this function alone describes a trivial 1-voxel problem.
+ *
  * @param[out] cfg       Configuration to initialise. Must be non-NULL.
  * @param[in]  traj_type Trajectory family the operator will be used for.
  * @return ::MR_SUCCESS, or ::MR_ERR_INVALID_ARG if @p cfg is NULL.
@@ -334,14 +440,31 @@ MR_EXPORT int mr_config_defaults(mr_config *cfg, mr_traj_type traj_type);
  * ::mr_config::num_masked is positive and no larger than the upsampled grid
  * when ::mr_config::is_masked is set.
  *
+ * In full, the checks are: ::mr_config::traj_type is a known enumerator;
+ * ::mr_config::n_spatial equals 2 for ::MR_TRAJ_2D and 3 otherwise; every
+ * `n_dim[d]` and `phi2_dim[d]` is >= 1, both are 1 for `d >= n_spatial`, and
+ * `phi2_dim[d] >= n_dim[d]`; `phi2_dim[2] == n_dim[2]` for ::MR_TRAJ_STACK;
+ * `L >= 1`; `n_coils >= 1`; ::mr_config::triangulation is a known
+ * enumerator; `0 < eps < 1`; `mask_radius >= 0`; and, when masked,
+ * `0 < num_masked <= Mx*My*Mz`. The execution fields (device, stream,
+ * mem_fraction, verbose) are not checked. Purely host-side; touches no GPU.
+ *
  * @param[in] cfg Configuration to check.
- * @return ::MR_SUCCESS or ::MR_ERR_INVALID_CONFIG (see ::mr_last_error).
+ * @return ::MR_SUCCESS, ::MR_ERR_INVALID_ARG if @p cfg is NULL, or
+ *         ::MR_ERR_INVALID_CONFIG naming the first failed check (see
+ *         ::mr_last_error).
  */
 MR_EXPORT int mr_config_validate(const mr_config *cfg);
 
 /* ------------------------------------------------------------------------ */
 /* Derived-size helpers                                                     */
 /* ------------------------------------------------------------------------ */
+
+/* Element counts (not bytes) of the arrays the caller must allocate, so that
+ * bindings need not re-derive the layouts above. Multiply by
+ * `sizeof(mr_complex)` (8) or `sizeof(int64_t)` for bytes. All are pure
+ * host-side arithmetic in 64 bits on an unvalidated @p cfg; they do not
+ * clear or set ::mr_last_error. */
 
 /**
  * @brief Number of stored entries of one packed Hermitian block, @f$(L^2+L)/2@f$.
@@ -376,6 +499,9 @@ MR_EXPORT int64_t mr_phi2_toep_size(const mr_config *cfg);
 
 /**
  * @brief Number of ::mr_complex elements of the spatial-coefficient array `x`.
+ *
+ * Also the size of the output `AhAx`, which has the same shape.
+ *
  * @param[in] cfg Configuration.
  * @return `Nx*Ny*Nz*L`, or 0 when @p cfg is NULL.
  */
@@ -395,7 +521,17 @@ MR_EXPORT int64_t mr_se_size(const mr_config *cfg);
 /* Forward operator: AhA via Toeplitz embedding                             */
 /* ------------------------------------------------------------------------ */
 
-/** @brief Opaque, reusable @f$A^H A@f$ plan. Create with ::mr_aha_plan_create. */
+/* The stateless single-GPU building block: a plan holds only the work
+ * buffers and FFT plans; the large inputs (maps, kernel, mask) are passed to
+ * every execution. ::mr_op (below) wraps it into a stateful operator that
+ * owns those inputs and can span several GPUs. */
+
+/** @brief Opaque, reusable @f$A^H A@f$ plan. Create with ::mr_aha_plan_create.
+ *
+ *  A plan is bound to the device and stream of the configuration it was
+ *  created with. It must not be executed concurrently from several host
+ *  threads, because all executions share the plan's padded work buffers;
+ *  separate plans are independent. */
 typedef struct mr_aha_plan_s *mr_aha_plan;
 
 /**
@@ -418,13 +554,26 @@ typedef struct mr_aha_plan_s *mr_aha_plan;
  * group of 1 (`Mx*My*Mz*L` values, the minimum) is always attempted. Raise
  * `mem_fraction` to allow larger groups on a GPU with little memory to spare.
  * `MR_AHA_CUDA_GENERIC_BD=1` selects the generic block-diagonal kernels (one
- * coil at a time; also used for @f$L > 30@f$) and `MR_AHA_CUDA_PROFILE=1`
- * prints the GPU time of each stage at every execution.
+ * coil at a time; also used for @f$L > 512@f$, and for masked plans with
+ * more than @f$2^{31}-1@f$ retained locations) and `MR_AHA_CUDA_PROFILE=1`
+ * prints the GPU time of each stage at every execution. Ranks
+ * @f$30 < L \le 512@f$ use tiled shared-memory kernels that keep the coil
+ * groups and the read-once guarantee of the specialised ones.
+ *
+ * The call validates @p cfg, makes ::mr_config::gpu_device_id current for
+ * its duration (restoring the caller's device on return), queries the free
+ * memory once, and allocates everything up front. It issues no work on
+ * ::mr_config::stream.
  *
  * @param[in]  cfg      Validated configuration. Copied into the plan; the
  *                      caller's struct need not outlive the plan.
  * @param[out] plan_out Receives the new plan. Set to NULL on failure.
- * @return ::MR_SUCCESS or a negative ::mr_status.
+ *                      Release it with ::mr_aha_plan_destroy.
+ * @return ::MR_SUCCESS, ::MR_ERR_INVALID_ARG (NULL pointer),
+ *         ::MR_ERR_INVALID_CONFIG, ::MR_ERR_ALLOC (even a group of one coil
+ *         does not fit), ::MR_ERR_CUFFT, ::MR_ERR_CUDA or ::MR_ERR_UNSUPPORTED
+ *         (generic kernels only: one thread's rank vector exceeds the shared
+ *         memory per block).
  */
 MR_EXPORT int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out);
 
@@ -441,9 +590,23 @@ MR_EXPORT int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out);
  * the upsampled grid, and @f$\hat{T}@f$ is the block-diagonal multiplication by
  * the Hermitian @f$L \times L@f$ block @f$B@f$ held in `phi2_toep` at every
  * upsampled k-space location, applied to the rank row
- * vector from the right, @f$v \leftarrow v B@f$ (see @ref mr_gram). The scaling of `phi2_toep` produced by ::mr_calc_toep
+ * vector from the right, @f$v \leftarrow v B@f$ (see @ref mr_gram). The
+ * scaling of `phi2_toep` produced by ::mr_calc_toep
  * already absorbs the @f$1/(M_xM_yM_z)@f$ of the unnormalised cuFFT pair, so no
  * further scaling is applied here.
+ *
+ * Per coil group the stages are: (1) multiply by the sensitivity maps and
+ * scatter onto the zeroed padded grid in FFT order, (2) one batched forward
+ * cuFFT over all ranks and coils of the group, (3) the block-diagonal
+ * multiplication, (4) the batched inverse cuFFT, (5) crop, multiply by the
+ * conjugate maps and sum over coils into @p d_AhAx.
+ *
+ * Asynchronous with respect to the host: all work is enqueued on the plan's
+ * stream (::mr_config::stream) and the call returns before it completes
+ * (except with ::mr_config::verbose, which synchronises). The input arrays
+ * must stay valid and unchanged until the stream has reached that point.
+ * Different @p d_SEs, @p d_phi2_toep and @p d_mask may be passed on every
+ * call as long as their sizes match the plan's configuration.
  *
  * @param[in]  plan        Plan from ::mr_aha_plan_create.
  * @param[in]  d_x         Device array of spatial coefficients,
@@ -461,7 +624,11 @@ MR_EXPORT int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out);
  *                         ::mr_config::is_masked is zero, non-NULL otherwise.
  * @param[out] d_AhAx      Device output array, same shape and size as @p d_x.
  *                         Fully overwritten; need not be pre-zeroed.
- * @return ::MR_SUCCESS or a negative ::mr_status.
+ * @return ::MR_SUCCESS, ::MR_ERR_INVALID_ARG (NULL plan or array, aliasing,
+ *         missing mask), ::MR_ERR_CUDA / ::MR_ERR_CUFFT for launch and
+ *         cuFFT failures, or ::MR_ERR_UNSUPPORTED from the block-diagonal
+ *         kernel launcher. Errors raised asynchronously by the kernels
+ *         surface only at a later synchronisation.
  *
  * @note @p d_AhAx must not alias @p d_x.
  */
@@ -474,6 +641,12 @@ MR_EXPORT int mr_aha_plan_execute(mr_aha_plan         plan,
 
 /**
  * @brief Release a plan and all device memory it owns.
+ *
+ * Frees the cuFFT plans, the padded grids, the cuFFT work area and the mask
+ * buffers on the plan's device, then the plan itself. It does not
+ * synchronise the stream: `cudaFree` already waits for outstanding work on
+ * the device. The caller's input and output arrays are never touched.
+ *
  * @param[in] plan Plan from ::mr_aha_plan_create, or NULL (no-op).
  * @return ::MR_SUCCESS or a negative ::mr_status.
  */
@@ -483,7 +656,8 @@ MR_EXPORT int mr_aha_plan_destroy(mr_aha_plan plan);
  * @brief One-shot convenience wrapper: create, execute and destroy a plan.
  *
  * Equivalent to ::mr_aha_plan_create followed by ::mr_aha_plan_execute and
- * ::mr_aha_plan_destroy. Prefer the plan API inside an iterative loop.
+ * ::mr_aha_plan_destroy. Prefer the plan API inside an iterative loop:
+ * every call here re-plans cuFFT and re-allocates the padded grids.
  *
  * @param[in]  cfg         Validated configuration.
  * @param[in]  d_x         See ::mr_aha_plan_execute.
@@ -565,7 +739,10 @@ MR_EXPORT int mr_aha_toeplitz(const mr_config  *cfg,
  * @{
  */
 
-/** @brief Most devices one operator can use. */
+/* Device-selection limits and creation flags of ::mr_op_options. */
+
+/** @brief Most devices one operator can use (also the length of the
+ *         per-device arrays of ::mr_op_info_t). */
 #define MR_OP_MAX_DEVICES 16
 
 /** @brief ::mr_op_options::n_devices value selecting every visible device
@@ -699,6 +876,11 @@ typedef struct mr_op_options {
 /** @brief Opaque @f$A^H A@f$ operator. Create with ::mr_op_create. */
 typedef struct mr_op_s *mr_op;
 
+/* Values of ::mr_op_info_t::toep_source, reporting where the kernel copies
+ * of a Toeplitz operator came from. Plain macros (not an enum) because the
+ * field is a fixed-width `int` in a struct read by foreign-language
+ * bindings. */
+
 /** @brief ::mr_op_info_t::toep_source: the caller supplied the kernel
  *         (::mr_op_inputs::d_phi2_toep). */
 #define MR_OP_TOEP_SUPPLIED  0
@@ -773,6 +955,12 @@ typedef struct mr_op_info_t {
  * @brief Fill @p opt with the defaults: ::MR_OP_TOEPLITZ, the primary device
  *        only, ::MR_TOEP_DIST_AUTO, ::MR_OP_SHARE_PRIMARY, cufinufft's NUFFT
  *        defaults with an upsampling factor of 2.
+ *
+ * The struct is zeroed first, so `devices = NULL`, `n_devices = 0`,
+ * `nufft_upsampfac = 0` (meaning 2.0) and `nufft_gpu_method = 0` (library
+ * choice). Fields added in later versions are thereby given their
+ * backwards-compatible defaults as well.
+ *
  * @param[out] opt Options to initialise. Must be non-NULL.
  * @return ::MR_SUCCESS or ::MR_ERR_INVALID_ARG.
  */
@@ -839,9 +1027,13 @@ MR_EXPORT int mr_op_execute(mr_op op, const mr_complex *d_x, mr_complex *d_AhAx)
 
 /**
  * @brief Describe how an operator was built and distributes the work.
+ *
+ * Copies the report recorded by ::mr_op_create; host-only, no GPU work and
+ * no synchronisation.
+ *
  * @param[in]  op   Operator.
- * @param[out] info Receives the description.
- * @return ::MR_SUCCESS or ::MR_ERR_INVALID_ARG.
+ * @param[out] info Receives the description (a full struct copy).
+ * @return ::MR_SUCCESS or ::MR_ERR_INVALID_ARG (@p op or @p info NULL).
  */
 MR_EXPORT int mr_op_info(mr_op op, mr_op_info_t *info);
 
@@ -860,7 +1052,8 @@ MR_EXPORT int mr_op_info(mr_op op, mr_op_info_t *info);
  *                         ::mr_op_info_t::devices[k]).
  * @param[out] d_phi2_toep Receives the pointer (::mr_phi2_toep_size elements
  *                         on that device).
- * @return ::MR_SUCCESS, ::MR_ERR_INVALID_ARG, or ::MR_ERR_UNSUPPORTED for an
+ * @return ::MR_SUCCESS, ::MR_ERR_INVALID_ARG (NULL argument or @p k out of
+ *         range), or ::MR_ERR_UNSUPPORTED for an
  *         ::MR_OP_NUFFT operator (which has no kernel).
  */
 MR_EXPORT int mr_op_kernel(mr_op op, int k, const mr_complex **d_phi2_toep);

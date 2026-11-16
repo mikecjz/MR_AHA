@@ -20,4 +20,6 @@
  */
 void mr_backend_clear_error(void) { (void)cudaGetLastError(); }
 
+/* Name of the backend compiled into this library ("cuda" here; the Metal
+ * build defines its own), so bindings can tell which one they loaded. */
 extern "C" const char *mr_backend(void) { return "cuda"; }

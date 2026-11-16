@@ -36,6 +36,9 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
         mexErrMsgIdAndTxt(MR_ID, "Usage: mask0 = calc_mask_mex(traj, config).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID, "Too many output arguments.");
 
+    /* Parse the config struct. Masking is forced off before validation:
+     * the mask (and num_masked) is what this call computes, so a config
+     * that already has is_masked set must not fail for lacking them. */
     mr_config cfg;
     mr_mex_parse_config(prhs[1], &cfg, MR_ID);
     cfg.is_masked = 0;
@@ -43,6 +46,9 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     const int status = mr_config_validate(&cfg);
     if (status != MR_SUCCESS) mr_mex_fail(MR_ID, status);
 
+    /* The trajectory must be a real single [Ntrajs, Nkx, ndim] array, with
+     * ndim 3 for 3D and 2 for 2D / stack-of-stars (kz is Cartesian there),
+     * in radians; it is read in place by the library. */
     if (!mxIsSingle(prhs[0]) || mxIsComplex(prhs[0]))
         mexErrMsgIdAndTxt(MR_ID, "traj must be a real single array.");
     const int ndim = (cfg.traj_type == MR_TRAJ_3D) ? 3 : 2;
@@ -51,7 +57,12 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     if ((int)nd != 3 || (int)dt[2] != ndim)
         mexErrMsgIdAndTxt(MR_ID, "traj must be [Ntrajs, Nkx, %d].", ndim);
 
-    /* Worst case: every location kept. */
+    /* Worst case: every location kept. The result is written into a
+     * scratch buffer of mr_pad_size entries (the capacity mr_calc_mask
+     * requires), then the n_kept actual entries are copied into a right-
+     * sized int64 column. A single call suffices, rather than a count call
+     * followed by a fill call. mxMalloc memory is also freed by MATLAB if an
+     * error unwinds before the explicit mxFree. */
     const int64_t cap = mr_pad_size(&cfg);
     int64_t *buf = (int64_t *)mxMalloc((size_t)cap * sizeof(int64_t));
     int64_t n_kept = 0;
@@ -62,6 +73,8 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
         mr_mex_fail(MR_ID, rc);
     }
 
+    /* Copy the sorted 0-based indices into the output column; calc_mask.m
+     * converts them to MATLAB's 1-based indexing. */
     mxArray *out = mxCreateNumericMatrix((mwSize)n_kept, 1, mxINT64_CLASS, mxREAL);
     memcpy(mxGetInt64s(out), buf, (size_t)n_kept * sizeof(int64_t));
     mxFree(buf);

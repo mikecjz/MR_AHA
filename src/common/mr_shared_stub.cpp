@@ -18,6 +18,8 @@ extern "C" {
  * @brief Version of the MR_AHA shared library, as `major*10000 + minor*100 + patch`.
  * @return The packed version number.
  */
+/* The only definition of this translation unit; it is not declared in
+ * mr_aha.h. Currently encodes version 1.0.0 (= 10000). */
 MR_EXPORT int mr_version(void) { return 1 * 10000 + 0 * 100 + 0; }
 
 } /* extern "C" */

@@ -79,27 +79,42 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % ---- Arguments -------------------------------------------------------
+    % The optional fourth argument is a 1-based mask; [] means "none given",
+    % in which case a masked config derives one with CALC_MASK below.
     narginchk(3, 4);
     mask = [];
     if ~isempty(varargin)
         mask = varargin{1};
     end
 
+    % ---- Backend dispatch -------------------------------------------------
+    % The Metal build has no cufinufft: its type-1 NUFFT runs in Python
+    % (mlx-nufft), so the whole computation is delegated to a local function.
     if strcmp(mr_backend(), 'metal')
         [phi2_toep, mask] = mr_calc_toep_metal(phi2, traj, config, mask);
         return
     end
 
+    % ---- CUDA path: coerce inputs to what calc_toep_mex accepts -----------
+    % phi2 must be a complex single gpuArray. Each step is skipped when the
+    % input already has that form, so correctly prepared data is not copied.
+    % complex() adds an explicit zero imaginary part, because the library
+    % reads interleaved complex storage.
     if ~isa(phi2, 'gpuArray'), phi2 = gpuArray(phi2); end
     if ~strcmp(underlyingType(phi2), 'single'), phi2 = single(phi2); end
     if isreal(phi2), phi2 = complex(phi2); end
 
+    % traj must be a real single gpuArray (coordinates in radians).
     if ~isa(traj, 'gpuArray'), traj = gpuArray(traj); end
     if ~strcmp(underlyingType(traj), 'single'), traj = single(traj); end
     if ~isreal(traj)
         error('MR_AHA:calc_toep:complexTraj', 'traj must be real-valued.');
     end
 
+    % ---- Unmasked kernel ---------------------------------------------------
+    % The full upsampled grid is stored; any mask argument is discarded and
+    % the second output is [].
     is_masked = isfield(config, 'is_masked') && config.is_masked;
     if ~is_masked
         mask = [];
@@ -107,18 +122,27 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
         return
     end
 
+    % ---- Masked kernel -----------------------------------------------------
+    % Without a caller-supplied mask, derive it from the trajectory. The
+    % 1-based mask is returned as the second output so it can be passed to
+    % AHA_TOEPLITZ unchanged.
     if isempty(mask)
         mask = calc_mask(traj, config);       % derived from the trajectory
     end
     % The library indexes from 0. (int64 arithmetic on gpuArrays needs
     % R2023a+; double is exact for any index below 2^53.)
     mask0 = int64(double(gpuArray(mask(:))) - 1);
+    % num_masked is set from the mask so the config always matches it.
     config.num_masked = numel(mask0);
     phi2_toep = calc_toep_mex(phi2, traj, config, mask0);
 end
 
 function [phi2_toep, mask] = mr_calc_toep_metal(phi2, traj, config, mask)
 %MR_CALC_TOEP_METAL  Metal path: mlx-nufft in Python, then the library.
+
+    % ---- Inputs as ordinary arrays -----------------------------------------
+    % Metal works on host memory (unified memory on Apple silicon), so
+    % gpuArrays are gathered. phi2 becomes complex single, traj real single.
     if isa(phi2, 'gpuArray'), phi2 = gather(phi2); end
     if isa(traj, 'gpuArray'), traj = gather(traj); end
     phi2 = complex(single(phi2));
@@ -127,11 +151,20 @@ function [phi2_toep, mask] = mr_calc_toep_metal(phi2, traj, config, mask)
         error('MR_AHA:calc_toep:complexTraj', 'traj must be real-valued.');
     end
 
+    % ---- Hand the arrays to the Python package -----------------------------
+    % mr_to_numpy reverses the dimension order: MATLAB column-major
+    % [a, b, c] has the same memory layout as row-major (c, b, a), so NumPy
+    % sees the arrays without data movement. The second argument pins the
+    % number of dimensions so trailing singleton axes (e.g. L = 1) survive.
     stack = strcmpi(config.traj_type, 'stack');
     mr = mr_python();
     phi2_py = mr_to_numpy(phi2, 3 + stack);    % [Ntrajs,(Nkz),L,L] -> (L,L,(Nkz),Ntrajs)
     traj_py = mr_to_numpy(traj, 3);            % [Ntrajs,Nkx,ndim]  -> (ndim,Nkx,Ntrajs)
 
+    % ---- Mask --------------------------------------------------------------
+    % Masked: use or derive the 1-based mask, keep it as an int64 column for
+    % the second output, and pass the 0-based 1-D copy to Python. Unmasked:
+    % Python receives None and the second output is [].
     is_masked = isfield(config, 'is_masked') && config.is_masked;
     mask_py = py.None;
     if is_masked
@@ -144,6 +177,10 @@ function [phi2_toep, mask] = mr_calc_toep_metal(phi2, traj, config, mask)
     else
         mask = [];
     end
+    % ---- Compute ---------------------------------------------------------
+    % mr_aha.calc_toep (Python) runs the NUFFT and the library's
+    % mr_calc_toep_from_psf; mr_from_numpy converts the NumPy result back to a
+    % MATLAB array with the original column-major shape.
     out = mr.calc_toep(mr_py_config(config), phi2_py, traj_py, pyargs('mask', mask_py));
     phi2_toep = mr_from_numpy(out);
 end

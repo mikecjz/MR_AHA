@@ -157,6 +157,9 @@ static int g_atexit_registered = 0;
  */
 static int mex_op_find(uint64_t h)
 {
+    /* Linear scan: the registry holds a handful of operators at most. The
+     * handle is the operator pointer itself, compared as an integer so that a
+     * forged value is never dereferenced. */
     for (size_t i = 0; i < g_entries.size(); ++i)
         if ((uint64_t)(uintptr_t)g_entries[i]->op == h) return (int)i;
     return -1;
@@ -193,11 +196,16 @@ static int mex_op_device_valid(const mex_op_entry *e)
  */
 static int mex_op_release(mex_op_entry *e)
 {
+    /* Library side: full destroy when the primary context is intact,
+     * otherwise abandon (free only the non-primary devices). */
     const int stale = !mex_op_device_valid(e);
     if (stale)
         mr_op_abandon(e->op);
     else
         mr_op_destroy(e->op);
+    /* MATLAB side: drop the references to shared arrays (letting MATLAB free
+     * them when no variable uses them any more), the sentinel, and the
+     * persistent entry itself. */
     for (int k = 0; k < 3; ++k)
         if (e->keep[k]) mxGPUDestroyGPUArray(e->keep[k]);
     if (e->sentinel) mxDestroyArray(e->sentinel);
@@ -212,10 +220,16 @@ static int mex_op_release(mex_op_entry *e)
  */
 static void mex_op_remove(int i)
 {
+    /* Unregister before releasing, so the registry never lists a freed
+     * entry even if a later call raises. The primary ordinal is kept for the
+     * warning below because @p e is freed by mex_op_release. */
     mex_op_entry *e = g_entries[(size_t)i];
     const int primary = e->primary;
     g_entries.erase(g_entries.begin() + i);
     const int stale = mex_op_release(e);
+    /* Last operator gone: allow `clear mex` to unload the file again. The
+     * warning comes after all cleanup, so the registry stays consistent even
+     * when the warning is promoted to an error. */
     if (g_entries.empty() && mexIsLocked()) mexUnlock();
     if (stale)
         mexWarnMsgIdAndTxt(MR_ID ":staleDestroy",
@@ -230,6 +244,8 @@ static void mex_op_remove(int i)
  */
 static void mex_op_at_exit(void)
 {
+    /* Release in reverse creation order, without the stale-operator warning
+     * that mex_op_remove issues. */
     while (!g_entries.empty()) {
         mex_op_entry *e = g_entries.back();
         g_entries.pop_back();
@@ -247,6 +263,8 @@ static void mex_op_at_exit(void)
  */
 static mex_op_entry *mex_op_lookup(const mxArray *a, const char *cmd)
 {
+    /* Type check first so that the raw read below is well defined, then the
+     * registry lookup that rejects destroyed or forged handles. */
     if (!mxIsUint64(a) || mxGetNumberOfElements(a) != 1 || mxIsComplex(a))
         mexErrMsgIdAndTxt(MR_ID ":badHandle",
                           "%s: the operator handle must be a uint64 scalar.", cmd);
@@ -267,6 +285,9 @@ static mex_op_entry *mex_op_lookup(const mxArray *a, const char *cmd)
  */
 static void mex_op_require_device(const mex_op_entry *e, const char *cmd)
 {
+    /* 1) The current device must be the primary one: gpuArrays passed to
+     *    and returned from the operator live on the current device. Messages
+     *    report 1-based gpuDevice indices. */
     int cur = -1;
     if (cudaGetDevice(&cur) != cudaSuccess)
         mexErrMsgIdAndTxt(MR_ID ":cuda", "%s: cudaGetDevice failed: %s", cmd,
@@ -278,6 +299,8 @@ static void mex_op_require_device(const mex_op_entry *e, const char *cmd)
                           "gpuDevice(%d) again (which resets it, see below) or "
                           "delete the operator and create a new one.",
                           cmd, e->primary + 1, cur + 1, e->primary + 1);
+    /* 2) Same ordinal is not enough: a reset (or a switch away and back)
+     *    destroys the context, which the sentinel detects. */
     if (!mex_op_device_valid(e))
         mexErrMsgIdAndTxt(MR_ID ":deviceReset",
                           "%s: gpuDevice(%d) has been reset or deselected since "
@@ -296,6 +319,8 @@ static void mex_op_require_device(const mex_op_entry *e, const char *cmd)
 static void mex_op_infer_n_coils(const mxGPUArray *SEs, mr_config *cfg,
                                  int user_coils)
 {
+    /* SEs is `[Nx, Ny(, Nz), Ncoils]`: the coil count is the dimension right
+     * after the spatial ones, or 1 when MATLAB dropped a trailing singleton. */
     if (user_coils) return;
     const mwSize  nd   = mxGPUGetNumberOfDimensions(SEs);
     const mwSize *dims = mxGPUGetDimensions(SEs);
@@ -321,6 +346,8 @@ static void mex_op_opt_string(const mxArray *opts, const char *name, char *buf,
                               size_t len, const char *def)
 {
     const mxArray *f = mr_mex_field(opts, name);
+    /* Absent or empty: the default. Otherwise copy (failing when the string
+     * does not fit @p buf) and lower-case it for case-insensitive matching. */
     if (f == NULL) {
         snprintf(buf, len, "%s", def);
         return;
@@ -344,6 +371,7 @@ static double mex_op_opt_scalar(const mxArray *opts, const char *name, double de
 {
     const mxArray *f = mr_mex_field(opts, name);
     if (f == NULL) return def;
+    /* Stricter than the config readers: a real numeric/logical scalar. */
     if (mxGetNumberOfElements(f) != 1 || mxIsComplex(f) ||
         !(mxIsNumeric(f) || mxIsLogical(f)))
         mexErrMsgIdAndTxt(MR_ID ":usage", "opts.%s must be a real scalar.", name);
@@ -360,17 +388,21 @@ static double mex_op_opt_scalar(const mxArray *opts, const char *name, double de
 static void mex_op_parse_options(const mxArray *opts, mr_op_options *o,
                                  int devices[MR_OP_MAX_DEVICES])
 {
+    /* `[]` or a scalar struct; start from the library defaults. */
     if (!mxIsEmpty(opts) && !(mxIsStruct(opts) && mxGetNumberOfElements(opts) == 1))
         mexErrMsgIdAndTxt(MR_ID ":usage", "opts must be a scalar struct.");
     mr_op_options_defaults(o);
 
     char s[32];
+    /* Operator implementation: Toeplitz embedding (default) or the NUFFT
+     * reference operator. */
     mex_op_opt_string(opts, "method", s, sizeof(s), "toeplitz");
     if (strcmp(s, "toeplitz") == 0)   o->method = MR_OP_TOEPLITZ;
     else if (strcmp(s, "nufft") == 0) o->method = MR_OP_NUFFT;
     else mexErrMsgIdAndTxt(MR_ID ":method",
                            "method must be 'toeplitz' or 'nufft', not '%s'.", s);
 
+    /* Multi-device placement of the Toeplitz kernel (::mr_toep_dist). */
     mex_op_opt_string(opts, "toep_dist", s, sizeof(s), "auto");
     if (strcmp(s, "auto") == 0)           o->toep_dist = MR_TOEP_DIST_AUTO;
     else if (strcmp(s, "split") == 0)     o->toep_dist = MR_TOEP_DIST_SPLIT;
@@ -380,10 +412,15 @@ static void mex_op_parse_options(const mxArray *opts, mr_op_options *o,
                            "toep_dist must be 'auto', 'split', 'replicate' or "
                            "'broadcast', not '%s'.", s);
 
+    /* Device list: @p devices is caller storage that must outlive the
+     * ::mr_op_create call, since @p o only points to it. */
     const mxArray *d = mr_mex_field(opts, "devices");
     o->n_devices = d ? mr_mex_devices(d, devices, MR_ID ":devices") : 0;
     o->devices = (o->n_devices > 0) ? devices : NULL;
 
+    /* Share the caller's SEs / mask / phi2_toep on the primary device instead
+     * of copying them (default on); then the arrays are kept alive in the
+     * registry entry. NUFFT tuning: 0 selects the library defaults. */
     o->flags = (mex_op_opt_scalar(opts, "share_primary", 1.0) != 0.0)
                    ? MR_OP_SHARE_PRIMARY
                    : 0;
@@ -406,6 +443,7 @@ static void mex_op_parse_options(const mxArray *opts, mr_op_options *o,
 static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
                           const mxArray *prhs[])
 {
+    /* Argument count: the command plus six positional inputs. */
     if (nrhs != 7)
         mexErrMsgIdAndTxt(MR_ID ":usage",
                           "Usage: h = mr_aha_mex('create', SEs, phi2, traj, "
@@ -420,6 +458,7 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
     /* The operator always runs on MATLAB's device: gpuArrays live there. */
     cfg.gpu_device_id = -1;
 
+    /* Operator options; dev_buf backs opt.devices for the whole call. */
     mr_op_options opt;
     int dev_buf[MR_OP_MAX_DEVICES];
     mex_op_parse_options(mx_opts, &opt, dev_buf);
@@ -429,6 +468,9 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
     /* ---- Arrays --------------------------------------------------------- */
     /* phi2 and traj are read unless a finished kernel is supplied and both
      * are empty (they are not needed then). */
+    /* SEs is always required (complex single); its trailing dimension gives
+     * n_coils unless config.n_coils was set. mxGPUCreateFromMxArray also
+     * accepts host arrays and copies them to the current device. */
     const mxGPUArray *g_SEs  = mxGPUCreateFromMxArray(prhs[1]);
     mr_mex_check_complex_single(g_SEs, "SEs", MR_ID);
     mex_op_infer_n_coils(g_SEs, &cfg, user_coils);
@@ -451,12 +493,15 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
         destroy_arrays();                                                      \
         mexErrMsgIdAndTxt(__VA_ARGS__);                                        \
     } while (0)
+    /* Gram blocks and trajectory: needed to compute the Toeplitz kernel or to
+     * run the NUFFT operator; also read the trajectory extents. */
     if (!mxIsEmpty(prhs[2]) || !mxIsEmpty(prhs[3]) || mx_toep == NULL) {
         g_phi2 = mxGPUCreateFromMxArray(prhs[2]);
         g_traj = mxGPUCreateFromMxArray(prhs[3]);
         mr_mex_check_complex_single(g_phi2, "phi2", MR_ID);
         mr_mex_check_traj(g_traj, &cfg, &Ntrajs, &Nkx, MR_ID ":traj");
     }
+    /* Optional finished kernel (test hook): only meaningful for Toeplitz. */
     if (mx_toep != NULL) {
         if (opt.method != MR_OP_TOEPLITZ)
             MR_OP_CREATE_FAIL(MR_ID ":phi2Toep",
@@ -466,6 +511,9 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
         mr_mex_check_complex_single(g_toep, "phi2_toep", MR_ID);
     }
 
+    /* Mask: required for a masked Toeplitz kernel, 0-based int64 indices into
+     * the upsampled grid. num_masked defaults to the mask length; a
+     * user-supplied value must agree with it. An unneeded mask only warns. */
     if (cfg.is_masked) {
         if (opt.method == MR_OP_NUFFT)
             MR_OP_CREATE_FAIL(MR_ID ":maskedNufft",
@@ -496,6 +544,10 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
                            "the mask is ignored.");
     }
 
+    /* ---- Consistency checks against the completed configuration --------
+     * The element counts depend on n_coils / num_masked filled in above, so
+     * they run only after validation. phi2 holds one L x L block per readout
+     * (and per kz partition for a stack trajectory). */
     int rc = mr_config_validate(&cfg);
     if (rc != MR_SUCCESS) {
         destroy_arrays();
@@ -509,6 +561,8 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
     if (g_toep)
         mr_mex_check_numel(g_toep, mr_phi2_toep_size(&cfg), "phi2_toep", MR_ID);
 
+    /* Record MATLAB's current device: the operator's primary device, which
+     * apply / kernel later require to be current and unreset. */
     int primary = -1;
     if (cudaGetDevice(&primary) != cudaSuccess)
         MR_OP_CREATE_FAIL(MR_ID ":cuda", "cudaGetDevice failed: %s",
@@ -516,6 +570,8 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
 #undef MR_OP_CREATE_FAIL
 
     /* ---- Operator ------------------------------------------------------- */
+    /* Raw device pointers of the wrappers; NULL marks an input that was not
+     * supplied (the library then computes or skips it). */
     mr_op_inputs in;
     memset(&in, 0, sizeof(in));
     in.d_SEs  = (const mr_complex *)mxGPUGetDataReadOnly(g_SEs);
@@ -541,6 +597,8 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
     }
 
     /* ---- Registry entry ------------------------------------------------- */
+    /* mxCalloc'ed memory is freed automatically when the MEX call returns
+     * unless made persistent; the entry must outlive this call. */
     mex_op_entry *e = (mex_op_entry *)mxCalloc(1, sizeof(mex_op_entry));
     mexMakeMemoryPersistent(e);
     e->op      = op;
@@ -557,6 +615,7 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
     mxGPUDestroyGPUArray(s);
     mexMakeArrayPersistent(e->sentinel);
 
+    /* Shared mode hands ownership of the remaining wrappers to the entry. */
     if (share) {
         /* The operator reads these in place: keep them alive until destroy. */
         e->keep[0] = g_SEs;
@@ -569,6 +628,8 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
         if (g_mask) mxGPUDestroyGPUArray(g_mask);
     }
 
+    /* Register the exit handler once, lock the MEX file on the first live
+     * operator (see the file documentation), then publish the entry. */
     if (!g_atexit_registered) {
         mexAtExit(mex_op_at_exit);
         g_atexit_registered = 1;
@@ -576,6 +637,7 @@ static void mex_op_create(int nlhs, mxArray *plhs[], int nrhs,
     if (g_entries.empty() && !mexIsLocked()) mexLock();
     g_entries.push_back(e);
 
+    /* The handle returned to MATLAB is the operator pointer as uint64. */
     plhs[0] = mxCreateNumericMatrix(1, 1, mxUINT64_CLASS, mxREAL);
     *mxGetUint64s(plhs[0]) = (uint64_t)(uintptr_t)op;
 }
@@ -595,19 +657,25 @@ static void mex_op_apply(int nlhs, mxArray *plhs[], int nrhs,
                           "Usage: AhAx = mr_aha_mex('apply', h, x).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID ":usage", "Too many outputs.");
 
+    /* Resolve the handle and make sure the primary device is still usable. */
     mex_op_entry *e = mex_op_lookup(prhs[1], "apply");
     mex_op_require_device(e, "apply");
 
+    /* x: complex single with exactly ::mr_x_size elements (any shape). */
     const mxGPUArray *g_x = mxGPUCreateFromMxArray(prhs[2]);
     mr_mex_check_complex_single(g_x, "x", MR_ID);
     mr_mex_check_numel(g_x, mr_x_size(&e->cfg), "x", MR_ID);
 
+    /* Output has the same shape as x; left uninitialised because
+     * ::mr_op_execute overwrites every element. */
     const mwSize  nd   = mxGPUGetNumberOfDimensions(g_x);
     const mwSize *dims = mxGPUGetDimensions(g_x);
     mxGPUArray *g_out = mxGPUCreateGPUArray(nd, dims, mxSINGLE_CLASS, mxCOMPLEX,
                                             MX_GPU_DO_NOT_INITIALIZE);
     mxFree((void *)dims);
 
+    /* Enqueue A^H A x on the legacy default stream (see "Streams"). On error
+     * the wrappers are destroyed before mr_mex_fail, which does not return. */
     const int rc = mr_op_execute(e->op,
                                  (const mr_complex *)mxGPUGetDataReadOnly(g_x),
                                  (mr_complex *)mxGPUGetData(g_out));
@@ -617,6 +685,8 @@ static void mex_op_apply(int nlhs, mxArray *plhs[], int nrhs,
         mr_mex_fail(MR_ID, rc);
     }
 
+    /* Wrap the result as a MATLAB gpuArray (no copy); the mxGPUArray
+     * wrappers themselves are always destroyed. */
     plhs[0] = mxGPUCreateMxArrayOnGPU(g_out);
     mxGPUDestroyGPUArray(g_out);
     mxGPUDestroyGPUArray(g_x);
@@ -637,11 +707,13 @@ static void mex_op_info(int nlhs, mxArray *plhs[], int nrhs,
                           "Usage: info = mr_aha_mex('info', h).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID ":usage", "Too many outputs.");
 
+    /* No device check: info must work on stale operators too (`valid`). */
     mex_op_entry *e = mex_op_lookup(prhs[1], "info");
     mr_op_info_t in;
     const int rc = mr_op_info(e->op, &in);
     if (rc != MR_SUCCESS) mr_mex_fail(MR_ID, rc);
 
+    /* Field names of the returned 1x1 struct, in display order. */
     static const char *names[] = {
         "method", "n_devices", "devices", "coil_begin", "coil_count", "group",
         "n_split_coils", "peer_access", "peer_bandwidth_gbs", "primary",
@@ -660,6 +732,7 @@ static void mex_op_info(int nlhs, mxArray *plhs[], int nrhs,
         for (int k = 0; k < n; ++k) p[k] = (double)v[k];
         return a;
     };
+    /* Per-device rows (length n_devices) from ::mr_op_info_t ... */
     mxSetField(s, 0, "method",
                mxCreateString(in.method == MR_OP_NUFFT ? "nufft" : "toeplitz"));
     mxSetField(s, 0, "n_devices",  mxCreateDoubleScalar((double)n));
@@ -673,10 +746,12 @@ static void mex_op_info(int nlhs, mxArray *plhs[], int nrhs,
                mxCreateLogicalScalar(in.peer_access != 0));
     mxSetField(s, 0, "peer_bandwidth_gbs",
                mxCreateDoubleScalar(in.peer_bandwidth_gbs));
+    /* ... gateway-side state of the registry entry ... */
     mxSetField(s, 0, "primary", mxCreateDoubleScalar((double)e->primary));
     mxSetField(s, 0, "n_coils", mxCreateDoubleScalar((double)e->cfg.n_coils));
     mxSetField(s, 0, "share_primary", mxCreateLogicalScalar(e->shared != 0));
     mxSetField(s, 0, "valid", mxCreateLogicalScalar(mex_op_device_valid(e)));
+    /* ... and how the Toeplitz kernel was obtained, with timings. */
     mxSetField(s, 0, "toep_source",
                mxCreateString((in.toep_source >= 0 && in.toep_source <= 4)
                                   ? sources[in.toep_source]
@@ -708,12 +783,15 @@ static void mex_op_kernel(int nlhs, mxArray *plhs[], int nrhs,
         mexErrMsgIdAndTxt(MR_ID ":usage",
                           "Usage: Om = mr_aha_mex('kernel', h, k).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID ":usage", "Too many outputs.");
+    /* Handle, device and argument checks; k is a 0-based device position. */
     mex_op_entry *e = mex_op_lookup(prhs[1], "kernel");
     mex_op_require_device(e, "kernel");
     if (!(mxIsNumeric(prhs[2]) && mxGetNumberOfElements(prhs[2]) == 1))
         mexErrMsgIdAndTxt(MR_ID ":usage", "kernel: k must be a numeric scalar.");
     const int k = (int)mxGetScalar(prhs[2]);
 
+    /* The device list is needed to range-check k and to find the source
+     * ordinal for the peer copy. */
     mr_op_info_t in;
     int rc = mr_op_info(e->op, &in);
     if (rc != MR_SUCCESS) mr_mex_fail(MR_ID, rc);
@@ -724,10 +802,13 @@ static void mex_op_kernel(int nlhs, mxArray *plhs[], int nrhs,
         mexErrMsgIdAndTxt(MR_ID ":usage",
                           "kernel: the operator uses %d device(s); k = %d is out "
                           "of range.", in.n_devices, k + 1);
+    /* Device pointer of that device's kernel copy (owned by the operator). */
     const mr_complex *src = NULL;
     rc = mr_op_kernel(e->op, k, &src);
     if (rc != MR_SUCCESS) mr_mex_fail(MR_ID, rc);
 
+    /* Destination: a new gpuArray on the primary device, shaped like
+     * calc_toep's output. */
     mwSize dims[4];
     const mwSize nd = mr_mex_toep_dims(&e->cfg, dims);
     mxGPUArray *g = mxGPUCreateGPUArray(nd, dims, mxSINGLE_CLASS, mxCOMPLEX,
@@ -742,6 +823,7 @@ static void mex_op_kernel(int nlhs, mxArray *plhs[], int nrhs,
         mexErrMsgIdAndTxt(MR_ID ":cuda", "kernel: copy failed: %s",
                           cudaGetErrorString(ce));
     }
+    /* Hand the copy to MATLAB and drop the wrapper. */
     plhs[0] = mxGPUCreateMxArrayOnGPU(g);
     mxGPUDestroyGPUArray(g);
 }
@@ -758,6 +840,9 @@ static void mex_op_destroy(int nlhs, mxArray *plhs[], int nrhs,
         mexErrMsgIdAndTxt(MR_ID ":usage",
                           "Usage: mr_aha_mex('destroy', h).");
     if (nlhs > 0) mexErrMsgIdAndTxt(MR_ID ":usage", "destroy has no outputs.");
+    /* Idempotent: a well-typed handle that is not registered is a no-op, so
+     * the class destructor may call destroy more than once. No device check:
+     * stale operators must still be releasable. */
     if (!mxIsUint64(prhs[1]) || mxGetNumberOfElements(prhs[1]) != 1)
         mexErrMsgIdAndTxt(MR_ID ":badHandle",
                           "destroy: the operator handle must be a uint64 scalar.");
@@ -775,6 +860,7 @@ static void mex_op_destroy(int nlhs, mxArray *plhs[], int nrhs,
  */
 void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
 {
+    /* Read the command string; anything longer than the buffer is unknown. */
     if (nrhs < 1 || !mxIsChar(prhs[0]))
         mexErrMsgIdAndTxt(MR_ID ":usage",
                           "The first argument must be a command: 'create', "
@@ -783,6 +869,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     if (mxGetString(prhs[0], cmd, sizeof(cmd)) != 0)
         mexErrMsgIdAndTxt(MR_ID ":usage", "Unknown command.");
 
+    /* 'count' touches no GPU state, so it is answered before mxInitGPU. */
     if (strcmp(cmd, "count") == 0) {
         plhs[0] = mxCreateDoubleScalar((double)g_entries.size());
         return;
@@ -791,6 +878,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     /* mxInitGPU must run before any other MathWorks GPU API call. */
     mxInitGPU();
 
+    /* Dispatch to the command handlers. */
     if (strcmp(cmd, "create") == 0)       mex_op_create(nlhs, plhs, nrhs, prhs);
     else if (strcmp(cmd, "apply") == 0)   mex_op_apply(nlhs, plhs, nrhs, prhs);
     else if (strcmp(cmd, "info") == 0)    mex_op_info(nlhs, plhs, nrhs, prhs);

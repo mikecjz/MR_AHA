@@ -55,6 +55,14 @@ void mr_backend_clear_error(void);
 
 /**
  * @brief Return @p status after recording a location-tagged diagnostic.
+ *
+ * Contains a `return`, so it (and every macro built on it, including the
+ * backend check macros) may only be used in functions returning an
+ * `int` status, and it leaves the function immediately: anything allocated
+ * so far must be released before the check, or the caller must clean up.
+ * The `do { } while (0)` wrapper makes each macro a single statement, safe
+ * inside an unbraced `if`.
+ *
  * @param[in] status ::mr_status value to return.
  * @param[in] fmt    `printf`-style format string, followed by its arguments.
  */
@@ -109,7 +117,9 @@ struct mr_dims {
  */
 void mr_dims_from_config(const mr_config *cfg, mr_dims *d);
 
-/** @brief Integer ceiling division for launch-configuration arithmetic. */
+/** @brief Integer ceiling division for launch-configuration arithmetic
+ *         (number of blocks of size @p b covering @p a items; assumes
+ *         `a >= 0`, `b > 0`). */
 inline long long mr_ceil_div(long long a, long long b)
 {
     return (a + b - 1) / b;

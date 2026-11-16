@@ -9,7 +9,12 @@ function A = mr_from_numpy(p)
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % Transposing a C-contiguous (L, Nz, Ny, Nx) array gives an F-ordered
+    % (Nx, Ny, Nz, L) view of the same memory, which MATLAB converts to an
+    % array of that shape.
     t = p.T;                                   % F-ordered, MATLAB's shape
+    % Convert by NumPy dtype kind: complex/float -> single (the library's
+    % precision), signed/unsigned integer -> int64 (masks, indices).
     switch char(t.dtype.kind)
         case {'c', 'f'}
             A = single(t);

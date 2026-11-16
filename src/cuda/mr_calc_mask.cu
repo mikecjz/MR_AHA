@@ -64,8 +64,14 @@ __global__ void mr_k_mark_samples(float *d_marks, const float *d_traj,
                                   long long n_samples, int ndim, int m0, int m1,
                                   int m2, float s0, float s1, float s2)
 {
+    /* One thread per non-uniform sample. */
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_samples) return;
+    /* Per axis: scale radians to grid cells, round to the nearest cell, shift
+     * so that k = 0 lands on the centre index M/2 (centred order), wrap
+     * periodically (the C `%` can be negative, hence the fix-up), and
+     * accumulate the column-major linear index. Coordinate a of sample tid is
+     * at d_traj[tid + n_samples * a] (the coordinate axis is slowest). */
     const int   m[3]  = {m0, m1, m2};
     const float sc[3] = {s0, s1, s2};
     long long idx = 0, stride = 1;
@@ -101,10 +107,18 @@ __global__ void mr_k_mark_samples(float *d_marks, const float *d_traj,
 __global__ void mr_k_dilate_axis(float *d_out, const float *d_in, long long n,
                                  int m, long long stride, int r)
 {
+    /* One thread per grid element. Reads come from d_in and writes go to a
+     * separate d_out, so neighbouring threads never see partially filtered
+     * values (the filter cannot run in place). */
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
+    /* i = this element's coordinate along the filtered axis; base = the
+     * element with the same other coordinates and i = 0, so the neighbours
+     * along the axis are base + j * stride. */
     const int       i    = (int)((tid / stride) % m);
     const long long base = tid - (long long)i * stride;
+    /* Max over the 2r+1 neighbours i-r .. i+r, wrapped into [0, m). If
+     * 2r+1 > m some cells are visited twice, which is harmless for a max. */
     float v = d_in[tid];
     for (int d = -r; d <= r; ++d) {
         int j = (i + d) % m;
@@ -130,6 +144,9 @@ __global__ void mr_k_dilate_axis(float *d_out, const float *d_in, long long n,
 __global__ void mr_k_replicate_planes(int64_t *d_mask, long long n_plane,
                                       long long plane_size, int Mz)
 {
+    /* One thread per output entry of planes 1 .. Mz-1 (plane 0 is the
+     * compacted in-plane mask itself, written by thrust). Each thread only
+     * reads plane 0 and writes elsewhere, so the in-place update is safe. */
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     long long total = n_plane * (long long)(Mz - 1);
     if (tid >= total) return;
@@ -168,6 +185,11 @@ static int mr_dilate_box(float **d_a, float **d_b, const int m[3], int r,
                          cudaStream_t s)
 {
     if (r <= 0) return MR_SUCCESS;
+    /* A box max-filter is separable: filtering each axis in turn gives the
+     * max over the (2r+1)^d box. Each pass reads *d_a and writes *d_b, then
+     * the pointers swap so *d_a always holds the latest result. Degenerate
+     * axes (extent 1) are skipped, but their stride is still accumulated.
+     * All passes are queued on the same stream, so they run in order. */
     const long long n = (long long)m[0] * m[1] * m[2];
     long long stride = 1;
     for (int ax = 0; ax < 3; ++ax) {
@@ -222,11 +244,17 @@ static int mr_mask_marks(const mr_config *cfg, const float *d_traj,
                       three ? cfg->phi2_dim[2] : 1};
     cudaStream_t s = (cudaStream_t)cfg->stream;
 
+    /* d_a: the mark grid (returned to the caller); d_b: the dilation scratch,
+     * allocated only when a dilation is needed. */
     float *d_a = NULL, *d_b = NULL;
     if (cudaMalloc((void **)&d_a, (size_t)n * sizeof(float)) != cudaSuccess)
         MR_FAIL(MR_ERR_ALLOC, "failed to allocate the %lld-element mask grid",
                 (long long)n);
 
+    /* Step 1: zero the grid, then mark the nearest grid point of every
+     * sample. Errors here are recorded manually (not with MR_CUDA_CHECK)
+     * because d_a must be freed before returning. The scale per axis is
+     * M_a / (2*pi) cells per radian. */
     int rc = MR_SUCCESS;
     const long long ns  = (long long)Ntrajs * Nkx;
     const double    tau = 6.283185307179586; /* 2*pi */
@@ -246,6 +274,8 @@ static int mr_mask_marks(const mr_config *cfg, const float *d_traj,
     }
     if (rc != MR_SUCCESS) { cudaFree(d_a); return rc; }
 
+    /* Step 2: dilate the marks by the configured radius (radius 0 keeps only
+     * the nearest grid points). */
     const int radius = cfg->mask_radius;
     if (radius > 0) {
         if (cudaMalloc((void **)&d_b, (size_t)n * sizeof(float)) != cudaSuccess) {
@@ -284,6 +314,7 @@ static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
                              int64_t Ntrajs, int64_t Nkx, int64_t *d_mask,
                              int64_t *num_masked_out)
 {
+    /* Steps 1-2: the dilated 0/1 grid (in-plane only for a stack). */
     const int64_t n = mr_mask_grid_size(cfg);
     float *d_marks = NULL;
     int rc = mr_mask_marks(cfg, d_traj, Ntrajs, Nkx, &d_marks);
@@ -291,6 +322,10 @@ static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
 
     cudaStream_t s = (cudaStream_t)cfg->stream;
 
+    /* Step 3: stream compaction over the linear indices 0 .. n-1. With an
+     * output buffer, copy_if writes the marked indices (centred-order linear
+     * indices, as the mask format requires); without one (a size query),
+     * count_if only counts them. Both run on the caller's stream. */
     int64_t n_kept = 0;
     try {
         /* thrust reports failures by exception, which must not cross the C
@@ -314,7 +349,10 @@ static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
     }
     cudaFree(d_marks);
 
-    /* Stack: every kz plane shares the in-plane mask. */
+    /* Stack: every kz plane shares the in-plane mask. The in-plane indices
+     * already equal the plane-0 indices of the [Mx, My, Mz] grid; replicate
+     * them to planes 1 .. Mz-1 and scale the count (also for a count-only
+     * call, which must report the full-grid size). */
     if (cfg->traj_type == MR_TRAJ_STACK) {
         const int Mz = cfg->phi2_dim[2];
         if (d_mask != NULL && Mz > 1 && n_kept > 0) {
@@ -329,6 +367,10 @@ static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
         n_kept *= Mz;
     }
 
+    /* The mask is written asynchronously; wait so that it is complete (and
+     * any asynchronous error surfaces) when mr_calc_mask returns. A count-only
+     * call already synchronised inside thrust::count_if, which returns a
+     * host value. */
     if (d_mask != NULL) {
         const cudaError_t ce = (s != NULL) ? cudaStreamSynchronize(s)
                                            : cudaDeviceSynchronize();
@@ -378,6 +420,9 @@ extern "C" int mr_calc_mask(const mr_config *cfg, const float *d_traj,
                             int64_t Ntrajs, int64_t Nkx, int64_t *d_mask,
                             int64_t *num_masked_out)
 {
+    /* Public entry point: reset the error state, validate, switch to the
+     * configured device (if any), run, and restore the caller's device on
+     * every path, including failure. */
     mr_clear_error();
     MR_REQUIRE(num_masked_out != NULL, "mr_calc_mask: num_masked_out is NULL");
     *num_masked_out = 0;

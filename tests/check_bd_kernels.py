@@ -17,6 +17,13 @@ coil at a time. On CUDA the tiled kernels are also forced for every rank
 (``MR_AHA_CUDA_TILED_BD=1``), with coil batches of 1, 2 and 4
 (``MR_AHA_CUDA_BDT_NC``).
 
+Reference and tolerance: the generic kernels (one coil at a time) are the
+reference; every other kernel/grouping must agree to a relative 2-norm
+difference below ``1e-5``. The kernel ``phi2_toep`` is random (not a genuine
+Toeplitz kernel, and not Hermitian-derived from a Gram block): only the
+block-diagonal arithmetic and the triangle unpacking are under test, so any
+complex values will do. Exits with status 1 on any mismatch.
+
 Usage (from the repository root)::
 
     python tests/check_bd_kernels.py
@@ -30,10 +37,14 @@ from pathlib import Path
 
 import numpy as np
 
+# Import the in-tree package so the library just built is the one tested.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 
 import mr_aha  # noqa: E402
 
+# Ranks chosen around every dispatch boundary: small L, the end of the CUDA
+# specialised range (30), the Metal specialised range (32), just above it
+# (31, 33), and larger ranks served by the CUDA tiled kernels (up to 130).
 RANKS = (1, 2, 5, 7, 12, 16, 20, 30, 31, 32, 33, 47, 72, 130)
 
 
@@ -45,12 +56,18 @@ def apply(cfg, x, SEs, toep, mask, generic: bool, group: int = 4,
     device (CuPy) and back. @p env sets further environment variables for
     this application only.
     """
+    # The kernel family and coil group are selected through environment
+    # variables that the library reads when a plan is created. They are set
+    # just for this call and removed in `finally`, so nothing leaks into the
+    # next application.
     prefix = "MR_AHA_" + mr_aha.backend().upper()
     env = dict(env or {})
     env[prefix + "_GENERIC_BD"] = "1" if generic else "0"
     env[prefix + "_COIL_GROUP"] = str(group)
     os.environ.update(env)
     try:
+        # CUDA takes device arrays: copy the NumPy inputs to the current GPU
+        # and the result back. Metal takes host (unified-memory) NumPy arrays.
         if mr_aha.backend() == "cuda":
             import cupy as cp  # noqa: PLC0415
             dev = [None if a is None else cp.asarray(a) for a in (x, SEs, toep, mask)]
@@ -63,6 +80,8 @@ def apply(cfg, x, SEs, toep, mask, generic: bool, group: int = 4,
 
 def main() -> int:
     """Run every combination; return 1 on any mismatch."""
+    # Fixed seed; a small 2D problem (24 x 20 image, 5 coils) keeps the many
+    # combinations fast. 5 coils with group 2 or 4 leaves a smaller last group.
     rng = np.random.default_rng(1)
     n_dim, n_coils = (24, 20), 5
     worst, failed, count = 0.0, 0, 0
@@ -72,29 +91,41 @@ def main() -> int:
         variants += [(f"tiled nc={nc} group={g}", g,
                       {"MR_AHA_CUDA_TILED_BD": "1", "MR_AHA_CUDA_BDT_NC": str(nc)})
                      for nc in (1, 2, 4) for g in (1, 4)]
+    # Sweep rank x triangulation x masking.
     for L in RANKS:
         for tri in ("lower", "upper"):
             for masked in (False, True):
                 cfg = mr_aha.make_config("2D", n_dim, L, n_coils=n_coils,
                                          triangulation=tri, is_masked=masked)
+                # Masked case: a random, sorted, duplicate-free subset of two
+                # thirds of the upsampled grid (0-based linear indices); any
+                # subset exercises the masked kernels' index handling.
                 mask = None
                 if masked:
                     pad = int(np.prod([cfg.phi2_dim[i] for i in range(3)]))
                     mask = np.sort(rng.choice(pad, pad * 2 // 3, replace=False))
                     mask = mask.astype(np.int64)
                     cfg.num_masked = int(mask.size)
+                # Random complex64 inputs in the binding's row-major layout:
+                # x (L, Ny, Nx), maps (Ncoils, Ny, Nx) and a kernel of shape
+                # phi2_toep_shape(cfg) (masked or unmasked).
                 crandn = lambda *s: (rng.standard_normal(s) + 1j * rng.standard_normal(s)
                                      ).astype(np.complex64)
                 x = crandn(L, n_dim[1], n_dim[0])
                 SEs = crandn(n_coils, n_dim[1], n_dim[0])
                 toep = crandn(*mr_aha.phi2_toep_shape(cfg))
+                # Reference: the generic kernels.
                 b = apply(cfg, x, SEs, toep, mask, generic=True)
                 for label, group, env in variants:
+                    # On Metal only the generic kernels exist above the
+                    # specialised range, so there is nothing to compare.
                     if L > 33 and mr_aha.backend() != "cuda":  # CUDA-only ranks
                         break
                     a = apply(cfg, x, SEs, toep, mask, generic=False, group=group,
                               env=env)
                     count += 1
+                    # Relative difference in double precision; `not err < tol`
+                    # also counts a NaN result as a failure.
                     err = float(np.linalg.norm((a - b).astype(np.complex128).ravel())
                                 / np.linalg.norm(b.astype(np.complex128).ravel()))
                     worst = max(worst, err)

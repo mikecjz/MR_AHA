@@ -37,6 +37,10 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
                                      int64_t n_comp, const int64_t *d_mask,
                                      mr_complex *d_phi2_toep)
 {
+    /* Argument checks. The call finishes the triangular components
+     * [t0, t0 + n_comp) of the ntri = L(L+1)/2 stored components, so that
+     * the Python caller can process the kernel in chunks that respect the
+     * VkFFT size limit and memory. */
     mr_clear_error();
     MR_REQUIRE(cfg != NULL, "mr_calc_toep_from_psf: cfg is NULL");
     MR_REQUIRE(d_psf != NULL, "mr_calc_toep_from_psf: d_psf is NULL");
@@ -51,12 +55,17 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
         MR_REQUIRE(d_mask != NULL, "mr_calc_toep_from_psf: d_mask is required "
                    "when is_masked is set");
 
+    /* 32-bit thread indices in mr_kernels.metal: one volume, the component
+     * batch (grid y) and the masked count must each fit. */
     const int64_t pad = mr_pad_size(cfg);
     if (pad > 0xFFFFFFFFLL || n_comp > 0xFFFFFFFFLL ||
         (cfg->is_masked && cfg->num_masked > 0xFFFFFFFFLL))
         MR_FAIL(MR_ERR_UNSUPPORTED, "the Metal backend supports volumes of "
                 "fewer than 2^32 voxels (upsampled grid has %lld)", (long long)pad);
 
+    /* Autorelease pool for the call (also required by VkFFT), shared context,
+     * and the two reorder pipelines: centred -> natural before the FFT, and
+     * natural -> centred with scaling (or the masked gather) after it. */
     mr_metal_pool pool;
     const mr_metal_ctx *ctx = nullptr;
     if ((rc = mr_metal_context(&ctx)) != MR_SUCCESS) return rc;
@@ -68,7 +77,13 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
                                 &k_out)) != MR_SUCCESS)
         return rc;
 
-    /* Geometry of the centred inverse FFT, as in mr_toep_geom (CUDA). */
+    /* Geometry of the centred inverse FFT, as in mr_toep_geom (CUDA).
+     * 3D: one rank-3 transform per component, all three axes recentred.
+     * 2D / stack: rank-2 transforms over [Mx, My], one per kz plane and
+     * component (batch Mz * n_comp; Mz = 1 in 2D). A stack's kz axis is
+     * already Cartesian, so it is neither transformed nor recentred (shift
+     * 0). The scale 1/prod(M) covers only the transformed axes and makes the
+     * unnormalised VkFFT inverse a normalised one. */
     const int Mx = cfg->phi2_dim[0], My = cfg->phi2_dim[1], Mz = cfg->phi2_dim[2];
     const bool is3d = cfg->traj_type == MR_TRAJ_3D;
     mr_reorder r = {{Mx, My, Mz}, {Mx / 2, My / 2, is3d ? Mz / 2 : 0}};
@@ -78,7 +93,10 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
     const float scale =
         1.0f / (float)(is3d ? (double)Mx * My * Mz : (double)Mx * My);
 
-    /* Caller arrays. The output view covers the whole phi2_toep. */
+    /* Caller arrays. The output view covers the whole phi2_toep. The PSF
+     * holds n_comp centred volumes of pad values; the mask view is empty
+     * when unmasked. Only the output is a writeback view. Views release
+     * their buffers on return, so early returns need no cleanup. */
     const size_t c8 = sizeof(mr_complex);
     mr_metal_view psf, mask, out;
     if ((rc = mr_metal_view_make(ctx, d_psf, (size_t)(pad * n_comp) * c8, false,
@@ -90,7 +108,10 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
                                  (size_t)mr_phi2_toep_size(cfg) * c8, true, &out)))
         return rc;
 
-    /* Natural-order scratch, transformed in place by VkFFT. */
+    /* Natural-order scratch, transformed in place by VkFFT. Private storage:
+     * only the GPU touches it. The FFT plan is created per call (VkFFT
+     * compiles its kernels for a new size; see mr_metal_fft.cpp) and
+     * rejects batches of 2^31 values or more. */
     const NS::UInteger work_bytes = (NS::UInteger)(pad * n_comp) * c8;
     MTL::Buffer *work =
         ctx->device->newBuffer(work_bytes, MTL::ResourceStorageModePrivate);
@@ -104,10 +125,14 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
         return rc;
     }
 
+    /* All three steps go into one command buffer and one compute encoder;
+     * VkFFT appends its kernels to the same encoder, so the order is kept
+     * without extra synchronisation (as on the single CUDA stream). */
     MTL::CommandBuffer *cb = ctx->queue->commandBuffer();
     MTL::ComputeCommandEncoder *enc = cb->computeCommandEncoder();
 
-    /* Centred -> natural order. */
+    /* Centred -> natural order: the PSF's DC sits at floor(M/2), while the
+     * FFT expects it at index 0. 2-D grid of (pad, n_comp) threads. */
     enc->setComputePipelineState(k_nat);
     enc->setBuffer(work, 0, 0);
     mr_metal_bind(enc, psf, 1);
@@ -117,7 +142,12 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
     /* Unnormalised inverse FFT over the transformed axes. */
     rc = mr_metal_fft_encode(fft, cb, enc, work, true);
 
-    /* Natural -> centred order with 1/prod(M), or the mask gather. */
+    /* Natural -> centred order with 1/prod(M), or the mask gather. Masked:
+     * only the num_masked retained locations are read (back in centred
+     * order) and written to columns [t0, t0 + n_comp) of the
+     * [num_masked, ntri] output; the kernel takes t0 and binds the whole
+     * output. Unmasked: the output buffer is bound at the byte offset of
+     * component t0 instead. Skipped if the FFT could not be encoded. */
     if (rc == MR_SUCCESS) {
         enc->setComputePipelineState(k_out);
         if (cfg->is_masked) {
@@ -140,9 +170,13 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
             mr_metal_dispatch_2d(enc, k_out, (uint64_t)pad, (uint64_t)n_comp);
         }
     }
+    /* Close the encoder in every case; run and wait only if all encoded. */
     enc->endEncoding();
     if (rc == MR_SUCCESS) rc = mr_metal_wait(cb, "mr_calc_toep_from_psf");
 
+    /* Cleanup for success and failure; the GPU is idle at this point (the
+     * command buffer either completed or was never committed). The output
+     * is copied back only if the view had to fall back to a copy. */
     mr_metal_fft_destroy(fft);
     work->release();
     if (rc == MR_SUCCESS) mr_metal_view_finish(&out);
@@ -159,6 +193,9 @@ extern "C" int mr_calc_toep(const mr_config *cfg, const mr_complex *d_phi2,
 {
     (void)d_phi2; (void)d_traj; (void)Ntrajs; (void)Nkx; (void)d_mask;
     (void)d_phi2_toep;
+    /* Kept so that the Metal library exports the full C API (bindings link
+     * against the same symbols for both backends). The configuration is
+     * still validated so that an invalid one reports its real problem. */
     mr_clear_error();
     const int status = mr_config_validate(cfg);
     if (status != MR_SUCCESS) return status;

@@ -90,6 +90,7 @@ classdef aha_nufft_plan < handle
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % Geometry of the plan, readable by the caller (fixed at construction).
     properties (SetAccess = private)
         traj_type   % '2d', '3d' or 'stack'
         L           % number of ranks
@@ -98,6 +99,8 @@ classdef aha_nufft_plan < handle
         Nkx         % samples per readout
     end
 
+    % Backend state. On CUDA, t1/t2 are cufinufft_plan objects whose points
+    % are already set; on Metal only py is used.
     properties (Access = private)
         backend = 'cuda'
         ntr         % transforms per NUFFT call
@@ -109,6 +112,7 @@ classdef aha_nufft_plan < handle
 
     methods
         function obj = aha_nufft_plan(traj, config, varargin)
+            % Fields shared by both backends.
             obj.traj_type = lower(config.traj_type);
             obj.L         = double(config.L);
 
@@ -122,6 +126,9 @@ classdef aha_nufft_plan < handle
                 return
             end
 
+            % CUDA: the reference relies on cufinufft's own MATLAB interface,
+            % which is an optional build product (not part of the MR_AHA MEX
+            % files), so check for it with an actionable message.
             if exist('cufinufft_plan', 'file') ~= 2
                 error('MR_AHA:nufft:noCufinufft', ...
                       ['cufinufft''s MATLAB interface is not on the path. Build it ' ...
@@ -129,6 +136,11 @@ classdef aha_nufft_plan < handle
                        'folder holding cufinufft.mexa64.']);
             end
 
+            % cufinufft options: single precision, centred mode ordering
+            % (modeord 0, matching the library's centred arrays) and
+            % upsampfac 2. 'type1_opts' / 'type2_opts' apply to one plan only;
+            % every other name-value pair goes to both. MR_MERGE re-imposes
+            % floatprec and modeord, so callers cannot override them.
             opts = struct('floatprec', 'single', 'modeord', 0, 'upsampfac', 2.0);
             o1 = struct();
             o2 = struct();
@@ -142,13 +154,19 @@ classdef aha_nufft_plan < handle
             opts1 = mr_merge(opts, o1);
             opts2 = mr_merge(opts, o2);
 
+            % cufinufft_plan.setpts takes single gpuArrays.
             if ~isa(traj, 'gpuArray'), traj = gpuArray(traj); end
             traj = single(traj);
 
+            % Image size, and the NUFFT tolerance: config.eps if given, else 1e-6.
             n_dim = double(config.n_dim(:)).';
             tol   = 1e-6;
             if isfield(config, 'eps') && ~isempty(config.eps), tol = config.eps; end
 
+            % Per trajectory family: the image grid, the NUFFT mode grid, the
+            % batch size ntr (transforms per call) and the NUFFT dimension.
+            % 2D/3D batch the L ranks of one coil; 'stack' runs a 2D NUFFT on
+            % each of the Nz kz planes of each rank, so its batch is L*Nz.
             obj.Ntrajs = size(traj, 1);
             obj.Nkx    = size(traj, 2);
             switch obj.traj_type
@@ -172,6 +190,7 @@ classdef aha_nufft_plan < handle
                     error('MR_AHA:nufft:trajType', ...
                           'config.traj_type must be ''2D'', ''3D'' or ''stack''.');
             end
+            % The trajectory must have one coordinate per NUFFT dimension.
             if size(traj, 3) ~= ndim
                 error('MR_AHA:nufft:traj', 'traj must be [Ntrajs, Nkx, %d].', ndim);
             end
@@ -182,6 +201,9 @@ classdef aha_nufft_plan < handle
             yj = reshape(traj(:, :, 2), [], 1);
             if ndim == 3, zj = reshape(traj(:, :, 3), [], 1); else, zj = []; end
 
+            % Plan both transforms once and sort the points once per plan
+            % (setpts), so APPLY only executes. Type 2 (forward) uses sign -1,
+            % type 1 (adjoint) sign +1; neither is normalised.
             obj.t2 = cufinufft_plan(2, modes, -1, obj.ntr, tol, opts2);
             obj.t2.setpts(xj, yj, zj);
             obj.t1 = cufinufft_plan(1, modes, +1, obj.ntr, tol, opts1);
@@ -203,6 +225,8 @@ classdef aha_nufft_plan < handle
             %APPLY  AhAx = plan.apply(x, SEs, phi2); see AHA_NUFFT_PLAN.
             if strcmp(obj.backend, 'metal')
                 % Apple silicon: Python reference operator, ordinary arrays.
+                % Inputs become complex64 host arrays in the Python package's
+                % row-major layout (MR_TO_NUMPY); a stack's phi2 has 4 dimensions.
                 cs = @(a) complex(single(gather(a)));
                 stack = strcmp(obj.traj_type, 'stack');
                 AhAx = mr_from_numpy(obj.py.apply(mr_to_numpy(cs(x)), ...
@@ -212,6 +236,7 @@ classdef aha_nufft_plan < handle
                 return
             end
 
+            % Local copies of the geometry for readability.
             L      = obj.L;
             img    = obj.img_dim;
             Ntrajs = obj.Ntrajs;
@@ -236,6 +261,8 @@ classdef aha_nufft_plan < handle
                 P  = permute(reshape(phi2, [Ntrajs, L, L]), [2 3 1]);       % [m l t]
             end
 
+            % Accumulate A'A x = sum over coils of S_c^H F^H (Phi2) F S_c x,
+            % one coil at a time to bound the memory of the intermediates.
             AhAx = zeros([img, L], 'like', x);
             for c = 1:nc
                 % 1. Coil sensitivity, broadcast over the ranks. For a stack it
@@ -289,6 +316,9 @@ classdef aha_nufft_plan < handle
 
         function delete(obj)
             %DELETE  Free the cufinufft plans.
+
+            % Release whatever this backend created; the fields are empty for
+            % the other backend.
             if ~isempty(obj.t1) && isvalid(obj.t1), delete(obj.t1); end
             if ~isempty(obj.t2) && isvalid(obj.t2), delete(obj.t2); end
             if ~isempty(obj.py), obj.py.close(); end

@@ -49,8 +49,15 @@ function mask = calc_mask(traj, config)
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % ---- Arguments --------------------------------------------------------
+    % traj and config only; the mask depends on the sample positions, never
+    % on phi2 or the coil maps.
     narginchk(2, 2);
 
+    % ---- Metal path ---------------------------------------------------------
+    % No NUFFT is needed, so the MEX file does all the work on host
+    % (unified-memory) arrays. It returns 0-based int64 indices; +1 converts
+    % them to MATLAB's convention (int64 arithmetic works on host arrays).
     if strcmp(mr_backend(), 'metal')
         if isa(traj, 'gpuArray'), traj = gather(traj); end
         traj = single(traj);
@@ -61,6 +68,8 @@ function mask = calc_mask(traj, config)
         return
     end
 
+    % ---- CUDA path ----------------------------------------------------------
+    % traj must be a real single gpuArray; correctly typed input is not copied.
     if ~isa(traj, 'gpuArray'), traj = gpuArray(traj); end
     if ~strcmp(underlyingType(traj), 'single'), traj = single(traj); end
     if ~isreal(traj)

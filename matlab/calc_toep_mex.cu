@@ -38,6 +38,9 @@
  */
 void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
 {
+    /* ---- Argument count ------------------------------------------------
+     * phi2, traj and config are required; the mask is only needed (and only
+     * read) when config.is_masked is true. At most one output. */
     if (nrhs < 3 || nrhs > 4)
         mexErrMsgIdAndTxt(MR_ID,
                           "Usage: phi2_toep = calc_toep_mex(phi2, traj, "
@@ -45,21 +48,34 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     if (nlhs > 1)
         mexErrMsgIdAndTxt(MR_ID, "Too many output arguments.");
 
+    /* Initialise the MathWorks GPU API before any mxGPU* call. */
     mxInitGPU();
 
     /* ---- Configuration -------------------------------------------------- */
+    /* Library defaults for config.traj_type, overridden by the struct's
+     * fields (n_dim, phi2_dim, L, eps, mem_fraction, ...). */
     mr_config cfg;
     mr_mex_parse_config(prhs[2], &cfg, MR_ID);
 
     /* ---- Inputs --------------------------------------------------------- */
+    /* Borrow the inputs as read-only mxGPUArrays (no copy for gpuArrays).
+     * Each wrapper is released with mxGPUDestroyGPUArray at the end. */
     const mxGPUArray *g_phi2 = mxGPUCreateFromMxArray(prhs[0]);
     const mxGPUArray *g_traj = mxGPUCreateFromMxArray(prhs[1]);
     const mxGPUArray *g_mask = NULL;
 
+    /* phi2 must be complex single. traj must be real single [Ntrajs, Nkx,
+     * ndim] with ndim matching traj_type; its first two extents are read
+     * back here and passed to the library as Ntrajs and Nkx. */
     mr_mex_check_complex_single(g_phi2, "phi2", MR_ID);
     int64_t Ntrajs = 0, Nkx = 0;
     mr_mex_check_traj(g_traj, &cfg, &Ntrajs, &Nkx, MR_ID);
 
+    /* ---- Mask -----------------------------------------------------------
+     * For a masked kernel the library gathers phi2_toep at the given 0-based
+     * int64 linear indices of the upsampled grid. num_masked defaults to
+     * numel(mask); unlike AhA_Toeplitz_mex there is no explicit cross-check
+     * here. Without is_masked any fourth argument is simply not read. */
     if (cfg.is_masked) {
         if (nrhs < 4 || mxIsEmpty(prhs[3]))
             mexErrMsgIdAndTxt(MR_ID,
@@ -74,6 +90,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
             cfg.num_masked = (int64_t)mxGPUGetNumberOfElements(g_mask);
     }
 
+    /* Reject inconsistent configurations before any GPU work. */
     const int status = mr_config_validate(&cfg);
     if (status != MR_SUCCESS) mr_mex_fail(MR_ID, status);
 
@@ -82,12 +99,17 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     mr_mex_check_numel(g_phi2, Ntrajs * Nkz_eff * cfg.L * cfg.L, "phi2", MR_ID);
 
     /* ---- Output ------------------------------------------------------- */
+    /* Allocate phi2_toep as [Mx, My, (Mz,) (L^2+L)/2], or [num_masked,
+     * (L^2+L)/2] when masked. Uninitialised: the library writes every entry. */
     mwSize dims_out[4];
     const mwSize nd_out = mr_mex_toep_dims(&cfg, dims_out);
     mxGPUArray *g_out = mxGPUCreateGPUArray(nd_out, dims_out, mxSINGLE_CLASS,
                                             mxCOMPLEX, MX_GPU_DO_NOT_INITIALIZE);
 
     /* ---- Run ------------------------------------------------------------ */
+    /* Extract raw device pointers and run the pre-computation: pack the
+     * triangle of each Gram block, type-1 NUFFT onto the upsampled grid, then
+     * centred inverse FFT (and the optional mask gather). */
     const mr_complex *p_phi2 = (const mr_complex *)mxGPUGetDataReadOnly(g_phi2);
     const float      *p_traj = (const float *)mxGPUGetDataReadOnly(g_traj);
     const int64_t    *p_mask =
@@ -95,6 +117,8 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     mr_complex       *p_out  = (mr_complex *)mxGPUGetData(g_out);
     const int rc = mr_calc_toep(&cfg, p_phi2, p_traj, Ntrajs, Nkx, p_mask, p_out);
 
+    /* Error path: free every wrapper, then raise the library's diagnostic
+     * (mr_mex_fail does not return). */
     if (rc != MR_SUCCESS) {
         mxGPUDestroyGPUArray(g_out);
         mxGPUDestroyGPUArray(g_phi2);
@@ -103,6 +127,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
         mr_mex_fail(MR_ID, rc);
     }
 
+    /* Return the kernel to MATLAB as a gpuArray and drop the C wrappers. */
     plhs[0] = mxGPUCreateMxArrayOnGPU(g_out);
 
     mxGPUDestroyGPUArray(g_out);

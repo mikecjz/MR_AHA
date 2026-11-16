@@ -23,18 +23,26 @@
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+% Locate the repository from this script's own path, so it works from any
+% current directory. MR_AHA_MEX_DIR overrides the default build/matlab.
 mr_root = fileparts(fileparts(mfilename('fullpath')));
 mex_dir = getenv('MR_AHA_MEX_DIR');
 if isempty(mex_dir)
     mex_dir = fullfile(mr_root, 'build', 'matlab');
 end
+% Path: the MEX files, the MATLAB wrappers (matlab/) and the test functions.
 addpath(mex_dir, fullfile(mr_root, 'matlab'), fullfile(mr_root, 'tests'));
+% Optional independent NUFFT reference: cufinufft's MATLAB interface from the
+% build tree, only when explicitly requested and actually built.
 cufinufft_dir = fullfile(fileparts(mex_dir), 'finufft', 'matlab');
 if strcmp(getenv('MR_AHA_TEST_CUFINUFFT'), '1') && ...
         isfile(fullfile(cufinufft_dir, 'cufinufft_plan.m'))
     addpath(cufinufft_dir);
 end
+% 1) Public functions and the operator object against the stored references.
 check_reference_matlab(fullfile(mr_root, 'data', 'ref_mlx_mat'));
+% 2) The operator-object checks. Multi-GPU checks are opt-in ('auto' runs
+%    them when more than one GPU is visible; false disables them).
 if strcmp(getenv('MR_AHA_TEST_MGPU'), '1')
     check_op_matlab('multi', 'auto');
 else

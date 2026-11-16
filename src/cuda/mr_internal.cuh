@@ -21,6 +21,24 @@
 
 #include <cstdio>
 
+/*
+ * Error-propagation idiom of the backend
+ * --------------------------------------
+ * Every internal function returns an ::mr_status (`int`, 0 on success,
+ * negative on failure) and reports the human-readable cause through the
+ * thread-local message of ::mr_set_error / ::mr_last_error. The macros below
+ * wrap one library call each: on failure they format a message naming the
+ * call text (`#call`), the source location and the library's own error code
+ * or string, then `return` the matching ::mr_status from the *enclosing*
+ * function (through ::MR_FAIL). Consequences for the callers:
+ *  - they may only be used in functions returning an `int` status;
+ *  - they perform no cleanup: a function that owns resources at the point of
+ *    failure either relies on its caller to release them (the operator keeps
+ *    every handle in its ::mr_op_dev slots, freed by `mr_op_release`) or uses
+ *    an explicit `cudaError_t ce` chain and releases before failing;
+ *  - the `do { ... } while (0)` wrapper makes each macro a single statement,
+ *    safe inside an un-braced `if`.
+ */
 /* ------------------------------------------------------------------------ */
 /* CUDA / cuFFT / cufinufft error checks                                    */
 /* ------------------------------------------------------------------------ */
@@ -53,6 +71,14 @@
                     __LINE__, mr_err_);                                        \
     } while (0)
 
+/*
+ * Kernel launches (`<<<...>>>`) return no status: configuration errors
+ * (bad grid size, too much shared memory, missing image for the GPU
+ * architecture) are only recorded as the runtime's (non-sticky) "last error".
+ * MR_KERNEL_CHECK reads and clears it right after a launch. It does not
+ * synchronise, so faults that happen *while* the kernel runs surface later,
+ * at the next synchronising call on that stream.
+ */
 /** @brief Check for a pending asynchronous kernel-launch error. */
 #define MR_KERNEL_CHECK(name)                                                  \
     do {                                                                       \
@@ -62,6 +88,19 @@
                     name, __FILE__, __LINE__, cudaGetErrorString(mr_err_));    \
     } while (0)
 
+/*
+ * Index conventions used by the helpers below
+ * -------------------------------------------
+ * The public arrays (`phi2_toep`, masks, images) are stored in *centred*
+ * order: index k of an axis of extent M stands for the signed coordinate
+ * k - floor(M/2), so the DC term sits in the middle. cuFFT works in *natural*
+ * (FFT) order, where index j stands for coordinate j for j < M - floor(M/2)
+ * and j - M otherwise. Converting indices on the fly with these helpers is
+ * what lets the kernels skip explicit fftshift / ifftshift passes. Both
+ * mappings are cyclic shifts by c = floor(M/2) and are each other's inverse
+ * for every M (odd or even); the single conditional add / subtract replaces
+ * a modulo, which is expensive on the GPU.
+ */
 /* ------------------------------------------------------------------------ */
 /* Small device-side utilities                                              */
 /* ------------------------------------------------------------------------ */
@@ -79,6 +118,8 @@
  */
 __host__ __device__ __forceinline__ int mr_cent2nat(int k, int M, int c)
 {
+    /* j in [-c, M - c); wrap the negative coordinates to the top of the
+     * natural-order axis. */
     int j = k - c;
     return (j < 0) ? (j + M) : j;
 }
@@ -92,6 +133,7 @@ __host__ __device__ __forceinline__ int mr_cent2nat(int k, int M, int c)
  */
 __host__ __device__ __forceinline__ int mr_nat2cent(int j, int M, int c)
 {
+    /* k in [c, M + c); wrap the overflow back to the bottom. */
     int k = j + c;
     return (k >= M) ? (k - M) : k;
 }
@@ -114,19 +156,41 @@ __host__ __device__ __forceinline__ int mr_tri_offset(int i, int j, int L,
                                                       int tri_upper,
                                                       int *conj_out)
 {
+    /* Packed storage of one Hermitian L x L block (A_ji = conj(A_ij)): only
+     * one triangle, including the diagonal, is kept, column by column
+     * (column-major packing, as ::mr_triangulation documents). A request for
+     * an element of the other triangle is answered with its mirror image,
+     * whose conjugate is the requested value; diagonal elements are never
+     * conjugated. */
     int r = i, c = j, cj = 0;
     if (tri_upper) {
         /* Stored elements satisfy r <= c. */
         if (r > c) { int t = r; r = c; c = t; cj = 1; }
         *conj_out = cj;
+        /* Upper, column-major: columns 0..c-1 hold 1 + 2 + ... + c =
+         * c(c+1)/2 entries, and row r is the r-th entry of column c. */
         return c * (c + 1) / 2 + r;
     }
     /* Lower triangle: stored elements satisfy r >= c. */
     if (r < c) { int t = r; r = c; c = t; cj = 1; }
     *conj_out = cj;
+    /* Lower, column-major: column k holds rows k..L-1 (L - k entries), so
+     * columns 0..c-1 hold sum_{k<c} (L - k) = cL - c(c-1)/2 entries, and row
+     * r is the (r - c)-th entry of column c. */
     return c * L - c * (c - 1) / 2 + (r - c);
 }
 
+/*
+ * The functions below are implemented in different translation units of the
+ * CUDA backend (mr_calc_toep.cu, mr_toep_mgpu.cu, mr_op.cu, mr_aha.cu,
+ * mr_nufft_op.cu) and are declared here so that they can call each other
+ * without being exported. They follow the conventions of the public API
+ * (::mr_status return codes, ::mr_last_error messages, device pointers in
+ * the ::mr_complex / column-major layouts of include/mr_aha/mr_aha.h) but,
+ * unlike the public entry points, most of them neither clear the previous
+ * error nor restore the caller's current device: that is the job of the
+ * public wrapper that calls them.
+ */
 /* ------------------------------------------------------------------------ */
 /* Internal entry points shared between translation units                   */
 /* ------------------------------------------------------------------------ */

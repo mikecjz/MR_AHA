@@ -10,6 +10,8 @@ function b = mr_backend()
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % The backend is fixed at build time, so it is queried once per session.
+    % exist(...) == 3 means a MEX file of that name is on the path.
     persistent cached
     if isempty(cached)
         if exist('mr_backend_mex', 'file') == 3

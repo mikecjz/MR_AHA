@@ -63,15 +63,24 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % ---- Arguments and backend ------------------------------------------
+    % The backend decides where arrays must live: gpuArrays for CUDA,
+    % ordinary (unified-memory) arrays for Metal.
     narginchk(4, 5);
     metal = strcmp(mr_backend(), 'metal');
 
+    % Coerce the three data arrays to complex single on the backend's side;
+    % shapes are not touched here, the MEX file checks element counts.
     x         = mr_to_complex_single(x,         'x',         metal);
     SEs       = mr_to_complex_single(SEs,       'SEs',       metal);
     phi2_toep = mr_to_complex_single(phi2_toep, 'phi2_toep', metal);
 
+    % Infer the coil count from SEs unless config.n_coils was given.
     config = mr_fill_n_coils(config, SEs);
 
+    % ---- Unmasked call ---------------------------------------------------
+    % No mask: only valid for an unmasked config (a masked phi2_toep cannot
+    % be placed on the grid without its indices).
     if nargin < 5 || isempty(mask)
         if isfield(config, 'is_masked') && config.is_masked
             error('MR_AHA:AhA_Toeplitz:missingMask', ...
@@ -79,6 +88,9 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
         end
         AhAx = AhA_Toeplitz_mex(x, SEs, phi2_toep, config);
     else
+        % ---- Masked call -------------------------------------------------
+        % Convert the 1-based MATLAB mask to the 0-based int64 column the MEX
+        % file requires, on the backend's side, and set num_masked to match.
         % The library indexes from 0; MATLAB indexes from 1.
         if metal
             mask = int64(gather(mask(:))) - 1;
@@ -96,11 +108,15 @@ function a = mr_to_complex_single(a, name, metal)
 %MR_TO_COMPLEX_SINGLE  Coerce an array to complex single on the backend's side:
 %   a gpuArray for CUDA, an ordinary array for Metal. Emits no copy when the
 %   input already has the required form.
+
+    % Placement: gather for Metal, upload for CUDA (no-op if already there).
     if metal
         if isa(a, 'gpuArray'), a = gather(a); end
     elseif ~isa(a, 'gpuArray')
         a = gpuArray(a);
     end
+    % Precision: the library is single precision only. underlyingType works
+    % for both gpuArrays and ordinary arrays.
     if ~strcmp(underlyingType(a), 'single')
         a = single(a);
     end
@@ -108,6 +124,7 @@ function a = mr_to_complex_single(a, name, metal)
         % The library always reads interleaved complex storage.
         a = complex(a);
     end
+    % Reject empty inputs here, with an error that names the argument.
     if isempty(a)
         error('MR_AHA:AhA_Toeplitz:emptyInput', '%s must not be empty.', name);
     end
@@ -116,9 +133,14 @@ end
 function config = mr_fill_n_coils(config, SEs)
 %MR_FILL_N_COILS  Derive .n_coils from the trailing dimension of SEs.
 %   An explicit value already present in config is never overwritten.
+
+    % Respect an explicit, non-empty config.n_coils.
     if isfield(config, 'n_coils') && ~isempty(config.n_coils)
         return
     end
+    % SEs is [spatial dims..., Ncoils]; '2D' has two spatial axes, '3D' and
+    % 'stack' three. The coil axis is the one right after them, and is 1
+    % when MATLAB has dropped it as a trailing singleton.
     if strcmpi(config.traj_type, '2D')
         n_spatial = 2;
     else
