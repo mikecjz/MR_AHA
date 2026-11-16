@@ -48,6 +48,25 @@ Toeplitz blocks in ``phi2_toep``. In NumPy terms, with a row-major
 Gram blocks stored ``[L, L, Ntrajs, Nz]`` and read with h5py (row-major
 ``(Nz, Ntrajs, L, L)``) is passed as ``P.transpose(2, 3, 0, 1)`` (plus a kz
 fftshift if their kz order is natural).
+
+Backends
+--------
+Which array library is used is decided at run time by
+:func:`mr_aha.backend`: on **CUDA** every array is a CuPy device array and
+the library receives device pointers; on **Metal** every array is a NumPy
+array and the library receives host addresses in unified memory. The
+private helpers :func:`_xp` and :func:`_ptr` implement that switch; all
+public functions go through them.
+
+Calling pattern
+---------------
+Every public function follows the same structure: validate sizes against
+the configuration (in Python, so that errors name the argument and mention
+the reversed shapes), allocate the output with the backend's array module
+when none is given, convert each array to a raw pointer with :func:`_ptr`
+(which also checks type, dtype and contiguity), call the C entry point, and
+turn a non-zero status into :class:`MRError` with :func:`mr_aha._lib.check`.
+No array data is ever copied or transposed by this module.
 """
 
 from __future__ import annotations
@@ -56,6 +75,7 @@ import ctypes
 import numbers
 from typing import Optional, Sequence
 
+# Everything that touches the C ABI comes from the ctypes binding.
 from ._lib import (
     DEFAULT_MASK_RADIUS,
     OP_ALL_DEVICES,
@@ -75,6 +95,7 @@ from ._lib import (
     lib,
 )
 
+# Public names of this module (re-exported by mr_aha/__init__.py).
 __all__ = [
     "DEFAULT_MASK_RADIUS",
     "MRConfig",
@@ -101,6 +122,8 @@ def _cupy():
     Raises:
         ImportError: If CuPy is not installed.
     """
+    # Imported on first use only: the Metal backend and CPU-only tooling
+    # (docs, config building) must work without CuPy installed.
     try:
         import cupy  # noqa: PLC0415
     except ImportError as exc:  # pragma: no cover - environment dependent
@@ -119,6 +142,9 @@ def _xp():
         :mod:`cupy` for the CUDA backend (arrays live in GPU memory) or
         :mod:`numpy` for the Metal backend (Apple silicon: arrays are ordinary
         host arrays in unified memory, which the GPU reads in place).
+
+    Raises:
+        ImportError: On the CUDA backend when CuPy is not installed.
     """
     if backend() == "cuda":
         return _cupy()
@@ -146,23 +172,38 @@ def _ptr(array, name: str, dtype, allow_none: bool = False):
         TypeError: If the array is not of the backend's array type or does not
             have the required dtype.
         ValueError: If the array is not C-contiguous.
+
+    Note:
+        Only type, dtype and contiguity are checked here; the element count
+        is checked by the callers (:func:`_check_size`). On CUDA the array is
+        assumed to live on the device the library will use; that is not
+        checked.
     """
+    # --- NULL handling: optional arguments (mask, ...) map to a C NULL. ---
     if array is None:
         if allow_none:
             return None
         raise TypeError(f"{name} must not be None")
+    # --- Array type must match the backend (CuPy on CUDA, NumPy on Metal);
+    #     a host array on CUDA would otherwise pass a host address as a
+    #     device pointer. ---
     xp = _xp()
     if not isinstance(array, xp.ndarray):
         raise TypeError(
             f"{name} must be a {xp.__name__}.ndarray for the {backend()} "
             f"backend, got {type(array).__name__}"
         )
+    # --- Exact dtype: the C side reinterprets the memory, so no implicit
+    #     casting is possible (complex64 == mr_complex, float32, int64). ---
     if array.dtype != xp.dtype(dtype):
         raise TypeError(f"{name} must have dtype {xp.dtype(dtype)}, got {array.dtype}")
+    # --- C-contiguity: the library indexes the buffer densely; a strided
+    #     view would be read as if it were packed. ---
     if not array.flags.c_contiguous:
         raise ValueError(
             f"{name} must be C-contiguous; call {xp.__name__}.ascontiguousarray first"
         )
+    # --- Raw address: host address for NumPy, device pointer for CuPy. ---
     if xp.__name__ == "numpy":
         return array.ctypes.data
     return array.data.ptr
@@ -214,13 +255,24 @@ def make_config(
         A populated and validated :class:`MRConfig`.
 
     Raises:
-        ValueError: If ``n_dim`` or ``phi2_dim`` has the wrong length.
+        ValueError: If ``n_dim`` or ``phi2_dim`` has the wrong length, or a
+            string argument (``traj_type``, ``triangulation``) is unknown.
+        TypeError: If ``stream`` is not ``None``, an int or an object with
+            ``.ptr``.
         MRError: If the library rejects the configuration.
+
+    Note:
+        ``is_masked=True`` with ``num_masked=0`` is accepted here (the mask
+        usually does not exist yet); the count is filled in later by
+        :func:`calc_toep` / :func:`create_op` from the mask's size.
     """
+    # --- Library defaults for this trajectory family (also sets
+    #     n_spatial: 2 for '2D', 3 otherwise, and every size to 1). ---
     tt = TrajType.parse(traj_type)
     cfg = MRConfig()
     check(lib.mr_config_defaults(ctypes.byref(cfg), tt), "mr_config_defaults")
 
+    # --- Image size: exactly n_spatial entries, column-major order. ---
     n_spatial = cfg.n_spatial
     n_dim = [int(v) for v in n_dim]
     if len(n_dim) != n_spatial:
@@ -229,6 +281,8 @@ def make_config(
             f"got {len(n_dim)}"
         )
 
+    # --- Upsampled Toeplitz grid: 2x oversampling by default, except the
+    #     already-Cartesian kz axis of a stack, which is not upsampled. ---
     if phi2_dim is None:
         phi2_dim = [2 * v for v in n_dim]
         if tt == TrajType.STACK:
@@ -240,10 +294,13 @@ def make_config(
             f"phi2_dim must have {n_spatial} entries, got {len(phi2_dim)}"
         )
 
+    # --- Copy the sizes in; entries beyond n_spatial stay 1 (defaults). ---
     for i in range(n_spatial):
         cfg.n_dim[i] = n_dim[i]
         cfg.phi2_dim[i] = phi2_dim[i]
 
+    # --- Scalar fields, coerced to the C types of the struct (bools to 0/1,
+    #     strings to enum values, the stream object to a raw handle). ---
     cfg.L = int(L)
     cfg.triangulation = Triangulation.parse(triangulation)
     cfg.is_masked = 1 if is_masked else 0
@@ -258,6 +315,8 @@ def make_config(
 
     # A masked configuration may be created before its mask exists (e.g. to
     # call calc_mask); num_masked is then filled in by calc_toep.
+    # Validation runs on a throw-away copy so that the returned cfg keeps
+    # is_masked set.
     probe = MRConfig.from_buffer_copy(cfg)
     if probe.is_masked and probe.num_masked == 0:
         probe.is_masked = 0
@@ -274,11 +333,18 @@ def _stream_ptr(stream):
 
     Returns:
         The stream handle as an ``int``, or ``None`` for the default stream.
+        A zero handle (CuPy's null stream) is also mapped to ``None``.
+
+    Raises:
+        TypeError: If ``stream`` is none of the above.
     """
+    # No stream: the library uses the CUDA default stream (NULL).
     if stream is None:
         return None
+    # Raw handle given as an integer address.
     if isinstance(stream, int):
         return stream or None
+    # Stream objects (cupy.cuda.Stream, ExternalStream, ...) expose .ptr.
     ptr = getattr(stream, "ptr", None)
     if ptr is None:
         raise TypeError("stream must be None, an int handle, or expose a .ptr")
@@ -292,7 +358,8 @@ def num_tri(L: int) -> int:
         L: Rank.
 
     Returns:
-        ``L * (L + 1) // 2``.
+        ``L * (L + 1) // 2`` (0 when ``L <= 0``), computed by the library's
+        ``mr_num_tri``.
     """
     return int(lib.mr_num_tri(int(L)))
 
@@ -307,16 +374,26 @@ def phi2_toep_shape(cfg: MRConfig) -> tuple:
         ``(ntri, num_masked)`` when masked, else ``(ntri, Mz, My, Mx)`` for a
         3D/stack operator or ``(ntri, My, Mx)`` for a 2D one -- i.e. the
         column-major shapes of the documentation, reversed.
+
+    Note:
+        For a masked configuration ``cfg.num_masked`` must already be set
+        (it is 0 straight after :func:`make_config`).
     """
+    # Leading axis: one packed triangular component per row-major slab.
     ntri = num_tri(cfg.L)
+    # Masked: one value per retained grid location.
     if cfg.is_masked:
         return (ntri, int(cfg.num_masked))
+    # Unmasked: the full upsampled grid, spatial axes reversed for row-major.
     dims = [cfg.phi2_dim[i] for i in range(cfg.n_spatial)]
     return tuple([ntri] + list(reversed(dims)))
 
 
 def _check_size(array, expected: int, name: str) -> None:
     """Verify an array's element count.
+
+    Only the total size is compared, not the shape: any shape with the right
+    number of elements is accepted, because the C API sees a flat buffer.
 
     Args:
         array: The CuPy array to check.
@@ -347,12 +424,16 @@ def _check_traj(cfg: MRConfig, traj):
     Raises:
         ValueError: If ``traj`` is not shaped ``(ndim, Nkx, Ntrajs)``.
     """
+    # Coordinates per sample: (kx, ky, kz) only for a fully 3D trajectory;
+    # 2D and stack trajectories carry (kx, ky) (kz of a stack is Cartesian).
     ndim_traj = 3 if cfg.traj_type == TrajType.THREE_D else 2
     if traj.ndim != 3 or traj.shape[0] != ndim_traj:
         raise ValueError(
             f"traj must be shaped (ndim, Nkx, Ntrajs) with ndim = {ndim_traj}, "
             f"got {traj.shape}"
         )
+    # Unlike the other arrays, the shape (not just the size) is checked,
+    # because Ntrajs and Nkx are read from it.
     _, Nkx, Ntrajs = traj.shape
     return int(Ntrajs), int(Nkx)
 
@@ -396,12 +477,16 @@ def calc_mask(cfg: MRConfig, traj, *, radius: Optional[int] = None):
         ValueError: If ``traj`` is malformed.
         MRError: If the library reports a failure.
     """
+    # --- Validate the trajectory and override the radius on a private copy
+    #     of the configuration. ---
     xp = _xp()
     Ntrajs, Nkx = _check_traj(cfg, traj)
     c = MRConfig.from_buffer_copy(cfg)  # private copy; the caller's is untouched
     if radius is not None:
         c.mask_radius = int(radius)
 
+    # --- Worst-case output buffer: every upsampled grid point kept
+    #     (mr_pad_size entries), plus a host int64 for the actual count. ---
     buf = xp.empty(int(lib.mr_pad_size(ctypes.byref(c))), dtype=xp.int64)
     n = ctypes.c_int64(0)
     check(
@@ -415,6 +500,7 @@ def calc_mask(cfg: MRConfig, traj, *, radius: Optional[int] = None):
         ),
         "mr_calc_mask",
     )
+    # --- Shrink to the retained count. ---
     mask = buf[: n.value].copy()  # shrink to fit and release the worst case
     del buf
     return mask
@@ -438,10 +524,21 @@ def _check_gram(cfg: MRConfig, phi2, traj, mask):
 
     Raises:
         ValueError: If an array has the wrong size or a mask is missing.
+        MRError: If the completed configuration fails ``mr_config_validate``
+            (e.g. the mask is larger than the upsampled grid).
+
+    Note:
+        This mutates the caller's ``cfg`` (``num_masked``) on purpose, so that
+        the same configuration can then be used with :func:`aha_toeplitz`
+        and :func:`phi2_toep_shape`.
     """
+    # --- Trajectory shape and Gram-block size: L*L blocks per readout (and
+    #     per kz encode of a stack, Nkz == Mz). ---
     Ntrajs, Nkx = _check_traj(cfg, traj)
     nkz = cfg.phi2_dim[2] if cfg.traj_type == TrajType.STACK else 1
     _check_size(phi2, cfg.L * cfg.L * nkz * Ntrajs, "phi2")
+    # --- Masked mode: a mask is mandatory; num_masked is either completed
+    #     from it (and the now-complete cfg re-validated) or must agree. ---
     if cfg.is_masked:
         if mask is None:
             raise ValueError("cfg.is_masked is set, so a mask is required")
@@ -484,17 +581,28 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
             then the C library finishes; see :mod:`mr_aha._psf`).
             ``'finufft'`` uses CPU FINUFFT for the same two-stage path, for
             validation.
+
     Returns:
         The ``complex64`` array ``phi2_toep`` (CuPy on CUDA, NumPy on Metal),
         shaped as described by :func:`phi2_toep_shape`.
 
     Raises:
-        ValueError: If an array has the wrong size or a mask is missing.
+        ValueError: If an array has the wrong size or a mask is missing, or
+            ``nufft`` names an unknown engine.
+        ImportError: If the selected NUFFT engine is not installed.
         MRError: If the library reports a failure.
+
+    Note:
+        In masked mode ``cfg.num_masked`` is filled in from ``mask`` when it
+        is 0 (the caller's ``cfg`` is modified).
     """
+    # --- Validate inputs (completes cfg.num_masked when masked). ---
     xp = _xp()
     Ntrajs, Nkx = _check_gram(cfg, phi2, traj, mask)
 
+    # --- Output: allocate with the row-major kernel shape, or check the
+    #     caller's buffer by size (its dtype/contiguity are checked by
+    #     _ptr below). ---
     shape = phi2_toep_shape(cfg)
     expected = int(lib.mr_phi2_toep_size(ctypes.byref(cfg)))
     if out is None:
@@ -502,6 +610,8 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
     else:
         _check_size(out, expected, "out")
 
+    # --- Choose where the type-1 NUFFT runs: inside the library (CUDA
+    #     default) or in Python via mr_aha._psf (Metal default, or forced). ---
     if nufft is None:
         nufft = "library" if backend() == "cuda" else "mlx"
     if nufft != "library":
@@ -512,6 +622,8 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
         calc_toep_two_stage(cfg, phi2, traj, mask, out, nufft, xp, _ptr)
         return out
 
+    # --- One-shot library path: mr_calc_toep does the NUFFT, inverse FFT,
+    #     scaling and mask gather on the GPU, writing straight into `out`. ---
     check(
         lib.mr_calc_toep(
             ctypes.byref(cfg),
@@ -554,7 +666,13 @@ def aha_toeplitz(cfg: MRConfig, x, SEs, phi2_toep, mask=None, out=None):
     Raises:
         ValueError: If an array has the wrong size or a mask is missing.
         MRError: If the library reports a failure.
+
+    Note:
+        Unlike :func:`calc_toep`, this function does not fill in
+        ``cfg.num_masked`` from ``mask`` and does not compare the two; pass
+        the configuration :func:`calc_toep` completed.
     """
+    # --- Size checks against the library's own size helpers. ---
     xp = _xp()
     _check_size(x, int(lib.mr_x_size(ctypes.byref(cfg))), "x")
     _check_size(SEs, int(lib.mr_se_size(ctypes.byref(cfg))), "SEs")
@@ -562,10 +680,13 @@ def aha_toeplitz(cfg: MRConfig, x, SEs, phi2_toep, mask=None, out=None):
                 "phi2_toep")
     if cfg.is_masked and mask is None:
         raise ValueError("cfg.is_masked is set, so a mask is required")
+    # --- Output buffer (fully overwritten by the library, so np/cp.empty
+    #     is enough). ---
     if out is None:
         out = xp.empty(x.shape, dtype=xp.complex64)
     else:
         _check_size(out, x.size, "out")
+    # --- One call: plan create + execute + destroy inside the library. ---
     check(
         lib.mr_aha_toeplitz(
             ctypes.byref(cfg),
@@ -592,14 +713,23 @@ def _devices_arg(devices):
 
     Raises:
         ValueError: If ``devices`` is a string other than ``'all'``.
+
+    Note:
+        The returned ``ctypes`` array must be kept referenced until
+        ``mr_op_create`` returns, because ``mr_op_options.devices`` only
+        stores its address.
     """
+    # None: primary (current) device only.
     if devices is None:
         return None, 0
+    # 'all': NULL list with the MR_OP_ALL_DEVICES sentinel count.
     if isinstance(devices, str):
         if devices.lower() != "all":
             raise ValueError(f"devices must be None, 'all', an int or a list; "
                              f"got {devices!r}")
         return None, OP_ALL_DEVICES
+    # A single ordinal, or any iterable of ordinals, becomes a C int array.
+    # Duplicates and the primary are left in: the library ignores them.
     if isinstance(devices, numbers.Integral):  # also NumPy integer scalars
         devices = [devices]
     devices = [int(d) for d in devices]
@@ -630,9 +760,28 @@ class AhAOp:
 
     Use it as a context manager, or call :meth:`close`, to release the GPU
     memory promptly.
+
+    Internal state (set by :meth:`create_op`):
+
+    * ``_handle`` -- ``ctypes.c_void_p`` holding the C ``mr_op``; NULL once
+      closed, and always NULL for a Metal NUFFT operator.
+    * ``_impl`` -- the :class:`mr_aha.nufft._MlxNufft` delegate of a Metal
+      NUFFT operator, else ``None``.
+    * ``_keep`` -- tuple of arrays the operator must keep alive (arrays the
+      library uses in place, or the inputs the Metal delegate needs per
+      application).
+    * ``_cfg`` -- the operator's private copy of the configuration.
+    * ``_method`` -- ``'toeplitz'`` or ``'nufft'``.
+    * ``_info`` / ``_toep_ms`` -- Metal only: the synthesised :attr:`info`
+      dict of a NUFFT operator, and the Python-measured kernel time.
     """
 
     def __init__(self, *args, **kwargs):
+        """Direct construction is forbidden; use :func:`create_op`.
+
+        Raises:
+            TypeError: Always.
+        """
         raise TypeError(
             "AhAOp is created with mr_aha.create_op(cfg, SEs, phi2, traj, ...) "
             "(or AhAOp.create_op), not by calling the class"
@@ -703,16 +852,23 @@ class AhAOp:
             ValueError: On inconsistent arguments (sizes, method, devices,
                 masked NUFFT).
             MRError: If the library reports a failure.
+            ImportError: On Metal, if MLX / mlx-nufft is missing.
         """
+        # --- Bypass __init__ (which forbids direct construction) and set the
+        #     attributes close()/__del__ rely on first, so that a failure
+        #     part-way leaves an object that can be finalised safely. ---
         self = cls.__new__(cls)
         self._handle = ctypes.c_void_p()
         self._keep = ()
         self._impl = None
+        # --- Method: normalise to its canonical string. ---
         self._method = OpMethod._TO_STR[OpMethod.parse(method)]
         is_nufft = self._method == "nufft"
         if is_nufft and cfg.is_masked:
             raise ValueError("method='nufft' has no kernel to mask; build the "
                              "configuration with is_masked=False")
+        # --- nufft_opts: only meaningful for method='nufft', and only the
+        #     keys mr_op_options can carry. ---
         nufft_opts = dict(nufft_opts or {})
         if not is_nufft and nufft_opts:
             raise ValueError("nufft_opts is only used with method='nufft'")
@@ -720,6 +876,10 @@ class AhAOp:
         if unknown:
             raise ValueError(f"unknown nufft_opts {sorted(unknown)}; accepted: "
                              f"{list(_NUFFT_OPTS)}")
+        # --- Input validation. SEs is always required. Then either the
+        #     private injected-kernel case (no Gram blocks/trajectory needed)
+        #     or the normal case, validated like calc_toep. Both complete
+        #     cfg.num_masked from the mask (mutating the caller's cfg). ---
         _check_size(SEs, int(lib.mr_se_size(ctypes.byref(cfg))), "SEs")
         if _phi2_toep is not None and phi2 is None and traj is None and not is_nufft:
             # Injected kernel: the Gram blocks are not needed.
@@ -734,21 +894,27 @@ class AhAOp:
                 raise ValueError("phi2 and traj are required (the operator is built "
                                  "from the Gram blocks)")
             Ntrajs, Nkx = _check_gram(cfg, phi2, traj, mask)
+        # --- Injected kernel (private): Toeplitz only, sized for cfg. ---
         if _phi2_toep is not None:
             if is_nufft:
                 raise ValueError("_phi2_toep is only used with method='toeplitz'")
             _check_size(_phi2_toep, int(lib.mr_phi2_toep_size(ctypes.byref(cfg))),
                         "_phi2_toep")
+        # --- Devices: converted for mr_op_options. `devs` is a local that
+        #     stays referenced until mr_op_create has returned below. ---
         devs, ndev = _devices_arg(devices)
         # The operator's own copy of the (now complete) configuration: a later
         # change to the caller's cfg must not change this operator's sizes.
         self._cfg = MRConfig.from_buffer_copy(cfg)
 
+        # --- Backend dispatch: Metal has its own single-GPU creation path. ---
         if backend() != "cuda":
             self._create_metal(cfg, SEs, phi2, traj, mask, devices, ndev,
                                nufft_opts, _phi2_toep, share_primary)
             return self
 
+        # --- CUDA: options struct, starting from the library defaults so
+        #     that fields added to the struct later keep their defaults. ---
         opt = MROpOptions()
         check(lib.mr_op_options_defaults(ctypes.byref(opt)), "mr_op_options_defaults")
         opt.method = OpMethod.parse(method)
@@ -756,8 +922,12 @@ class AhAOp:
         opt.n_devices = ndev
         opt.toep_dist = ToepDist.parse(toep_dist)
         opt.flags = OP_SHARE_PRIMARY if share_primary else 0
+        # 0 / 0.0 select the library's NUFFT defaults (sigma = 2, method 0).
         opt.nufft_upsampfac = float(nufft_opts.get("upsampfac", 0.0))
         opt.nufft_gpu_method = int(nufft_opts.get("gpu_method", 0))
+        # --- Inputs struct, filled positionally in the C field order
+        #     (d_SEs, d_phi2, d_traj, Ntrajs, Nkx, d_mask, d_phi2_toep);
+        #     _ptr validates each array and yields its raw address. ---
         inp = MROpInputs(
             _ptr(SEs, "SEs", "complex64"),
             _ptr(phi2, "phi2", "complex64", allow_none=_phi2_toep is not None),
@@ -767,8 +937,13 @@ class AhAOp:
             _ptr(_phi2_toep, "_phi2_toep", "complex64", allow_none=True),
         )
         # Arrays used in place must outlive the operator.
+        # (phi2 and traj are not kept: the library always transforms them
+        # into operator-owned buffers during mr_op_create.)
         if share_primary:
             self._keep = (SEs, mask, _phi2_toep)
+        # --- Create: synchronous; computes the kernel (Toeplitz) or builds
+        #     the cufinufft plans (NUFFT) on every device used, and writes
+        #     the handle into self._handle. ---
         check(lib.mr_op_create(ctypes.byref(cfg), ctypes.byref(inp),
                                ctypes.byref(opt), ctypes.byref(self._handle)),
               "mr_op_create")
@@ -782,13 +957,35 @@ class AhAOp:
         the library) unless supplied, and handed to the library's
         ``mr_op_create``. NUFFT: the MLX implementation of the reference
         operator (:mod:`mr_aha.nufft`) behind the same interface.
+
+        Args:
+            cfg: Completed configuration (``num_masked`` already set).
+            SEs: NumPy coil maps.
+            phi2: NumPy Gram blocks, or ``None`` with ``phi2_toep`` given.
+            traj: NumPy trajectory, or ``None`` with ``phi2_toep`` given.
+            mask: NumPy ``int64`` mask or ``None``.
+            devices: The caller's original ``devices`` argument.
+            ndev: ``n_devices`` from :func:`_devices_arg`.
+            nufft_opts: Unused on Metal (mlx-nufft has fixed options).
+            phi2_toep: Optional finished kernel.
+            share_primary: Whether the library may use the arrays in place.
+
+        Raises:
+            ValueError: If ``devices`` asks for anything but the single GPU.
         """
+        # --- Device check: Metal has exactly one GPU, ordinal 0. Accept
+        #     None, 'all', 0 and [0]. ---
         single = (ndev in (0, OP_ALL_DEVICES)) or \
             (ndev == 1 and list(devices if not isinstance(devices, numbers.Integral)
                                 else [devices]) == [0])
         if not single:
             raise ValueError(f"the {backend()} backend has a single GPU; devices "
                              f"must be None, 0, [0] or 'all', got {devices!r}")
+        # --- NUFFT method: no library object at all. The MLX reference
+        #     implementation is the operator; it needs SEs and phi2 at every
+        #     application, so they are kept (always used in place, whatever
+        #     share_primary says). info is synthesised to mirror the CUDA
+        #     dict for one device. ---
         if self._method == "nufft":
             from .nufft import _MlxNufft  # noqa: PLC0415
             self._impl = _MlxNufft(cfg, traj, cfg.eps)
@@ -801,6 +998,8 @@ class AhAOp:
                               toep_component_ms=0.0, toep_gather_gbs=0.0,
                               create_ms=0.0)
             return
+        # --- Toeplitz method: compute the kernel with the two-stage
+        #     calc_toep (mlx-nufft + mr_calc_toep_from_psf) unless supplied. ---
         self._toep_ms = 0.0
         if phi2_toep is None:
             # The library cannot time this part on Metal: time it here.
@@ -808,6 +1007,10 @@ class AhAOp:
             t0 = time.perf_counter()
             phi2_toep = calc_toep(cfg, phi2, traj, mask)
             self._toep_ms = (time.perf_counter() - t0) * 1e3
+        # --- Hand the finished kernel to the library's single-device
+        #     operator (Metal mr_op_create accepts only a supplied kernel).
+        #     The kernel is kept here in every case, because when Python
+        #     computed it no other reference to it exists. ---
         opt = MROpOptions()
         check(lib.mr_op_options_defaults(ctypes.byref(opt)), "mr_op_options_defaults")
         opt.flags = OP_SHARE_PRIMARY if share_primary else 0
@@ -830,7 +1033,11 @@ class AhAOp:
         return self._method
 
     def _check_open(self) -> None:
-        """Raise :class:`RuntimeError` when the operator has been closed."""
+        """Raise :class:`RuntimeError` when the operator has been closed.
+
+        An operator is open while it has either a C handle or a Metal NUFFT
+        delegate.
+        """
         if not self._handle and self._impl is None:
             raise RuntimeError("this AhAOp has already been closed")
 
@@ -852,15 +1059,23 @@ class AhAOp:
             RuntimeError: If the operator has been closed.
             ValueError: If ``x`` or ``out`` has the wrong size.
             MRError: If the library reports a failure.
+
+        Note:
+            ``out is x`` is not detected here; the library requires that
+            they do not alias.
         """
+        # --- Validate against the operator's private configuration. ---
         self._check_open()
         xp = _xp()
         _check_size(x, int(lib.mr_x_size(ctypes.byref(self._cfg))), "x")
         if out is not None:
             _check_size(out, x.size, "out")
+        # --- Metal NUFFT: run the MLX reference with the kept SEs/phi2. ---
         if self._impl is not None:
             SEs, phi2 = self._keep
             return self._impl.apply(x, SEs, phi2, out=out)
+        # --- Library operator: allocate the output (fully overwritten) and
+        #     execute; asynchronous on CUDA, ordered on cfg.stream. ---
         if out is None:
             out = xp.empty(x.shape, dtype=xp.complex64)
         check(
@@ -870,6 +1085,7 @@ class AhAOp:
         )
         return out
 
+    # ``op(x)`` is the same as ``op.apply(x)``.
     __call__ = apply
 
     @property
@@ -891,11 +1107,22 @@ class AhAOp:
             per triangular component), ``toep_gather_gbs`` (measured
             concurrent receive bandwidth); and ``create_ms`` (whole
             creation).
+
+        Raises:
+            RuntimeError: If the operator has been closed.
+            MRError: If ``mr_op_info`` fails.
         """
         self._check_open()
+        # --- Metal NUFFT: return a copy of the synthesised dict. ---
         if self._impl is not None:
             return dict(self._info)
+        # --- Metal Toeplitz with a Python-computed kernel: the library saw a
+        #     supplied kernel, so its kernel fields are overridden below with
+        #     the Python timing and reported as computed by the one GPU. On
+        #     CUDA _toep_ms is never set and metal_ms is 0. ---
         metal_ms = getattr(self, "_toep_ms", 0.0)
+        # --- Query the C struct and convert it to plain Python types, keeping
+        #     only the first n_devices entries of the per-device arrays. ---
         inf = MROpInfo()
         check(lib.mr_op_info(self._handle, ctypes.byref(inf)), "mr_op_info")
         n = inf.n_devices
@@ -937,19 +1164,30 @@ class AhAOp:
             MRError: For a NUFFT operator (no kernel) or ``k`` out of range.
         """
         self._check_open()
+        # --- Metal NUFFT has no C handle: raise the same error the library
+        #     returns for a CUDA NUFFT operator (-7 = MR_ERR_UNSUPPORTED). ---
         if self._impl is not None:
             raise MRError(-7, "mr_op_kernel: a NUFFT operator has no kernel")
+        # --- Borrowed pointer to device k's copy, and its row-major shape
+        #     and element count (8 bytes per complex64). ---
         ptr = ctypes.c_void_p()
         check(lib.mr_op_kernel(self._handle, int(k), ctypes.byref(ptr)),
               "mr_op_kernel")
         shape = phi2_toep_shape(self._cfg)
         size = int(lib.mr_phi2_toep_size(ctypes.byref(self._cfg)))
+        # --- Metal: wrap the unified-memory address in a read-only NumPy
+        #     view (no copy). Note that this view does not reference the
+        #     operator, so the caller must keep the operator open. ---
         if backend() != "cuda":
             import numpy  # noqa: PLC0415
             buf = (ctypes.c_char * (size * 8)).from_address(ptr.value)
             arr = numpy.frombuffer(buf, dtype=numpy.complex64).reshape(shape)
             arr.flags.writeable = False
             return arr
+        # --- CUDA: wrap the device pointer in a CuPy array without copying.
+        #     UnownedMemory records `self` as owner (keeping the Python object
+        #     alive) and the device the memory lives on. CuPy arrays have no
+        #     read-only flag, so "must not be modified" is not enforced. ---
         cp = _cupy()
         dev = self.info["devices"][int(k)]
         mem = cp.cuda.UnownedMemory(ptr.value, size * 8, self, device_id=dev)
@@ -958,22 +1196,38 @@ class AhAOp:
 
     def close(self) -> None:
         """Release the operator and everything it holds on every GPU.
-        Idempotent."""
+        Idempotent.
+
+        Any array previously returned by :meth:`kernel` becomes invalid.
+        """
+        # --- Library operator: mr_op_destroy waits for in-flight work, then
+        #     frees every device's buffers; reset the handle to NULL so a
+        #     second close (or __del__) is a no-op. ---
         if self._handle:
             lib.mr_op_destroy(self._handle)
             self._handle = ctypes.c_void_p()
+        # --- Metal NUFFT delegate: drop its plans. ---
         if self._impl is not None:
             self._impl.close()
             self._impl = None
+        # --- Release the references to the caller's arrays only now, after
+        #     the library has stopped using them. ---
         self._keep = ()
 
     def __enter__(self) -> "AhAOp":
+        """Context-manager entry: return the operator itself."""
         return self
 
     def __exit__(self, *exc) -> None:
+        """Context-manager exit: :meth:`close`; exceptions propagate."""
         self.close()
 
     def __del__(self):
+        """Finaliser: best-effort :meth:`close` when the object is collected.
+
+        Errors are swallowed because at interpreter shutdown the library or
+        module globals may already be gone.
+        """
         try:
             self.close()
         except Exception:  # pragma: no cover - interpreter shutdown
@@ -994,5 +1248,8 @@ def create_op(cfg: MRConfig, SEs, phi2, traj, mask=None, **kwargs) -> AhAOp:
 
     Returns:
         The operator, an :class:`AhAOp`.
+
+    Raises:
+        ValueError, MRError, ImportError: See :meth:`AhAOp.create_op`.
     """
     return AhAOp.create_op(cfg, SEs, phi2, traj, mask, **kwargs)

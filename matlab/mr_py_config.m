@@ -9,8 +9,14 @@ function cfg = mr_py_config(config)
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % ints converts a MATLAB size vector into a Python list of ints.
     mr = mr_python();
     ints = @(v) py.list(num2cell(int64(v(:).')));
+    % ---- Keyword arguments --------------------------------------------------
+    % phi2_dim is always passed (mr_default_config always sets it). Every
+    % other field is forwarded only when present (and, for num_masked and
+    % n_coils, non-empty), cast to the Python type make_config expects.
+    % gpu_device_id is not forwarded.
     args = {'phi2_dim', ints(config.phi2_dim)};
     if isfield(config, 'triangulation'), args = [args, {'triangulation', char(config.triangulation)}]; end
     if isfield(config, 'is_masked'),     args = [args, {'is_masked', logical(config.is_masked)}]; end
@@ -24,6 +30,7 @@ function cfg = mr_py_config(config)
     if isfield(config, 'mem_fraction'),   args = [args, {'mem_fraction', double(config.mem_fraction)}]; end
     if isfield(config, 'verbose'),        args = [args, {'verbose', logical(config.verbose)}]; end
     if isfield(config, 'mask_radius'),    args = [args, {'mask_radius', int64(config.mask_radius)}]; end
+    % Positional arguments: traj_type, n_dim and L, as for mr_default_config.
     cfg = mr.make_config(char(config.traj_type), ints(config.n_dim), ...
                          int64(config.L), pyargs(args{:}));
 end

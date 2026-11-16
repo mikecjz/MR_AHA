@@ -17,9 +17,14 @@ function AhAx = AhA_cufinufft(x, SEs, phi2, traj, config, plan)
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % Build a throwaway plan when none is supplied. Planning sorts the
+    % trajectory points for cufinufft, which is the costly part, so callers
+    % applying A'A repeatedly should pass their own plan.
     narginchk(5, 6);
     if nargin < 6 || isempty(plan)
         plan = aha_nufft_plan(traj, config);
     end
+    % One application: the plan is released with its handle object when it
+    % goes out of scope (if it was created here).
     AhAx = plan.apply(x, SEs, phi2);
 end

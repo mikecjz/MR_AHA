@@ -41,6 +41,8 @@
 #include <new>
 #include <vector>
 
+/* mr_dims is passed to the kernels by value with setBytes, so its host
+ * layout must match the Metal struct byte for byte. */
 static_assert(sizeof(mr_dims) == 80,
               "mr_dims must match the struct in mr_kernels.metal");
 
@@ -82,6 +84,10 @@ struct mr_aha_plan_s {
 /** @brief Release everything a (possibly half-built) plan holds. */
 static void mr_plan_free(mr_aha_plan p)
 {
+    /* Every member is NULL until created (value-initialised struct), so this
+     * serves both mr_aha_plan_destroy and the failure paths of
+     * mr_aha_plan_create. Pipelines belong to the process-wide cache and are
+     * not released. */
     if (!p) return;
     mr_metal_fft_destroy(p->fft);
     mr_metal_fft_destroy(p->fft_rem);
@@ -100,6 +106,12 @@ static void mr_plan_free(mr_aha_plan p)
 static int mr_pick_bd(const mr_metal_ctx *ctx, const MTL::ComputePipelineState *pso,
                       int L, NS::UInteger *threads, NS::UInteger *tgmem)
 {
+    /* Start from 256 threads (capped by the pipeline), halve while the
+     * staging area does not fit, but not below 32 (one SIMD group). The
+     * length is then rounded up to 16 bytes, which Metal requires of
+     * setThreadgroupMemoryLength; if even 32 threads do not fit, L is too
+     * large for this device. Counterpart of mr_pick_blockdiag_launch in
+     * src/cuda/mr_aha.cu. */
     const NS::UInteger limit = ctx->device->maxThreadgroupMemoryLength();
     const NS::UInteger per_thread = (NS::UInteger)L * sizeof(mr_complex);
     NS::UInteger t = MR_METAL_BD_THREADS;
@@ -119,17 +131,25 @@ static int mr_pick_bd(const mr_metal_ctx *ctx, const MTL::ComputePipelineState *
 
 extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
 {
+    /* Validate the configuration before touching Metal, so that a bad
+     * config reports its own error even on a machine without a GPU. */
     mr_clear_error();
     MR_REQUIRE(plan_out != NULL, "mr_aha_plan_create: plan_out is NULL");
     *plan_out = NULL;
     int rc = mr_config_validate(cfg);
     if (rc != MR_SUCCESS) return rc;
 
+    /* Pool for the autoreleased objects created below (VkFFT's included),
+     * and the shared device / queue (no device selection on Metal; the
+     * CUDA plan instead switches to cfg->device and keeps cfg->stream). */
     mr_metal_pool pool;
     const mr_metal_ctx *ctx = nullptr;
     rc = mr_metal_context(&ctx);
     if (rc != MR_SUCCESS) return rc;
 
+    /* The plan struct, value-initialised so that mr_plan_free can clean up
+     * after a failure at any later step. The kernel geometry (mr_dims) is
+     * derived once here and passed to every kernel with setBytes. */
     mr_aha_plan p = new (std::nothrow) mr_aha_plan_s();
     if (!p) MR_FAIL(MR_ERR_ALLOC, "failed to allocate the plan struct");
     p->cfg = *cfg;
@@ -169,6 +189,10 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
         mr_plan_free(p);
         return rc;
     }
+    /* Launch geometry of the block-diagonal kernel. The specialised kernels
+     * keep their vectors in registers and need no threadgroup memory; the
+     * generic ones stage L values per thread, which bounds the threadgroup
+     * size (mr_pick_bd). */
     if (specialised) {
         p->bd_threads = 0; /* default threadgroup size, no threadgroup memory */
         p->bd_tgmem = 0;
@@ -196,7 +220,12 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
         --group;
     p->group = group;
 
-    /* Working buffers: GPU-only, so private storage. */
+    /* Working buffers: GPU-only, so private storage. `pad` holds `group`
+     * slots of [Mx, My, Mz, L] (one per coil of a group, which the batched
+     * FFT transforms together); the masked operator also needs `compact`,
+     * `group` slots of [num_masked, L] for the block-diagonal result before
+     * it is scattered back into the zeroed grid. Both are allocated once
+     * here and reused by every execution (cudaMalloc'd d_pad in CUDA). */
     const NS::UInteger pad_bytes =
         (NS::UInteger)(per_coil * (uint64_t)group * sizeof(mr_complex));
     p->pad = ctx->device->newBuffer(pad_bytes, MTL::ResourceStorageModePrivate);
@@ -217,7 +246,10 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
     }
 
     /* Batched FFTs over the upsampled grid: one volume per rank and coil of a
-     * group, plus one for a smaller last group. */
+     * group, plus one for a smaller last group. VkFFT plans have a fixed
+     * batch count, so a remainder group (n_coils not a multiple of group)
+     * needs its own plan of L * rem volumes, created up front so that
+     * execution never compiles kernels. */
     rc = mr_metal_fft_create(ctx, cfg->n_spatial, cfg->phi2_dim, cfg->L * group,
                              &p->fft);
     const int rem = cfg->n_coils % group;
@@ -235,6 +267,10 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
 
 extern "C" int mr_aha_plan_destroy(mr_aha_plan plan)
 {
+    /* No GPU work can be pending: mr_aha_plan_execute waits for its command
+     * buffers before returning, so the buffers and FFT plans can be freed
+     * right away. The pool catches anything VkFFT autoreleases while
+     * tearing its application down. NULL is a no-op. */
     mr_clear_error();
     mr_metal_pool pool;
     mr_plan_free(plan);
@@ -274,6 +310,12 @@ struct mr_profile {
 static int mr_stage_end(mr_profile *prof, int k, MTL::CommandBuffer *&cb,
                         MTL::ComputeCommandEncoder *&enc)
 {
+    /* Not profiling: stages simply follow each other in the same encoder.
+     * Profiling: end the encoder, run the command buffer to completion, add
+     * its GPU time (GPUEndTime - GPUStartTime, in seconds) to stage k, and
+     * hand back a fresh command buffer and encoder for the next stage. This
+     * is the Metal equivalent of the CUDA backend's cudaEvent markers
+     * (mr_profile_mark). */
     if (!prof || !prof->on) return MR_SUCCESS;
     enc->endEncoding();
     const int rc = mr_metal_wait(cb, "mr_aha_plan_execute (profiled)");
@@ -297,12 +339,18 @@ static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
                            const mr_metal_view &toep, const mr_metal_view &mask,
                            const mr_metal_view &out, mr_profile *prof)
 {
+    /* Byte size of one coil's slot in `pad` ([Mx, My, Mz, L]), and the FFT
+     * plan whose batch matches this group (full group or remainder). */
     const mr_dims &d = p->dims;
     const NS::UInteger slot =
         (NS::UInteger)d.pad_size * (NS::UInteger)d.L * sizeof(mr_complex);
     mr_metal_fft *fft = (nc == p->group) ? p->fft : p->fft_rem;
 
-    /* 1. Zero-pad and apply each coil's sensitivity (also clears the grid). */
+    /* 1. Zero-pad and apply each coil's sensitivity (also clears the grid).
+     *    One dispatch per coil, each writing its own slot of `pad` (bound at
+     *    the slot's byte offset), one thread per upsampled voxel. The
+     *    image-domain arrays x and SEs are shared by all coils; the kernel
+     *    picks this coil's map with the `coil` argument. */
     for (int s = 0; s < nc; ++s) {
         const int coil = coil0 + s;
         enc->setComputePipelineState(p->k_pad);
@@ -316,13 +364,24 @@ static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
     int rc = mr_stage_end(prof, 0, cb, enc);
     if (rc != MR_SUCCESS) return rc;
 
-    /* 2. Forward FFT of all ranks of all coils of the group. */
+    /* 2. Forward FFT of all ranks of all coils of the group. The slots are
+     *    contiguous, so `pad` is one batch of L * nc volumes transformed in
+     *    place; VkFFT encodes into the same encoder (cufftExecC2C,
+     *    CUFFT_FORWARD in CUDA). */
     rc = mr_metal_fft_encode(fft, cb, enc, p->pad, false);
     if (rc != MR_SUCCESS) return rc;
     if ((rc = mr_stage_end(prof, 1, cb, enc)) != MR_SUCCESS) return rc;
 
     /* 3. Hermitian block-diagonal multiplication (one pass over phi2_toep
-     *    for the whole group with the specialised kernels). */
+     *    for the whole group with the specialised kernels). The generic
+     *    kernels ignore the coil-count argument; with them the plan's group
+     *    is always 1. bd_tgmem is non-zero only for the generic kernels,
+     *    which take their per-thread staging area at threadgroup index 0.
+     *
+     *    Masked: the multiplication is evaluated only at the num_masked
+     *    retained locations, into `compact` (one thread per location for
+     *    all coils of the group); the grid is then zeroed and the compact
+     *    result scattered back, since phi2_toep is zero elsewhere. */
     if (p->cfg.is_masked) {
         const long long nm = (long long)p->cfg.num_masked;
         const NS::UInteger cslot =
@@ -338,7 +397,11 @@ static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
         if (p->bd_tgmem) enc->setThreadgroupMemoryLength(p->bd_tgmem, 0);
         mr_metal_dispatch_1d(enc, p->k_bd, (uint64_t)nm, p->bd_threads);
 
-        /* Samples outside the mask contribute nothing. */
+        /* Samples outside the mask contribute nothing. Clear all L * nc
+         * volumes of the group in one dispatch; mr_k_zero replaces the
+         * cudaMemsetAsync of the CUDA backend so that everything stays in
+         * this encoder. The zeroing must come after the masked kernel,
+         * which still reads the grid. */
         const long long n = d.pad_size;
         const int count = d.L * nc;
         enc->setComputePipelineState(p->k_zero);
@@ -347,6 +410,8 @@ static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
         enc->setBytes(&count, sizeof(count), 2);
         mr_metal_dispatch_1d(enc, p->k_zero, (uint64_t)n);
 
+        /* Scatter each coil's compact slot back into its (zeroed) grid
+         * slot, one dispatch per coil. */
         for (int s = 0; s < nc; ++s) {
             enc->setComputePipelineState(p->k_scatter);
             enc->setBuffer(p->pad, slot * (NS::UInteger)s, 0);
@@ -357,6 +422,8 @@ static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
             mr_metal_dispatch_1d(enc, p->k_scatter, (uint64_t)nm);
         }
     } else {
+        /* Dense: in place on the whole grid, one thread per upsampled
+         * location for all coils of the group. */
         enc->setComputePipelineState(p->k_bd);
         enc->setBuffer(p->pad, 0, 0);
         mr_metal_bind(enc, toep, 1);
@@ -367,12 +434,19 @@ static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
     }
     if ((rc = mr_stage_end(prof, 2, cb, enc)) != MR_SUCCESS) return rc;
 
-    /* 4. Inverse FFT back to the padded image domain. */
+    /* 4. Inverse FFT back to the padded image domain (unnormalised; the
+     *    1/prod(M) is already folded into phi2_toep). */
     rc = mr_metal_fft_encode(fft, cb, enc, p->pad, true);
     if (rc != MR_SUCCESS) return rc;
     if ((rc = mr_stage_end(prof, 3, cb, enc)) != MR_SUCCESS) return rc;
 
-    /* 5. Crop, apply the adjoint sensitivity and accumulate over coils. */
+    /* 5. Crop, apply the adjoint sensitivity and accumulate over coils.
+     *    One dispatch per coil, one thread per image voxel. Coil 0
+     *    overwrites the output (so it needs no prior clearing) and every
+     *    later coil adds to it. The dispatches all write the same output,
+     *    but a default (serial) compute encoder runs its dispatches one
+     *    after another and the queue runs the groups' command buffers in
+     *    commit order, so the sum is race-free and deterministic. */
     for (int s = 0; s < nc; ++s) {
         const int coil = coil0 + s;
         const int accumulate = coil > 0 ? 1 : 0;
@@ -393,6 +467,8 @@ extern "C" int mr_aha_plan_execute(mr_aha_plan plan, const mr_complex *d_x,
                                    const mr_complex *d_phi2_toep,
                                    const int64_t *d_mask, mr_complex *d_AhAx)
 {
+    /* Argument checks. The output must not alias x: the crop kernel of
+     * coil 0 overwrites the output while later coils still read x. */
     mr_clear_error();
     MR_REQUIRE(plan != NULL, "mr_aha_plan_execute: plan is NULL");
     MR_REQUIRE(d_x != NULL, "mr_aha_plan_execute: d_x is NULL");
@@ -409,6 +485,12 @@ extern "C" int mr_aha_plan_execute(mr_aha_plan plan, const mr_complex *d_x,
     const mr_metal_ctx *ctx = plan->ctx;
     const size_t c8 = sizeof(mr_complex);
 
+    /* Make the caller's host arrays visible to the GPU, normally in place
+     * (see mr_metal_view): the image x [image, L], the maps SEs, the kernel
+     * phi2_toep, the int64 mask (an empty view when unmasked) and the output,
+     * the only writeback view. Where the CUDA backend receives device
+     * pointers, these are host pointers into unified memory. The views are
+     * released when they go out of scope, on every return path. */
     mr_metal_view x, se, toep, mask, out;
     int rc;
     if ((rc = mr_metal_view_make(ctx, d_x, (size_t)mr_x_size(cfg) * c8, false, &x)) ||
@@ -421,13 +503,27 @@ extern "C" int mr_aha_plan_execute(mr_aha_plan plan, const mr_complex *d_x,
         (rc = mr_metal_view_make(ctx, d_AhAx, (size_t)mr_x_size(cfg) * c8, true, &out)))
         return rc;
 
-    /* One command buffer per coil, committed in order; wait for all. */
+    /* One command buffer per coil group, committed in order; wait for all.
+     * (The CUDA backend instead queues everything on one stream and ends
+     * with cudaStreamSynchronize.) Profiling is read from the environment
+     * on every call, so it can be switched on without rebuilding the plan. */
     mr_profile prof;
     {
         const char *e = std::getenv("MR_AHA_METAL_PROFILE");
         prof.on = e && e[0] && e[0] != '0';
         prof.ctx = ctx;
     }
+    /* Encode and commit group by group without waiting in between, so the
+     * GPU starts on group 0 while the CPU encodes group 1. The groups reuse
+     * the same `pad` / `compact` buffers; that is safe because the queue
+     * executes them in commit order (Metal's hazard tracking on these
+     * buffers orders the work). Command buffers from commandBuffer() are
+     * autoreleased, so the vector holds unowned pointers kept alive by the
+     * pool until the call returns. If encoding fails, the failed group is
+     * not committed and the loop stops; the groups already committed are
+     * still waited for below before returning the error, so that no GPU
+     * work outlives the views it reads. The last group may be smaller
+     * (nc < group) and then uses the remainder FFT plan. */
     std::vector<MTL::CommandBuffer *> cbs;
     cbs.reserve((size_t)cfg->n_coils);
     for (int coil0 = 0; coil0 < cfg->n_coils; coil0 += plan->group) {
@@ -442,6 +538,9 @@ extern "C" int mr_aha_plan_execute(mr_aha_plan plan, const mr_complex *d_x,
         cb->commit();
         cbs.push_back(cb);
     }
+    /* Wait for every committed command buffer, then check each one's status:
+     * GPU-side failures only show up there. Only then is the output copied
+     * back (a no-op unless the output view had to fall back to a copy). */
     for (MTL::CommandBuffer *cb : cbs) cb->waitUntilCompleted();
     if (rc != MR_SUCCESS) return rc;
     for (MTL::CommandBuffer *cb : cbs)
@@ -453,6 +552,8 @@ extern "C" int mr_aha_plan_execute(mr_aha_plan plan, const mr_complex *d_x,
                         : "(no error description)");
     mr_metal_view_finish(&out);
 
+    /* Diagnostics: the per-stage profile goes to stderr (requested through
+     * the environment), the one-line summary to stdout when cfg->verbose. */
     if (prof.on) {
         double total = 0.0;
         for (int k = 0; k < MR_N_STAGES; ++k) total += prof.ms[k];
@@ -477,6 +578,13 @@ extern "C" int mr_aha_toeplitz(const mr_config *cfg, const mr_complex *d_x,
                                const mr_complex *d_phi2_toep,
                                const int64_t *d_mask, mr_complex *d_AhAx)
 {
+    /* One-shot form: create, execute once, destroy, as in the CUDA backend.
+     * Execution is synchronous here, so the plan can be destroyed as soon as
+     * it returns, also after a failure. The execution's status takes
+     * precedence over the destruction's. Note that this pays the full plan
+     * cost (pipelines are cached per process, but the VkFFT plans and work
+     * buffers are rebuilt) on every call; repeated applications should keep
+     * a plan or an ::mr_op. */
     mr_aha_plan plan = NULL;
     int rc = mr_aha_plan_create(cfg, &plan);
     if (rc != MR_SUCCESS) return rc;
@@ -516,6 +624,9 @@ struct mr_op_s {
 
 extern "C" int mr_op_options_defaults(mr_op_options *opt)
 {
+    /* Same defaults as the CUDA backend (Toeplitz, automatic kernel
+     * distribution, share the caller's arrays), so that portable code can
+     * use them unchanged; zeroing selects "primary device only". */
     mr_clear_error();
     MR_REQUIRE(opt != NULL, "mr_op_options_defaults: opt is NULL");
     memset(opt, 0, sizeof(*opt));
@@ -528,6 +639,7 @@ extern "C" int mr_op_options_defaults(mr_op_options *opt)
 extern "C" int mr_op_create(const mr_config *cfg, const mr_op_inputs *in,
                             const mr_op_options *opt, mr_op *op_out)
 {
+    /* Resolve the options (NULL means the defaults) and validate. */
     mr_clear_error();
     MR_REQUIRE(op_out != NULL, "mr_op_create: op_out is NULL");
     *op_out = NULL;
@@ -537,6 +649,11 @@ extern "C" int mr_op_create(const mr_config *cfg, const mr_op_inputs *in,
     else mr_op_options_defaults(&o);
     const int status = mr_config_validate(cfg);
     if (status != MR_SUCCESS) return status;
+    /* Features of the CUDA ::mr_op that the Metal library does not have are
+     * rejected explicitly rather than silently ignored: the NUFFT method
+     * (needs a NUFFT library), more than one device, and computing the
+     * kernel inside mr_op_create (needs the type-1 NUFFT). Accepted device
+     * requests: the default (primary only), "all devices", or exactly {0}. */
     if (o.method != MR_OP_TOEPLITZ)
         MR_FAIL(MR_ERR_UNSUPPORTED,
                 "mr_op_create: the Metal backend implements the Toeplitz method in "
@@ -556,6 +673,8 @@ extern "C" int mr_op_create(const mr_config *cfg, const mr_op_inputs *in,
         MR_REQUIRE(in->d_mask != NULL,
                    "mr_op_create: d_mask is required when is_masked is set");
 
+    /* Build the operator: the struct and its single plan (pipelines, work
+     * buffers, VkFFT plans). create_ms below times this whole step. */
     const auto t0 = std::chrono::steady_clock::now();
     mr_op p = new (std::nothrow) mr_op_s();
     if (!p) MR_FAIL(MR_ERR_ALLOC, "failed to allocate the operator struct");
@@ -565,6 +684,11 @@ extern "C" int mr_op_create(const mr_config *cfg, const mr_op_inputs *in,
         delete p;
         return rc;
     }
+    /* Inputs reused by every execution. Shared: keep the caller's pointers
+     * (they must stay valid and unchanged for the operator's lifetime; no
+     * copy, which is the point of unified memory). Not shared: take private
+     * host copies in std::vectors, where an allocation failure throws and
+     * is turned into MR_ERR_ALLOC after undoing the plan. */
     if (o.flags & MR_OP_SHARE_PRIMARY) {
         p->SEs = in->d_SEs;
         p->toep = in->d_phi2_toep;
@@ -586,6 +710,9 @@ extern "C" int mr_op_create(const mr_config *cfg, const mr_op_inputs *in,
         p->toep = p->toep_own.data();
         p->mask = cfg->is_masked ? p->mask_own.data() : NULL;
     }
+    /* What mr_op_info reports: one device (index 0) holding every coil, and
+     * a kernel supplied by the caller. Fields that only apply to multi-GPU
+     * CUDA operators (remainder split, peer access, ...) stay zero. */
     memset(&p->info, 0, sizeof(p->info));
     p->info.method = MR_OP_TOEPLITZ;
     p->info.n_devices = 1;
@@ -603,6 +730,8 @@ extern "C" int mr_op_execute(mr_op op, const mr_complex *d_x, mr_complex *d_AhAx
 {
     mr_clear_error();
     MR_REQUIRE(op != NULL, "mr_op_execute: op is NULL");
+    /* The operator's stored maps, kernel and mask with the caller's x;
+     * synchronous, so d_AhAx is ready on return. */
     return mr_aha_plan_execute(op->plan, d_x, op->SEs, op->toep, op->mask, d_AhAx);
 }
 
@@ -618,6 +747,8 @@ extern "C" int mr_op_kernel(mr_op op, int k, const mr_complex **d_phi2_toep)
 {
     mr_clear_error();
     MR_REQUIRE(op != NULL && d_phi2_toep != NULL, "mr_op_kernel: NULL argument");
+    /* Only device 0 exists; its kernel is the caller's array (shared) or
+     * the operator's private copy. */
     MR_REQUIRE(k == 0, "mr_op_kernel: device index %d outside [0, 1)", k);
     *d_phi2_toep = op->toep;
     return MR_SUCCESS;
@@ -632,4 +763,7 @@ extern "C" int mr_op_destroy(mr_op op)
     return MR_SUCCESS;
 }
 
+/* mr_op_abandon exists for CUDA, where it skips the primary device's
+ * resources after a cudaDeviceReset; Metal has no device reset, so it is a
+ * plain destroy. */
 extern "C" int mr_op_abandon(mr_op op) { return mr_op_destroy(op); }

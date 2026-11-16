@@ -103,7 +103,20 @@
 /* State                                                                    */
 /* ------------------------------------------------------------------------ */
 
-/** @brief Per-device state of the NUFFT engine (see the file comment). */
+/**
+ * @brief Per-device state of the NUFFT engine (see the file comment).
+ *
+ * Allocated with calloc, so every handle and pointer starts NULL / 0 and
+ * ::mr_nufft_eng_destroy can release a partially built engine. Everything
+ * here is owned by the engine; the caller's inputs are not referenced after
+ * ::mr_nufft_eng_create returns (the trajectory cufinufft keeps is the
+ * engine's own reordered copy @ref d_traj).
+ *
+ * Non-uniform data layout: transform `tr` occupies `d_k[tr*M, (tr+1)*M)`
+ * with sample `kx + Nkx*t`; for a stack, `tr = z + nkz*l` (rank l, kz plane
+ * z), matching the `[Nx, Ny, Nz, L]` image seen as `Nz*L` planes of
+ * `[Nx, Ny]`.
+ */
 struct mr_nufft_eng {
     mr_config       cfg;      /**< Copy of the configuration (this device's
                                    coils, device and stream).               */
@@ -147,6 +160,9 @@ struct mr_nufft_eng {
 __global__ void mr_k_nu_perm_traj(float *dst, const float *src, long long Ntrajs,
                                   long long Nkx, long long total)
 {
+    /* One thread per source coordinate; reads are coalesced (consecutive
+     * threads read consecutive readouts t), writes are strided by Nkx. A
+     * one-off cost at engine creation. */
     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) return;
     const long long M = Ntrajs * Nkx;
@@ -169,6 +185,11 @@ __global__ void mr_k_nu_perm_traj(float *dst, const float *src, long long Ntrajs
 __global__ void mr_k_nu_reorder_gram(mr_complex *dst, const mr_complex *src,
                                      long long nb, int L, long long total)
 {
+    /* One thread per source element. In the source, the batch index b is
+     * fastest (blocks interleaved); in the destination each block is a
+     * contiguous L*L column-major matrix, the B operand cuBLAS expects with
+     * ldb = L. The element order inside a block is unchanged, so no
+     * transpose or conjugation happens here. */
     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) return;
     const long long b = i % nb, ij = i / nb; /* ij = i + L*j of the block */
@@ -193,6 +214,8 @@ __global__ void mr_k_nu_mul_se(mr_complex *im, const mr_complex *x,
                                const mr_complex *se, const mr_complex *zmod,
                                long long img, long long plane, long long total)
 {
+    /* One thread per (voxel, rank); r is the voxel, shared by all ranks, and
+     * r / plane its z index in the x-fastest `[Nx, Ny, Nz]` volume. */
     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) return;
     const long long r = i % img;
@@ -217,6 +240,8 @@ __global__ void mr_k_nu_acc_conj_se(mr_complex *out, const mr_complex *im,
                                     long long img, long long plane, long long total,
                                     int accumulate)
 {
+    /* Same indexing as mr_k_nu_mul_se. Writing (rather than adding) for the
+     * first coil saves a separate zeroing pass over d_out. */
     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) return;
     const long long r = i % img;
@@ -230,11 +255,17 @@ __global__ void mr_k_nu_acc_conj_se(mr_complex *out, const mr_complex *im,
 /* Life cycle                                                               */
 /* ------------------------------------------------------------------------ */
 
+/* Documented in mr_internal.cuh. With a live context the caller makes the
+ * engine's device current first (mr_op_dev_release does); the members are
+ * NULL-checked, so a partially built engine is fine. */
 void mr_nufft_eng_destroy(mr_nufft_eng *e, int alive)
 {
     if (e == NULL) return;
     if (alive) {
-        /* cufinufft switches to its own device internally. */
+        /* cufinufft switches to its own device internally. Return codes are
+         * ignored (best-effort teardown); the trailing cudaGetLastError
+         * clears any error left behind so it does not leak into a later,
+         * unrelated MR_KERNEL_CHECK. */
         if (e->t2) cufinufftf_destroy(e->t2);
         if (e->t1) cufinufftf_destroy(e->t1);
         if (e->blas) cublasDestroy(e->blas);
@@ -274,9 +305,14 @@ void mr_nufft_eng_destroy(mr_nufft_eng *e, int alive)
 static int mr_nu_fetch(void **tmp, const void **view, const void *src, int src_dev,
                        int dev, size_t bytes, cudaStream_t s)
 {
+    /* Same device: read the caller's buffer in place, no copy. */
     *tmp = NULL;
     *view = src;
     if (src_dev == dev) return MR_SUCCESS;
+    /* Other device: a temporary copy on this device. cudaMemcpyPeerAsync
+     * works with or without peer access enabled (the runtime stages through
+     * the host otherwise); it is queued on s, so the reorder kernels issued
+     * later on s see the complete copy. */
     if (cudaMalloc(tmp, bytes) != cudaSuccess) {
         cudaGetLastError();
         *tmp = NULL;
@@ -322,11 +358,17 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
     const int64_t M = e->M, nb = e->Ntrajs * e->nkz;
     cudaStream_t s = e->s;
 
+    /* The GEMM of step 4 addresses the non-uniform data with a 32-bit
+     * leading dimension (M, or nkz*M for a stack); reject sizes it cannot
+     * express before allocating anything. */
     MR_REQUIRE(e->nkz * M <= 2147483647LL,
                "NUFFT operator: Nkz*Ntrajs*Nkx = %lld exceeds the 32-bit leading "
                "dimension of cuBLAS", (long long)(e->nkz * M));
 
     /* -- Inputs: copy from the primary if needed, then reorder ------------ */
+    /* Errors in this block do not return early: rc / ce carry the first
+     * failure so the temporaries are always freed at its end. The reordered
+     * d_traj / d_gram belong to the engine (freed by mr_nufft_eng_destroy). */
     {
         const size_t traj_bytes = (size_t)M * ndim * sizeof(float);
         const size_t gram_bytes = (size_t)nb * L * L * c8;
@@ -346,6 +388,9 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
                 rc = MR_ERR_ALLOC;
             }
         }
+        /* Reorder by readout (trajectory) and into per-batch L x L blocks
+         * (Gram), then wait: the temporaries, and on the same device the
+         * caller's inputs, may be released as soon as this returns. */
         if (rc == MR_SUCCESS) {
             const long long nt = (long long)M * ndim;
             mr_k_nu_perm_traj<<<(int)mr_ceil_div(nt, MR_NU_BLOCK), MR_NU_BLOCK, 0, s>>>(
@@ -368,6 +413,12 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
     }
 
     /* -- Work buffers of one coil ----------------------------------------- */
+    /* Coils are processed one after another (see mr_nufft_eng_execute), so
+     * a single set of buffers is reused for all of them:
+     *  - d_im:  `[Nx, Ny, Nz, L]` image of one coil, also the type-1 output;
+     *  - d_k:   type-2 output, M samples for each of the ntr transforms;
+     *  - d_k2:  Gram-multiplied samples, input of the type-1 (cuBLAS cannot
+     *           work in place, hence the second buffer). */
     {
         const size_t im_bytes = (size_t)e->img * L * c8;
         const size_t k_bytes = (size_t)M * e->ntr * c8;
@@ -383,6 +434,11 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
     }
 
     /* -- Stack: z modulation and the FFT along z --------------------------- */
+    /* zmod(z) = exp(2 pi i floor(Nz/2) z / Nz) turns the plain FFT along z
+     * into the centred one up to a kz-only phase that cancels between the
+     * forward and adjoint transforms (see "Stack of stars" above). It is
+     * computed once on the host and uploaded synchronously (pageable
+     * memory, Nz values). */
     if (e->stack) {
         const int nz = cfg->n_dim[2];
         std::vector<mr_complex> zm((size_t)nz);
@@ -394,7 +450,10 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
         MR_CUDA_CHECK(cudaMalloc((void **)&e->d_zmod, (size_t)nz * c8));
         MR_CUDA_CHECK(cudaMemcpy(e->d_zmod, zm.data(), (size_t)nz * c8,
                                  cudaMemcpyHostToDevice));
-        /* One rank: Nx*Ny transforms of length Nz, stride Nx*Ny, distance 1. */
+        /* One rank: Nx*Ny transforms of length Nz, stride Nx*Ny, distance 1.
+         * z is the slowest axis of `[Nx, Ny, Nz]`, so each (x, y) column is
+         * strided; the plan covers one rank and mr_nu_zfft loops over the L
+         * ranks (L contiguous volumes of img voxels). */
         int n[1] = {nz};
         int emb[1] = {nz};
         const int plane = (int)e->plane;
@@ -404,10 +463,20 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
     }
 
     /* -- Gram multiplication: cuBLAS, plus pointer arrays for a stack ------ */
+    /* The handle is bound to the engine's stream so the GEMMs order with the
+     * cufinufft and cuFFT work of the same coil. Without a stack the batch
+     * entries are equally spaced (readout t at offset t*Nkx, block t at
+     * t*L*L), so cublasCgemmStridedBatched needs no pointer arrays. */
     MR_CUBLAS_CHECK(cublasCreate(&e->blas));
     MR_CUBLAS_CHECK(cublasSetStream(e->blas, s));
     if (e->stack) {
-        /* Batch entry b = t + Ntrajs*z: column l of K at plane l*nkz + z. */
+        /* Batch entry b = t + Ntrajs*z: column l of K at plane l*nkz + z.
+         * The A / C entries of a batch are not equally spaced in b (the kz
+         * step is M, the readout step Nkx), so a strided batch cannot express
+         * them and explicit pointers are used. They are fixed for the
+         * lifetime of the engine (d_k, d_gram, d_k2 never move), so they are
+         * built once here: h = [A pointers | B pointers | C pointers], each nb
+         * long, uploaded as one device array. */
         std::vector<const mr_complex *> h((size_t)3 * nb);
         for (int64_t z = 0; z < e->nkz; ++z)
             for (int64_t t = 0; t < e->Ntrajs; ++t) {
@@ -434,14 +503,19 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
      * below instead of cufinufft's shared-memory method 2, which was 1.06x
      * (L40S) to 1.39x (TITAN RTX) slower per A^H A on the stack-of-stars
      * benchmark (`python/bench_aha.py` of the MR_AHA_benchmarks repository)
-     * at equal accuracy. A
-     * positive gpu_method applies to both plans. */
+     * at equal accuracy. A positive gpu_method applies to both plans. */
     if (gpu_method > 0) opts.gpu_method = gpu_method;
     opts.debug = 0;
+    /* Modes = the image grid n_dim (no Toeplitz upsampling here; cufinufft
+     * oversamples internally by upsampfac). A stack uses 2D transforms with
+     * Nx x Ny modes, its Nz planes counted in ntr = L*Nz. Both plans run ntr
+     * transforms per execute, i.e. all ranks (and kz planes) of one coil. */
     const int nufft_dim = (cfg->traj_type == MR_TRAJ_3D) ? 3 : 2;
     int64_t modes[3] = {cfg->n_dim[0], cfg->n_dim[1],
                         (nufft_dim == 3) ? cfg->n_dim[2] : 1};
     const float eps = (float)cfg->eps;
+    /* Type 2, iflag -1: F_- (image -> samples). On failure the handle is
+     * reset so destroy does not touch a half-made plan. */
     int err = cufinufftf_makeplan(2, nufft_dim, modes, -1, (int)e->ntr, eps, &e->t2,
                                   &opts);
     if (err != 0) {
@@ -449,6 +523,8 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
         MR_FAIL(MR_ERR_CUFINUFFT, "cufinufftf_makeplan (type 2) failed with code %d",
                 err);
     }
+    /* Type 1, iflag +1: F_+ = F_-^H (samples -> image), same modes and
+     * tolerance, so the pair is adjoint to within eps. */
     if (gpu_method <= 0) opts.gpu_method = 1; /* library default for type 1 */
     err = cufinufftf_makeplan(1, nufft_dim, modes, +1, (int)e->ntr, eps, &e->t1, &opts);
     if (err != 0) {
@@ -456,6 +532,10 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
         MR_FAIL(MR_ERR_CUFINUFFT, "cufinufftf_makeplan (type 1) failed with code %d",
                 err);
     }
+    /* Both plans share the engine-owned reordered trajectory (`[M, ndim]`,
+     * one contiguous run of M values per coordinate); cufinufft keeps the
+     * pointers and sorts the points once per plan here. The final sync makes
+     * creation synchronous, so the engine is ready when this returns. */
     const float *xj = e->d_traj;
     const float *yj = e->d_traj + M;
     const float *zj = (nufft_dim == 3) ? e->d_traj + 2 * M : NULL;
@@ -471,9 +551,13 @@ int mr_nufft_eng_create(const mr_config *cfg, const mr_complex *d_phi2,
                         const float *d_traj, int src_dev, int64_t Ntrajs, int64_t Nkx,
                         double upsampfac, int gpu_method, mr_nufft_eng **out)
 {
+    /* The mask restricts the support of a Toeplitz kernel; this method has
+     * no kernel, so a masked configuration is a caller error. */
     *out = NULL;
     MR_REQUIRE(!cfg->is_masked,
                "the NUFFT method has no kernel to mask; set is_masked = 0");
+    /* Host structure (zeroed, see the struct comment) and the derived sizes
+     * that mr_nufft_eng_build expects to find already set. */
     mr_nufft_eng *e = (mr_nufft_eng *)calloc(1, sizeof(mr_nufft_eng));
     if (e == NULL) MR_FAIL(MR_ERR_ALLOC, "failed to allocate the NUFFT engine");
     e->cfg = *cfg;
@@ -486,6 +570,8 @@ int mr_nufft_eng_create(const mr_config *cfg, const mr_complex *d_phi2,
     e->ntr = (int64_t)cfg->L * e->nkz;
     e->img = mr_image_size(cfg);
     e->plane = (int64_t)cfg->n_dim[0] * cfg->n_dim[1];
+    /* Single cleanup path: whatever build created before failing is released
+     * by destroy (the device context is alive here). */
     const int rc = mr_nufft_eng_build(e, d_phi2, d_traj, src_dev, upsampfac, gpu_method);
     if (rc != MR_SUCCESS) {
         mr_nufft_eng_destroy(e, 1);
@@ -513,6 +599,10 @@ int mr_nufft_eng_create(const mr_config *cfg, const mr_complex *d_phi2,
  */
 static int mr_nu_zfft(mr_nufft_eng *e, int dir)
 {
+    /* The plan covers the Nx*Ny z-columns of one rank (see
+     * mr_nufft_eng_build); the L ranks are consecutive volumes of img
+     * voxels, so one call per rank. The plan is bound to the engine's
+     * stream, so the calls order with the surrounding steps. */
     for (int l = 0; l < e->cfg.L; ++l) {
         mr_complex *p = e->d_im + (size_t)l * e->img;
         MR_CUFFT_CHECK(cufftExecC2C(e->zfft, p, p, dir));
@@ -523,6 +613,9 @@ static int mr_nu_zfft(mr_nufft_eng *e, int dir)
 int mr_nufft_eng_execute(mr_nufft_eng *e, const mr_complex *d_x,
                          const mr_complex *d_SEs, mr_complex *d_out)
 {
+    /* Elementwise launch geometry: one thread per (voxel, rank) of the
+     * `[img, L]` image, for steps 1 and 7. one / zero are the GEMM's alpha
+     * and beta (C = A*B, overwriting d_k2). */
     const mr_config *cfg = &e->cfg;
     cudaStream_t s = e->s;
     const int L = cfg->L;
@@ -531,6 +624,9 @@ int mr_nufft_eng_execute(mr_nufft_eng *e, const mr_complex *d_x,
     const cuComplex one = make_cuFloatComplex(1.0f, 0.0f);
     const cuComplex zero = make_cuFloatComplex(0.0f, 0.0f);
 
+    /* Coil loop: steps 1-7 for one coil at a time, all asynchronous on s and
+     * sharing d_im / d_k / d_k2, which in-order execution on the stream makes
+     * safe. Coil c's map is the c-th consecutive volume of d_SEs. */
     for (int c = 0; c < cfg->n_coils; ++c) {
         const mr_complex *se = d_SEs + (size_t)c * e->img;
 
@@ -545,14 +641,21 @@ int mr_nufft_eng_execute(mr_nufft_eng *e, const mr_complex *d_x,
             if (rc != MR_SUCCESS) return rc;
         }
 
-        /* 3. Type-2 NUFFT, all ranks (and kz planes) at once. */
+        /* 3. Type-2 NUFFT, all ranks (and kz planes) at once. cufinufft's
+         *    execute takes (c, fk): for type 2 fk = d_im is the input and
+         *    c = d_k the output. */
         int err = cufinufftf_execute(e->t2, e->d_k, e->d_im);
         if (err != 0)
             MR_FAIL(MR_ERR_CUFINUFFT, "cufinufftf_execute (type 2) failed with code %d",
                     err);
 
-        /* 4. Gram multiplication K'_b = K_b * Phi2_b over all batch entries. */
+        /* 4. Gram multiplication K'_b = K_b * Phi2_b over all batch entries.
+         *    Per entry: m = Nkx samples, n = k = L ranks; A = K_b with
+         *    lda = distance between ranks' transforms (M, or nkz*M for a
+         *    stack), B = the contiguous L x L block (ldb = L), C = K'_b in
+         *    d_k2 with the same layout as A. */
         if (e->stack) {
+            /* Stack: nb = Ntrajs*nkz entries through the pointer arrays. */
             const int64_t nb = e->Ntrajs * e->nkz;
             MR_CUBLAS_CHECK(cublasCgemmBatched(
                 e->blas, CUBLAS_OP_N, CUBLAS_OP_N, (int)e->Nkx, L, L, &one,
@@ -561,6 +664,8 @@ int mr_nufft_eng_execute(mr_nufft_eng *e, const mr_complex *d_x,
                 (cuComplex *const *)(e->d_ptrs + 2 * nb), (int)(e->nkz * e->M),
                 (int)nb));
         } else {
+            /* 2D / 3D: Ntrajs entries, readout t at stride Nkx in d_k / d_k2
+             * and block t at stride L*L in d_gram. */
             MR_CUBLAS_CHECK(cublasCgemmStridedBatched(
                 e->blas, CUBLAS_OP_N, CUBLAS_OP_N, (int)e->Nkx, L, L, &one,
                 e->d_k, (int)e->M, (long long)e->Nkx, e->d_gram, L,
@@ -568,7 +673,8 @@ int mr_nufft_eng_execute(mr_nufft_eng *e, const mr_complex *d_x,
                 (int)e->Ntrajs));
         }
 
-        /* 5. Type-1 NUFFT back onto the image grid. */
+        /* 5. Type-1 NUFFT back onto the image grid: c = d_k2 is the input,
+         *    fk = d_im is overwritten (not accumulated). */
         err = cufinufftf_execute(e->t1, e->d_k2, e->d_im);
         if (err != 0)
             MR_FAIL(MR_ERR_CUFINUFFT, "cufinufftf_execute (type 1) failed with code %d",
@@ -586,6 +692,8 @@ int mr_nufft_eng_execute(mr_nufft_eng *e, const mr_complex *d_x,
                                                           c > 0);
         MR_KERNEL_CHECK("mr_k_nu_acc_conj_se");
     }
+    /* A device with no coils (n_coils = 0) still owes a fully overwritten
+     * output: the empty sum is zero. */
     if (cfg->n_coils == 0)
         MR_CUDA_CHECK(cudaMemsetAsync(d_out, 0, (size_t)total * sizeof(mr_complex), s));
     return MR_SUCCESS;

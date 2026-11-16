@@ -26,8 +26,12 @@
 static void mr_mex_check_complex_single(const mxGPUArray *a, const char *name,
                                         const char *id)
 {
+    /* MR_AHA is single precision throughout (::mr_complex is two floats), so a
+     * double gpuArray would be misread; reject it rather than convert. */
     if (mxGPUGetClassID(a) != mxSINGLE_CLASS)
         mexErrMsgIdAndTxt(id, "%s must be a single-precision gpuArray.", name);
+    /* A real gpuArray stores only one float per element; the library reads
+     * interleaved (re, im) pairs, so it must be explicitly complex. */
     if (mxGPUGetComplexity(a) != mxCOMPLEX)
         mexErrMsgIdAndTxt(id,
                           "%s must be complex. Use complex(%s) in MATLAB if it "
@@ -45,6 +49,8 @@ static void mr_mex_check_complex_single(const mxGPUArray *a, const char *name,
 static void mr_mex_check_numel(const mxGPUArray *a, int64_t expected,
                                const char *name, const char *id)
 {
+    /* Only the total count is checked: the library indexes flat column-major
+     * memory, so any reshape with the right number of elements is accepted. */
     const mwSize n = mxGPUGetNumberOfElements(a);
     if ((int64_t)n != expected)
         mexErrMsgIdAndTxt(id, "%s has %lld elements but %lld were expected.",
@@ -66,9 +72,14 @@ static void mr_mex_check_numel(const mxGPUArray *a, int64_t expected,
 static void mr_mex_check_traj(const mxGPUArray *g_traj, const mr_config *cfg,
                               int64_t *Ntrajs, int64_t *Nkx, const char *id)
 {
+    /* Class: k-space coordinates are real floats (cufinufft single precision). */
     if (mxGPUGetClassID(g_traj) != mxSINGLE_CLASS ||
         mxGPUGetComplexity(g_traj) != mxREAL)
         mexErrMsgIdAndTxt(id, "traj must be a real single-precision gpuArray.");
+    /* Shape: exactly three dimensions. 2D and stack trajectories carry
+     * (kx, ky) only, since kz of a stack is Cartesian and set by Nz. The
+     * dimension vector returned by mxGPUGetDimensions is mxMalloc'ed and must be
+     * freed on every path, including before raising an error. */
     const int     ndim_traj = (cfg->traj_type == MR_TRAJ_3D) ? 3 : 2;
     const mwSize  nd        = mxGPUGetNumberOfDimensions(g_traj);
     const mwSize *dt        = mxGPUGetDimensions(g_traj);
@@ -77,10 +88,12 @@ static void mr_mex_check_traj(const mxGPUArray *g_traj, const mr_config *cfg,
         mexErrMsgIdAndTxt(id, "traj must be a 3-D array [Ntrajs, Nkx, %d].",
                           ndim_traj);
     }
+    /* Copy the extents out before freeing the dimension vector. */
     *Ntrajs = (int64_t)dt[0];
     *Nkx    = (int64_t)dt[1];
     const int ndim_in = (int)dt[2];
     mxFree((void *)dt);
+    /* The coordinate count must match config.traj_type. */
     if (ndim_in != ndim_traj)
         mexErrMsgIdAndTxt(id,
                           "traj's third dimension is %d but %d coordinates are "
@@ -105,7 +118,10 @@ static void mr_mex_check_traj(const mxGPUArray *g_traj, const mr_config *cfg,
  */
 static int mr_mex_devices(const mxArray *mx, int *out, const char *id)
 {
+    /* []: n_devices = 0 means "primary device only" in ::mr_op_options. */
     if (mxIsEmpty(mx)) return 0;
+    /* 'all' (or 'ALL'; other casings are rejected): every visible device. The
+     * small buffer also makes mxGetString fail for any longer string. */
     if (mxIsChar(mx)) {
         char buf[8];
         if (mxGetString(mx, buf, sizeof(buf)) != 0 ||
@@ -114,6 +130,9 @@ static int mr_mex_devices(const mxArray *mx, int *out, const char *id)
                                   "of CUDA ordinals.");
         return MR_OP_ALL_DEVICES;
     }
+    /* Numeric list: must already be int32 CUDA ordinals. The .m layer did the
+     * 1-based -> 0-based conversion; no range check here, the library
+     * validates the ordinals in ::mr_op_create. */
     if (!mxIsInt32(mx) || mxIsComplex(mx))
         mexErrMsgIdAndTxt(id, "devices must be an int32 vector of CUDA ordinals "
                               "(the .m wrappers convert gpuDevice indices).");
@@ -136,12 +155,15 @@ static int mr_mex_devices(const mxArray *mx, int *out, const char *id)
  */
 static mwSize mr_mex_toep_dims(const mr_config *cfg, mwSize dims[4])
 {
+    /* The last axis is always the packed triangle of the L x L Gram block. */
     const int64_t ntri = mr_num_tri(cfg->L);
+    /* Masked: one row per retained grid location, `[num_masked, T]`. */
     if (cfg->is_masked) {
         dims[0] = (mwSize)cfg->num_masked;
         dims[1] = (mwSize)ntri;
         return 2;
     }
+    /* Unmasked: the full upsampled grid `[Mx, My(, Mz)]` followed by T. */
     dims[0] = (mwSize)cfg->phi2_dim[0];
     dims[1] = (mwSize)cfg->phi2_dim[1];
     if (cfg->n_spatial == 3) {

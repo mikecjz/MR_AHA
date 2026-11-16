@@ -23,10 +23,22 @@ function check_reference_matlab(ref_dir)
 %   GPU, on Metal they stay ordinary arrays. Errors if any check fails, so
 %   `matlab -batch check_reference_matlab` exits non-zero.
 %
+%   Tolerances (relative 2-norm error in double precision): 1e-5 for every
+%   AhAx comparison and for the NUFFT results; 1e-5 for the recomputed
+%   phi2_toep on CUDA, 5e-5 on Metal (whose kernel uses a different NUFFT
+%   than the cufinufft reference); 0 for the mask (share of indices in only
+%   one of the two masks). Files exported before the MR-Multitasking Gram
+%   convention (no gram_convention field) count as failures and are skipped.
+%
+%   Masks are stored 0-based (as the C API uses them) and converted to the
+%   1-based indices of the MATLAB interface by adding one.
+%
 %   The MEX files (build/matlab) and the matlab/ folder must be on the path.
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % Default reference directory: data/ref_mlx_mat next to tests/. An empty
+    % directory is an error, so a missing export is not mistaken for a pass.
     if nargin < 1
         ref_dir = fullfile(fileparts(fileparts(mfilename('fullpath'))), ...
                            'data', 'ref_mlx_mat');
@@ -35,6 +47,9 @@ function check_reference_matlab(ref_dir)
     if isempty(files)
         error('MR_AHA:test', 'No reference files in %s.', ref_dir);
     end
+    % Without cufinufft's MATLAB interface on CUDA, the AhA_cufinufft
+    % comparisons are skipped (announced once here). The tolerances are
+    % explained in the help block above.
     fprintf('backend: %s\n', mr_backend());
     if ~strcmp(mr_backend(), 'metal') && exist('cufinufft_plan', 'file') ~= 2
         fprintf('cufinufft MATLAB interface not on the path: AhA_cufinufft is skipped\n');
@@ -42,13 +57,18 @@ function check_reference_matlab(ref_dir)
     tol_aha = 1e-5; tol_toep_ext = 5e-5;
     metal = strcmp(mr_backend(), 'metal');
     nfail = 0;
+    % ---- One reference file per iteration ------------------------------
     for f = files'
         z = load(fullfile(f.folder, f.name));
+        % Refuse files made for the old Gram-block convention: their phi2
+        % blocks are transposed relative to the current one.
         if ~isfield(z, 'gram_convention') || ~strcmp(z.gram_convention, 'multitasking')
             fprintf('FAIL %s: written before the MR-Multitasking Gram convention; regenerate it\n', f.name);
             nfail = nfail + 1;
             continue
         end
+        % Rebuild the configuration the references were made with. Every
+        % check appends one row {name, relative error, tolerance} to rows.
         base = mr_default_config(z.traj_type, z.n_dim, double(z.L), ...
             'phi2_dim', z.phi2_dim, 'n_coils', double(z.n_coils), ...
             'eps', double(z.eps), 'mask_radius', double(z.cfg_mask_radius));
@@ -71,6 +91,8 @@ function check_reference_matlab(ref_dir)
             delete(op);
             % Masked variants: the stored keys carry the suffix 'neighbour'
             % (the neighbourhood mask of CALC_MASK).
+            % Masked kernel, recomputed kernel and operator object; the
+            % recomputed masked kernel is judged through its AhAx only.
             cfgm = cfg; cfgm.is_masked = true;
             mask = z.mask_neighbour + 1;
             suf = [t '_neighbour'];
@@ -85,10 +107,15 @@ function check_reference_matlab(ref_dir)
             delete(op);
         end
         % Mask.
+        % calc_mask with the reference's radius (from base); index sets must
+        % match exactly.
         mn = gather(calc_mask(z.traj, base));
         rows(end+1, :) = {'mask_neighbour', setdiff_frac(mn, z.mask_neighbour + 1), 0}; %#ok<AGROW>
         % NUFFT operator (library) and the independent NUFFT reference
         % (CUDA: needs cufinufft's MATLAB interface).
+        % The library's NUFFT operator is always built; it is compared with
+        % the stored cufinufft result when present, and with AhA_cufinufft
+        % (plus AhA_cufinufft with the stored result) when that is available.
         has_nufft = metal || exist('cufinufft_plan', 'file') == 2;
         op = mr_aha.create_op(z.SEs, z.phi2, z.traj, base, 'method', 'nufft');
         y_op = op * z.x;
@@ -107,6 +134,9 @@ function check_reference_matlab(ref_dir)
             end
         end
 
+        % A row passes when error <= tolerance (NaN fails). The worst row is
+        % ranked by error / tolerance, with eps guarding the zero-tolerance
+        % mask row; every failing row is then listed.
         vals = cell2mat(rows(:, 2)); tols = cell2mat(rows(:, 3));
         bad = find(~(vals <= tols));
         [~, w] = max(vals ./ max(tols, eps));
@@ -117,6 +147,7 @@ function check_reference_matlab(ref_dir)
         end
         nfail = nfail + numel(bad);
     end
+    % Raise an error so `matlab -batch` exits non-zero on any failure.
     if nfail > 0
         error('MR_AHA:test', '%d check(s) failed.', nfail);
     end
@@ -125,6 +156,8 @@ end
 
 function r = rel(a, b)
 %REL  Relative 2-norm difference ||a - b|| / ||b|| in double precision.
+    % gather works on gpuArrays (CUDA) and is a no-op on ordinary arrays
+    % (Metal). A size mismatch is reported as an infinite error.
     a = double(gather(a(:))); b = double(b(:));
     if numel(a) ~= numel(b), r = inf; return, end
     r = norm(a - b) / max(norm(b), realmin);
@@ -132,6 +165,7 @@ end
 
 function d = setdiff_frac(a, b)
 %SETDIFF_FRAC  Share of indices in exactly one of two index sets.
+    % Normalised by the size of the reference set b.
     d = numel(setxor(double(a(:)), double(b(:)))) / max(numel(b), 1);
 end
 

@@ -77,6 +77,9 @@ __device__ __forceinline__ void mr_block_apply(const mr_complex (&v)[NC][L],
                                                const mr_complex *base,
                                                long long stride, int upper)
 {
+    /* Zero the accumulators: every element contributes by addition, and an
+     * output may receive its first contribution from either walk direction
+     * (as y_c from its own column or as y_r from a later column). */
 #pragma unroll
     for (int k = 0; k < NC; ++k)
 #pragma unroll
@@ -96,7 +99,11 @@ __device__ __forceinline__ void mr_block_apply(const mr_complex (&v)[NC][L],
     const mr_complex *bp = base;
 
     /* One stored element: its (r, c) position is a compile-time constant
-     * once the loops below are unrolled. */
+     * once the loops below are unrolled. Load A_rc, advance to the next
+     * packed component, then for every vector k add
+     *   y_c += A_rc v_r                     (the stored element itself) and,
+     *   y_r += conj(A_rc) v_c = A_cr v_c    (its mirror, off the diagonal).
+     * The diagonal test (r) != (c) folds away at compile time. */
 #define MR_BD_ELEMENT(r, c)                                                    \
     do {                                                                       \
         const mr_complex a = *bp;                                              \
@@ -107,6 +114,10 @@ __device__ __forceinline__ void mr_block_apply(const mr_complex (&v)[NC][L],
         }                                                                      \
     } while (0)
 
+    /* Both branches are compiled into every instance; `upper` is a kernel
+     * argument identical for all threads, so the branch never diverges. The
+     * loop orders below reproduce the packed order of mr_tri_offset exactly,
+     * which is what allows `bp` to just advance by `stride` per element. */
     if (upper) {
         /* Upper: column c holds rows 0..c (packed offset c(c+1)/2 + r). */
 #pragma unroll
@@ -165,6 +176,9 @@ mr_k_bd_dense_t(mr_complex *__restrict__ d_pad,
                 const mr_complex *d_phi2_toep, mr_dims dims,
                 int ncoil, mr_bd_range rg)
 {
+    /* One thread per grid location of the range. tid is range-relative (it
+     * indexes d_pad); loc is the absolute natural-order grid index (it
+     * locates the block in phi2_toep, which always covers the whole grid). */
     const long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= rg.nloc) return;
     const long long loc = rg.loc0 + tid;
@@ -179,11 +193,18 @@ mr_k_bd_dense_t(mr_complex *__restrict__ d_pad,
         (long long)dims.m[0] * (mr_nat2cent(j1, dims.m[1], dims.c_m[1]) +
                                 (long long)dims.m[1] *
                                     mr_nat2cent(j2, dims.m[2], dims.c_m[2]));
-    /* Data stride (the range's) vs kernel stride (always the whole grid). */
+    /* Data stride (the range's) vs kernel stride (always the whole grid).
+     * padn separates consecutive ranks of one coil in d_pad; slot = padn * L
+     * separates consecutive coils of the group. */
     const long long padn = rg.vstride;
     const long long slot = padn * L;
     const mr_complex *base = d_phi2_toep + pc;
 
+    /* Coil loop. Each iteration loads the whole rank vector(s) of this
+     * location into registers, applies the block and stores the result over
+     * the input: the multiply is in place, and safe because no other thread
+     * touches this location. For a fixed rank l, consecutive threads access
+     * consecutive addresses, so every load and store is coalesced. */
     int s = 0;
     if (PAIR) {
         for (; s + 1 < ncoil; s += 2) {      /* coil pairs: one toep read */
@@ -202,6 +223,9 @@ mr_k_bd_dense_t(mr_complex *__restrict__ d_pad,
             }
         }
     }
+    /* Remaining coil of an odd-sized group (PAIR), or every coil one at a
+     * time (!PAIR). The block's elements were just read for the previous
+     * coil(s), so these re-reads mostly hit L2 rather than DRAM. */
     for (; s < ncoil; ++s) {                 /* odd coil out, or all coils */
         mr_complex *g = d_pad + slot * s + tid;
         mr_complex v[1][L], y[1][L];
@@ -252,13 +276,19 @@ mr_k_bd_masked_t(mr_complex *__restrict__ d_pad,
                  const int *__restrict__ d_inv, long long num_masked,
                  mr_dims dims, int ncoil, mr_bd_range rg)
 {
+    /* One thread per grid location of the range (range-relative tid). */
     const long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= rg.nloc) return;
 
+    /* Strides as in mr_k_bd_dense_t; the masked kernel's packed components
+     * are num_masked apart. d_inv is indexed by the absolute grid location
+     * and yields this location's column m of the masked kernel. */
     const long long padn = rg.vstride, nm = num_masked;
     const long long slot = padn * L;
     const int m = d_inv[rg.loc0 + tid];
 
+    /* Locations outside the mask contribute nothing: write zeros to every
+     * rank of every coil (this replaces the memset of the generic path). */
     if (m < 0) {                             /* outside the mask: zero */
         const mr_complex z = make_cuFloatComplex(0.0f, 0.0f);
         for (int s = 0; s < ncoil; ++s)
@@ -268,6 +298,7 @@ mr_k_bd_masked_t(mr_complex *__restrict__ d_pad,
     }
     const mr_complex *base = d_phi2_toep + m;
 
+    /* Same coil loop as mr_k_bd_dense_t, with the masked kernel stride. */
     int s = 0;
     if (PAIR) {
         for (; s + 1 < ncoil; s += 2) {      /* coil pairs: one toep read */
@@ -312,7 +343,8 @@ mr_k_bd_masked_t(mr_complex *__restrict__ d_pad,
  */
 #define MR_BD_PAIR(L) ((L) <= MR_BD_PAIR_MAX_L)
 
-/** @brief One `case` of ::mr_bd_lookup. */
+/** @brief One `case` of ::mr_bd_lookup. Taking the address of the template
+ *         instances is what makes nvcc instantiate (compile) them. */
 #define MR_BD_CASE(L)                                                          \
     case L:                                                                    \
         k.dense  = mr_k_bd_dense_t<L, MR_BD_PAIR(L)>;                          \
@@ -322,6 +354,9 @@ mr_k_bd_masked_t(mr_complex *__restrict__ d_pad,
 
 mr_bd_kernels mr_bd_lookup(int L)
 {
+    /* Start from "nothing available"; the switch fills in the specialised
+     * pair for L <= MR_BD_MAX_L unless the environment forces the tiled
+     * kernels (any non-zero integer in MR_AHA_CUDA_TILED_BD). */
     mr_bd_kernels k = {nullptr, nullptr, 0, 0};
     const char *e = std::getenv("MR_AHA_CUDA_TILED_BD");
     const bool force_tiled = e && e[0] && atoi(e) != 0;
@@ -337,7 +372,9 @@ mr_bd_kernels mr_bd_lookup(int L)
         /* Keep in sync with MR_BD_MAX_L. */
         default: break;
     }
-    /* Tiled kernels (mr_kernels_bdt.cu) for the other ranks. */
+    /* Tiled kernels (mr_kernels_bdt.cu) for the other ranks. Ranks above
+     * MR_BDT_MAX_L (or L < 1) return the zero struct, and the caller falls
+     * back to the generic kernels of mr_kernels.cu. */
     if (k.dense == nullptr && L >= 1 && L <= MR_BDT_MAX_L) k.tiled = 1;
     return k;
 }

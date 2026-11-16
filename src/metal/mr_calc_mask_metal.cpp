@@ -58,12 +58,18 @@ int mr_mask_check(const char *fn, const mr_config *cfg)
 int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
                   int64_t *d_mask, int64_t *n_out)
 {
+    /* Autorelease pool for the whole call (see mr_metal_internal.h) and the
+     * shared device / queue. */
     *n_out = 0;
     mr_metal_pool pool;
     const mr_metal_ctx *ctx = nullptr;
     int rc = mr_metal_context(&ctx);
     if (rc != MR_SUCCESS) return rc;
 
+    /* Grid of marks. For 2D and stack-of-stars trajectories only the [Mx, My]
+     * plane is built (third extent 1); for 3D the full [Mx, My, Mz] grid.
+     * Kernel thread indices are 32-bit (mr_kernels.metal), hence the limit
+     * on both the grid and the number of samples. */
     const bool three = cfg->traj_type == MR_TRAJ_3D;
     const int m[3] = {cfg->phi2_dim[0], cfg->phi2_dim[1],
                       three ? cfg->phi2_dim[2] : 1};
@@ -72,12 +78,17 @@ int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
     if (n > 0xFFFFFFFFLL || n_samples > 0xFFFFFFFFLL)
         MR_FAIL(MR_ERR_UNSUPPORTED, "mask grid too large for the Metal backend");
 
+    /* Cached pipelines of the two kernels (ports of the CUDA kernels of the
+     * same names in mr_calc_mask.cu). */
     MTL::ComputePipelineState *k_mark = nullptr, *k_dil = nullptr;
     if ((rc = mr_metal_pipeline("mr_k_mark_samples", &k_mark)) != MR_SUCCESS ||
         (rc = mr_metal_pipeline("mr_k_dilate_axis", &k_dil)) != MR_SUCCESS)
         return rc;
 
-    /* Shared storage: the CPU fills / reads it directly. */
+    /* Shared storage: the CPU fills / reads it directly. Two grids of float
+     * marks (0 or 1) are needed because each dilation pass reads one and
+     * writes the other; if either allocation fails, the other is released
+     * before returning. */
     const NS::UInteger bytes = (NS::UInteger)n * sizeof(float);
     MTL::Buffer *a = ctx->device->newBuffer(bytes, MTL::ResourceStorageModeShared);
     MTL::Buffer *b = ctx->device->newBuffer(bytes, MTL::ResourceStorageModeShared);
@@ -88,6 +99,13 @@ int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
                 (long long)n);
     }
 
+    /* One command buffer and one compute encoder hold the whole GPU part
+     * (mark, then up to three dilation passes); Metal orders dispatches
+     * within an encoder, like kernels on one CUDA stream. The grid `a` is
+     * cleared by the CPU (it is shared memory, so a memset replaces
+     * cudaMemset), and the trajectory is wrapped as a read-only view. If
+     * wrapping fails, nothing is encoded and the error falls through to the
+     * common cleanup below. */
     MTL::CommandBuffer *cb = ctx->queue->commandBuffer();
     MTL::ComputeCommandEncoder *enc = cb->computeCommandEncoder();
     mr_metal_view tv;
@@ -96,6 +114,9 @@ int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
     const int ndim = three ? 3 : 2;
     rc = mr_metal_view_make(ctx, traj,
                             (size_t)n_samples * ndim * sizeof(float), false, &tv);
+    /* Marking: one thread per sample sets the nearest grid point of `a` to 1.
+     * The trajectory is read as [n_samples, ndim] (coordinate slowest), in
+     * k in radians, and scaled by M_a / (2*pi) to grid cells. */
     if (rc == MR_SUCCESS) {
         const double tau = 6.283185307179586; /* 2*pi */
         mr_mark_params p = {(long long)n_samples, ndim, {m[0], m[1], m[2]},
@@ -108,7 +129,12 @@ int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
         mr_metal_dispatch_1d(enc, k_mark, (uint64_t)n_samples);
     }
 
-    /* Separable periodic dilation, ping-ponging between a and b. */
+    /* Separable periodic dilation, ping-ponging between a and b. A box
+     * dilation is the product of 1-D dilations along each axis, so each
+     * transformed axis (extent > 1) gets one pass reading `a` and writing
+     * `b`, after which the two are swapped; `stride` is the element stride
+     * of the current axis in the column-major grid. After the loop the
+     * final marks are always in `a`. Radius 0 keeps the bare marks. */
     if (rc == MR_SUCCESS && radius > 0) {
         long long stride = 1;
         const long long nn = (long long)n;
@@ -127,19 +153,27 @@ int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
             stride *= m[ax];
         }
     }
+    /* The encoder is always ended (an open encoder may not be abandoned);
+     * the command buffer is only submitted when everything was encoded. */
     enc->endEncoding();
     if (rc == MR_SUCCESS) rc = mr_metal_wait(cb, "mr_calc_mask");
 
     int64_t k = 0;
     if (rc == MR_SUCCESS) {
-        /* Ascending compaction straight from unified memory. */
+        /* Ascending compaction straight from unified memory. This replaces
+         * the thrust::count_if / copy_if of the CUDA backend: the CPU scans
+         * the marks in index order, so the indices come out sorted. With
+         * d_mask NULL only the count is produced (the sizing call). */
         const float *marks = static_cast<const float *>(a->contents());
         for (int64_t i = 0; i < n; ++i)
             if (marks[i] > 0.5f) { /* marks are exactly 0 or 1 */
                 if (d_mask) d_mask[k] = i;
                 ++k;
             }
-        /* Stack: every kz plane shares the in-plane mask. */
+        /* Stack: every kz plane shares the in-plane mask. kz is Cartesian,
+         * so the k in-plane indices of plane 0 are repeated for planes
+         * 1 .. Mz-1, offset by kz * Mx * My (CPU version of the CUDA
+         * mr_k_replicate_planes). The result stays sorted. */
         if (cfg->traj_type == MR_TRAJ_STACK) {
             const int Mz = cfg->phi2_dim[2];
             const int64_t plane = (int64_t)cfg->phi2_dim[0] * cfg->phi2_dim[1];
@@ -150,10 +184,13 @@ int mr_mask_metal(const mr_config *cfg, const float *traj, int64_t n_samples,
             k *= Mz;
         }
     }
+    /* Common cleanup for success and failure. The trajectory view releases
+     * its own buffer when it goes out of scope. */
     a->release();
     b->release();
     if (rc != MR_SUCCESS) return rc;
 
+    /* Optional report against the full upsampled grid (Mx*My*Mz). */
     if (cfg->verbose)
         printf("[mr_aha] calc_mask: kept %lld of %lld upsampled locations "
                "(%.1f%%) within radius %d of a sample (Metal)\n", (long long)k,
@@ -169,6 +206,12 @@ extern "C" int mr_calc_mask(const mr_config *cfg, const float *d_traj,
                             int64_t Ntrajs, int64_t Nkx, int64_t *d_mask,
                             int64_t *num_masked_out)
 {
+    /* Public entry point: reset the error state, validate the configuration
+     * (with masking forced off) and the trajectory extents, then do the work
+     * in mr_mask_metal. d_traj and d_mask are host pointers here (unified
+     * memory), not device pointers as in the CUDA build. d_mask may be NULL
+     * to query the count; otherwise it must hold up to mr_pad_size(cfg)
+     * entries. */
     mr_clear_error();
     MR_REQUIRE(num_masked_out != NULL, "mr_calc_mask: num_masked_out is NULL");
     *num_masked_out = 0;

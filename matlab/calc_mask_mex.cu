@@ -34,13 +34,17 @@
  */
 void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
 {
+    /* ---- Argument count: exactly (traj, config), at most one output. ---- */
     if (nrhs != 2)
         mexErrMsgIdAndTxt(MR_ID, "Usage: mask = calc_mask_mex(traj, config).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID, "Too many output arguments.");
 
+    /* Initialise the MathWorks GPU API before any mxGPU* call. */
     mxInitGPU();
 
     /* ---- Configuration -------------------------------------------------- */
+    /* Only traj_type, n_dim, phi2_dim, mask_radius and the execution fields
+     * (device, stream, verbose) matter to mr_calc_mask. */
     mr_config cfg;
     mr_mex_parse_config(prhs[1], &cfg, MR_ID);
     /* The mask is what is being computed, so masking is irrelevant here. */
@@ -50,6 +54,9 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     if (status != MR_SUCCESS) mr_mex_fail(MR_ID, status);
 
     /* ---- Trajectory ----------------------------------------------------- */
+    /* traj must be real single [Ntrajs, Nkx, ndim] with ndim = 3 for a 3D
+     * trajectory and 2 for 2D and stack (kz of a stack is Cartesian). The
+     * extents are read defensively (nd may be < 3) and validated afterwards. */
     const mxGPUArray *g_traj = mxGPUCreateFromMxArray(prhs[0]);
     if (mxGPUGetClassID(g_traj) != mxSINGLE_CLASS ||
         mxGPUGetComplexity(g_traj) != mxREAL)
@@ -68,6 +75,10 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     const float *d_traj = (const float *)mxGPUGetDataReadOnly(g_traj);
 
     /* ---- Mask: fill a worst-case buffer, then shrink to fit ------------- */
+    /* The number of retained locations is only known after the call, so the
+     * library writes into a buffer of the worst-case size Mx*My*Mz and
+     * reports the count. The trajectory wrapper is no longer needed after
+     * the call and is released immediately. */
     mwSize cap = (mwSize)mr_pad_size(&cfg);
     mxGPUArray *g_buf = mxGPUCreateGPUArray(1, &cap, mxINT64_CLASS, mxREAL,
                                             MX_GPU_DO_NOT_INITIALIZE);
@@ -80,6 +91,9 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
         mr_mex_fail(MR_ID, rc);
     }
 
+    /* Copy the n_kept sorted 0-based indices into a right-sized [n_kept, 1]
+     * int64 gpuArray (device-to-device), so MATLAB does not hold on to the
+     * worst-case buffer. With n_kept == 0 the result is an empty column. */
     mwSize dims_out[2] = {(mwSize)n_kept, 1};
     mxGPUArray *g_out = mxGPUCreateGPUArray(2, dims_out, mxINT64_CLASS, mxREAL,
                                             MX_GPU_DO_NOT_INITIALIZE);

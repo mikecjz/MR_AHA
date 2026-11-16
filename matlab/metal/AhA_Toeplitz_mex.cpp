@@ -53,11 +53,18 @@ static void mr_check_cs(const mxArray *a, int64_t expected, const char *name)
  */
 void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
 {
+    /* Arity checks. mexErrMsgIdAndTxt does not return (it unwinds back to
+     * MATLAB), so no explicit return follows any error below. */
     if (nrhs != 4 && nrhs != 5)
         mexErrMsgIdAndTxt(MR_ID, "Usage: AhAx = AhA_Toeplitz_mex(x, SEs, "
                                  "phi2_toep, config[, mask]).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID, "Too many output arguments.");
 
+    /* Translate the MATLAB config struct into an mr_config (shared helper
+     * of both backends' gateways, matlab/mr_mex_config.h). n_coils is
+     * optional in the struct; when absent it is inferred from SEs, whose
+     * first n_spatial dimensions are the image and whose next one counts the
+     * coils (a single map has no trailing dimension). */
     mr_config cfg;
     mr_mex_parse_config(prhs[3], &cfg, MR_ID);
     if (mr_mex_field(prhs[3], "n_coils") == NULL) {
@@ -67,6 +74,10 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
         cfg.n_coils = ((int)nd > cfg.n_spatial) ? (int)dims[cfg.n_spatial] : 1;
     }
 
+    /* Masked operator: the fifth argument is required and must already be
+     * the 0-based int64 index list (no conversion here). config.num_masked
+     * may be omitted (0), in which case the mask's length is taken; if given
+     * it must agree with the mask. The mask is read in place. */
     const int64_t *mask = NULL;
     if (cfg.is_masked) {
         if (nrhs != 5)
@@ -84,6 +95,12 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
         mask = (const int64_t *)mxGetInt64s(prhs[4]);
     }
 
+    /* Validate the completed configuration, then check each array's class
+     * and element count against the sizes the configuration implies
+     * (x: image * L, SEs: image * n_coils, phi2_toep: grid or num_masked
+     * times the L(L+1)/2 stored components). Only the element count is
+     * checked, not the shape, so any reshaping of the same data is
+     * accepted. */
     const int status = mr_config_validate(&cfg);
     if (status != MR_SUCCESS) mr_mex_fail(MR_ID, status);
 
@@ -91,6 +108,11 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     mr_check_cs(prhs[1], mr_se_size(&cfg), "SEs");
     mr_check_cs(prhs[2], mr_phi2_toep_size(&cfg), "phi2_toep");
 
+    /* Output shaped like x, then the one-shot library call (plan create,
+     * execute, destroy). The GPU reads the inputs and writes `out` directly
+     * through MATLAB's own storage, so there is no upload or download step,
+     * unlike the CUDA gateway's gpuArray handling. On failure the output is
+     * freed and the library's diagnostic is raised as a MATLAB error. */
     mxArray *out = mxCreateNumericArray(mxGetNumberOfDimensions(prhs[0]),
                                         mxGetDimensions(prhs[0]), mxSINGLE_CLASS,
                                         mxCOMPLEX);

@@ -29,6 +29,8 @@
  */
 static void mr_mex_fail(const char *id, int status)
 {
+    /* Message = generic status text, numeric code, and the thread-local detail
+     * recorded by the library for the failing call. Does not return. */
     mexErrMsgIdAndTxt(id, "%s (%d): %s", mr_status_string(status), status,
                       mr_last_error());
 }
@@ -41,6 +43,8 @@ static void mr_mex_fail(const char *id, int status)
  */
 static const mxArray *mr_mex_field(const mxArray *s, const char *name)
 {
+    /* Absent and empty fields are treated alike, so callers can pass `[]` in
+     * MATLAB to mean "use the default". */
     if (!mxIsStruct(s)) return NULL;
     const mxArray *f = mxGetField(s, 0, name);
     if (f == NULL || mxIsEmpty(f)) return NULL;
@@ -56,6 +60,8 @@ static const mxArray *mr_mex_field(const mxArray *s, const char *name)
  */
 static double mr_mex_scalar(const mxArray *s, const char *name, const char *id)
 {
+    /* Required: missing or empty is an error; logical is accepted so that
+     * flags such as `is_masked = true` work. Only element 0 is read. */
     const mxArray *f = mr_mex_field(s, name);
     if (f == NULL)
         mexErrMsgIdAndTxt(id, "config.%s is required.", name);
@@ -74,6 +80,8 @@ static double mr_mex_scalar(const mxArray *s, const char *name, const char *id)
 static double mr_mex_scalar_opt(const mxArray *s, const char *name,
                                 double fallback)
 {
+    /* Optional: no class check; mxGetScalar converts any numeric/logical
+     * class to double (element 0 only). */
     const mxArray *f = mr_mex_field(s, name);
     if (f == NULL) return fallback;
     return mxGetScalar(f);
@@ -94,6 +102,8 @@ static double mr_mex_scalar_opt(const mxArray *s, const char *name,
 static void mr_mex_dims(const mxArray *s, const char *name, int expected,
                         int out[3], const char *id)
 {
+    /* Presence, class and length checks: the entry count must equal the
+     * number of spatial dimensions of the trajectory type (2 or 3). */
     const mxArray *f = mr_mex_field(s, name);
     if (f == NULL) mexErrMsgIdAndTxt(id, "config.%s is required.", name);
     if (!mxIsNumeric(f))
@@ -103,6 +113,8 @@ static void mr_mex_dims(const mxArray *s, const char *name, int expected,
         mexErrMsgIdAndTxt(id, "config.%s must have %d entries for this "
                               "trajectory type, but has %d.",
                           name, expected, (int)n);
+    /* Unused trailing extents (e.g. Nz for 2D) default to 1, as ::mr_config
+     * requires. */
     out[0] = out[1] = out[2] = 1;
     /* Read element-wise via a double so that any numeric class is accepted. */
     for (mwSize i = 0; i < n; ++i) {
@@ -133,12 +145,14 @@ static void mr_mex_dims(const mxArray *s, const char *name, int expected,
 static void mr_mex_string(const mxArray *s, const char *name, char *buf,
                           int cap, const char *id)
 {
+    /* Copy into @p buf; mxGetString fails when the value does not fit. */
     const mxArray *f = mr_mex_field(s, name);
     if (f == NULL) mexErrMsgIdAndTxt(id, "config.%s is required.", name);
     if (!mxIsChar(f))
         mexErrMsgIdAndTxt(id, "config.%s must be a character vector.", name);
     if (mxGetString(f, buf, cap) != 0)
         mexErrMsgIdAndTxt(id, "config.%s is too long.", name);
+    /* ASCII lower-casing so '2D' / '2d', 'Lower' / 'lower' compare equal. */
     for (int i = 0; buf[i]; ++i)
         if (buf[i] >= 'A' && buf[i] <= 'Z') buf[i] = (char)(buf[i] - 'A' + 'a');
 }
@@ -161,6 +175,7 @@ static void mr_mex_string(const mxArray *s, const char *name, char *buf,
 static void mr_mex_parse_config(const mxArray *mx_cfg, mr_config *cfg,
                                 const char *id)
 {
+    /* ---- Trajectory type: selects n_spatial and the library defaults ---- */
     if (!mxIsStruct(mx_cfg))
         mexErrMsgIdAndTxt(id, "config must be a scalar struct.");
 
@@ -176,21 +191,29 @@ static void mr_mex_parse_config(const mxArray *mx_cfg, mr_config *cfg,
         return;
     }
 
+    /* Start from the library defaults so that every field not exposed to
+     * MATLAB (and every optional one left out) has a defined value. */
     const int status = mr_config_defaults(cfg, tt);
     if (status != MR_SUCCESS) mr_mex_fail(id, status);
 
+    /* ---- Required geometry: image size N and upsampled Toeplitz size M --- */
     const int nsp = cfg->n_spatial;
     mr_mex_dims(mx_cfg, "n_dim",    nsp, cfg->n_dim,    id);
     mr_mex_dims(mx_cfg, "phi2_dim", nsp, cfg->phi2_dim, id);
 
+    /* Subspace rank. */
     cfg->L = (int)mr_mex_scalar(mx_cfg, "L", id);
 
+    /* Which packed triangle of each Hermitian L x L block phi2_toep holds. */
     char tri[32];
     mr_mex_string(mx_cfg, "triangulation", tri, sizeof(tri), id);
     if (strcmp(tri, "lower") == 0)      cfg->triangulation = MR_TRI_LOWER;
     else if (strcmp(tri, "upper") == 0) cfg->triangulation = MR_TRI_UPPER;
     else mexErrMsgIdAndTxt(id, "config.triangulation must be 'upper' or 'lower'.");
 
+    /* ---- Masking flag (required) and optional tuning fields --------------
+     * num_masked = 0 lets the gateways infer it from the mask length;
+     * n_coils = 1 is overridden by gateways that infer it from SEs. */
     cfg->is_masked     = mr_mex_scalar(mx_cfg, "is_masked", id) != 0.0;
     cfg->num_masked    = (int64_t)mr_mex_scalar_opt(mx_cfg, "num_masked", 0);
     cfg->n_coils       = (int)mr_mex_scalar_opt(mx_cfg, "n_coils", 1);
@@ -201,6 +224,7 @@ static void mr_mex_parse_config(const mxArray *mx_cfg, mr_config *cfg,
     cfg->gpu_device_id = (int)mr_mex_scalar_opt(mx_cfg, "gpu_device_id", -1);
     cfg->mask_radius =
         (int)mr_mex_scalar_opt(mx_cfg, "mask_radius", MR_DEFAULT_MASK_RADIUS);
+    /* Legacy default stream: ordered with MATLAB's own GPU work. */
     cfg->stream        = NULL;
 }
 

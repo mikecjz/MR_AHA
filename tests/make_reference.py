@@ -55,6 +55,29 @@ JSON string ``config_json`` that also records the full
 ``MRConfig`` of every call, the layout note, the GPU and the software
 versions.
 
+Verification
+------------
+After generating, every file in ``data/ref_mlx/`` is reloaded and checked by
+:func:`verify`. These are *self-consistency* checks of the CUDA output (the
+consumers of the files, ``tests/check_reference.py`` and
+``tests/check_reference_matlab.m``, compare another backend against them):
+
+* every floating-point array is finite;
+* each masked ``phi2_toep`` equals the unmasked kernel gathered at the mask
+  (``rel <= 1e-6``; the same transform, only the output gather differs);
+* ``AhAx`` from the ``'upper'`` and ``'lower'`` packings agree
+  (``rel <= 1e-5``; the same Hermitian block, reconstructed from the other
+  triangle);
+* Toeplitz agrees with the cufinufft NUFFT reference (``rel <= 1e-4``, the
+  NUFFT accuracy) when that reference was computed.
+
+The masked-vs-unmasked ``AhAx`` gap and, for the real case, the gap to the
+stored CPU finufft result are only printed (they depend on the mask radius
+and on the data, so no fixed tolerance applies).
+
+Requires the CUDA backend, CuPy and, for the NUFFT reference, the
+``cufinufft`` Python package; the real case additionally needs SciPy.
+
 Usage::
 
     CUDA_VISIBLE_DEVICES=1 python tests/make_reference.py          # generate + verify
@@ -70,12 +93,15 @@ from pathlib import Path
 
 import numpy as np
 
+# Repository root; the in-tree Python package is put first on sys.path so the
+# library built in this checkout is the one exercised.
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python"))
 
 import cupy as cp  # noqa: E402
 import mr_aha  # noqa: E402
 
+# Output directory of the reference files (one .npz per case).
 OUT_DIR = ROOT / "data" / "ref_mlx"
 
 #: Gram-block convention recorded in every file's ``config_json``
@@ -95,6 +121,10 @@ LAYOUT_NOTE = (
     "centred upsampled grid [Mx, My, Mz]. k-space centre at index M//2."
 )
 
+# Each case: image size, rank L, coil count, spoke count / samples per spoke
+# and the RNG seed. Together they cover every trajectory family, L = 1 (scalar
+# blocks), odd image sizes (exact centring for odd N), an explicit odd
+# upsampled grid, and odd Nz for a stack (Mz = Nz must stay odd).
 #: The synthetic cases. ``phi2_dim=None`` means the library default
 #: (``2 * n_dim``, ``Mz = Nz`` for a stack).
 CASES = [
@@ -115,6 +145,7 @@ CASES = [
          n_coils=2, n_traj=35, n_kx=62, seed=7),
 ]
 
+# Both packings of the Hermitian L x L blocks are generated for every case.
 TRIS = ("lower", "upper")
 #: Suffix of the masked variants (the neighbourhood mask of
 #: :func:`mr_aha.calc_mask`).
@@ -150,8 +181,12 @@ def make_traj(traj_type: str, n_traj: int, n_kx: int) -> np.ndarray:
         ``float32`` array ``(ndim, Nkx, Ntrajs)`` in radians per image-grid
         unit, within ``[-pi, pi)``.
     """
+    # Readout positions as a column and spoke indices as a row, so the
+    # products below broadcast to (Nkx, Ntrajs).
     r = radial_readout(n_kx)[:, None]                      # (Nkx, 1)
     t = np.arange(n_traj)[None, :]                          # (1, Ntrajs)
+    # 2D / stack: in-plane spokes at successive golden-angle increments of pi
+    # (the kz axis of a stack is Cartesian and not part of the trajectory).
     if traj_type in ("2D", "stack"):
         th = np.pi * GOLDEN * t
         traj = np.stack([r * np.cos(th), r * np.sin(th)])
@@ -162,6 +197,7 @@ def make_traj(traj_type: str, n_traj: int, n_kx: int) -> np.ndarray:
         az = 2.0 * np.pi * np.mod(t * phi2, 1.0)
         s = np.sqrt(1.0 - z ** 2)
         traj = np.stack([r * s * np.cos(az), r * s * np.sin(az), r * z])
+    # traj is (ndim, Nkx, Ntrajs) row-major, the C API's [Ntrajs, Nkx, ndim].
     return np.ascontiguousarray(traj, dtype=np.float32)
 
 
@@ -181,9 +217,16 @@ def make_phi2(rng, L: int, n_traj: int, n_kz: int | None) -> np.ndarray:
         ``complex64`` array ``(L, L, Ntrajs)`` or ``(L, L, Nkz, Ntrajs)`` with
         ``phi2[j, i, ...] = B[..., i, j]``.
     """
+    # One block per readout (and per kz plane for a stack): A has shape
+    # (lead..., 2, L), i.e. a time x rank matrix with two time points, so
+    # Phi = A^T is rank x time.
     lead = (n_traj,) if n_kz is None else (n_traj, n_kz)
     A = (rng.standard_normal(lead + (2, L)) + 1j * rng.standard_normal(lead + (2, L)))
+    # B[..., i, j] = sum_k A[k, i] conj(A[k, j]) = (Phi Phi^H)_{ij}, divided by
+    # the number of time points.
     B = np.einsum("...ki,...kj->...ij", A, A.conj()) / 2.0   # (..., L, L) = Phi Phi^H
+    # Reverse all axes so that the row-major array equals the column-major
+    # [Ntrajs, (Nkz,) L, L] the library expects: phi2[j, i, (z,) t] = B[t, (z,) i, j].
     phi2 = B.transpose(tuple(range(B.ndim))[::-1])         # [j, i, (z,) t]
     return np.ascontiguousarray(phi2, dtype=np.complex64)
 
@@ -200,6 +243,9 @@ def crandn(rng, shape) -> np.ndarray:
 def cfg_dict(cfg) -> dict:
     """Plain-Python snapshot of an :class:`mr_aha.MRConfig` (no stream)."""
     out = {}
+    # Walk the ctypes fields of the configuration struct; the stream pointer
+    # is skipped (not meaningful, not JSON-serialisable) and fixed-size arrays
+    # (n_dim, phi2_dim) become lists.
     for name, _ in cfg._fields_:
         if name == "stream":
             continue
@@ -226,13 +272,18 @@ def run_case(traj_type, n_dim, L, n_coils, traj, phi2, x, SEs, phi2_dim=None,
         ``(arrays, meta)``: the outputs as NumPy arrays keyed as in the module
         docstring, and a dict of per-call configurations for ``config_json``.
     """
+    # Upload the NumPy inputs to the GPU (the CUDA binding takes CuPy arrays).
     g_traj, g_phi2 = cp.asarray(traj), cp.asarray(phi2)
     g_x, g_SEs = cp.asarray(x), cp.asarray(SEs)
+    # Keywords shared by every configuration built below.
     kw = dict(n_coils=n_coils)
     if phi2_dim is not None:
         kw["phi2_dim"] = phi2_dim
     out, meta = {}, {"calls": {}}
 
+    # The unmasked default configuration ('lower' triangulation) is used for
+    # the mask and the NUFFT reference. The neighbourhood mask is computed
+    # with the configuration's default radius and saved as mask_neighbour.
     base = mr_aha.make_config(traj_type, n_dim, L, **kw)
     meta["base_config"] = cfg_dict(base)
     masks = {
@@ -241,6 +292,10 @@ def run_case(traj_type, n_dim, L, n_coils, traj, phi2, x, SEs, phi2_dim=None,
     for m, v in masks.items():
         out[f"mask_{m}"] = v.get()
 
+    # For each packing: the unmasked kernel and its A^H A x, then for each
+    # mask the masked kernel and its A^H A x. Every configuration used is
+    # recorded under meta["calls"]. Kernels are released as soon as they have
+    # been copied to the host to keep GPU memory low.
     for tri in TRIS:
         cfg = mr_aha.make_config(traj_type, n_dim, L, triangulation=tri, **kw)
         Om = mr_aha.calc_toep(cfg, g_phi2, g_traj)
@@ -258,6 +313,9 @@ def run_case(traj_type, n_dim, L, n_coils, traj, phi2, x, SEs, phi2_dim=None,
             meta["calls"][f"{tri}_{m}"] = cfg_dict(cfgm)
             del Om
 
+    # Independent check: the pure Python NUFFT operator (CuPy + cufinufft),
+    # which shares no code with the Toeplitz path. It is optional; when it
+    # cannot run, the reason is recorded in meta["nufft"] instead.
     if with_nufft:
         try:
             with mr_aha.aha_nufft_plan(base, g_traj) as plan:
@@ -265,6 +323,7 @@ def run_case(traj_type, n_dim, L, n_coils, traj, phi2, x, SEs, phi2_dim=None,
             meta["nufft"] = "aha_nufft_plan (cufinufft), eps = cfg.eps, upsampfac 2"
         except Exception as e:  # cufinufft missing or libcudart not found
             meta["nufft"] = f"skipped: {type(e).__name__}: {e}"
+    # Release CuPy's cached blocks before the next case.
     cp.get_default_memory_pool().free_all_blocks()
     return out, meta
 
@@ -294,6 +353,9 @@ def save_case(name: str, inputs: dict, outputs: dict, meta: dict) -> Path:
     Returns:
         Path of the written file.
     """
+    # The metadata gains the case name, the layout and Gram-convention notes
+    # (check_reference.py rejects files without gram_convention) and the
+    # environment; it is stored as a 0-d string array next to the arrays.
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUT_DIR / f"{name}.npz"
     meta = dict(meta, case=name, layout=LAYOUT_NOTE, env=environment(),
@@ -304,6 +366,9 @@ def save_case(name: str, inputs: dict, outputs: dict, meta: dict) -> Path:
 
 def scalar_inputs(traj_type, n_dim, L, n_coils, phi2_dim, base_cfg) -> dict:
     """Scalar metadata keys stored next to the arrays."""
+    # phi2_dim is taken from the configuration the library actually used
+    # (resolving the default 2*N / Mz = Nz), truncated to the spatial
+    # dimensions; eps and mask_radius are the configuration defaults.
     nsp = len(n_dim)
     return dict(
         traj_type=np.array(traj_type),
@@ -317,6 +382,8 @@ def scalar_inputs(traj_type, n_dim, L, n_coils, phi2_dim, base_cfg) -> dict:
 
 def generate_synthetic(case: dict) -> Path:
     """Build, run and save one synthetic case from :data:`CASES`."""
+    # Per-case seed, so each file can be regenerated independently. The
+    # trajectory is deterministic; Gram blocks, x and the maps are random.
     rng = np.random.default_rng(case["seed"])
     tt, n_dim, L, nc = case["traj_type"], case["n_dim"], case["L"], case["n_coils"]
     img = tuple(reversed(n_dim))                           # ([Nz,] Ny, Nx)
@@ -324,6 +391,8 @@ def generate_synthetic(case: dict) -> Path:
     phi2 = make_phi2(rng, L, case["n_traj"], n_dim[2] if tt == "stack" else None)
     x = crandn(rng, (L,) + img)
     SEs = crandn(rng, (nc,) + img)
+    # Run the library, then store the case definition, the inputs and the
+    # scalar metadata together with the outputs.
     outputs, meta = run_case(tt, n_dim, L, nc, traj, phi2, x, SEs,
                              phi2_dim=case.get("phi2_dim"))
     meta["synthetic"] = {k: v for k, v in case.items()}
@@ -342,12 +411,16 @@ def generate_real_2d() -> Path | None:
     Returns:
         Path of the written file, or ``None`` if the data file is missing.
     """
+    # The real data set is optional (not part of the repository checkout).
     f = ROOT / "data" / "human_C-35_2D_radial.mat"
     if not f.exists():
         print(f"skip real 2D: {f} missing")
         return None
     import scipy.io as sio
 
+    # loadmat returns MATLAB's column-major arrays as Fortran-ordered NumPy
+    # arrays; .T reverses the axes, giving the row-major layout of the binding
+    # with the same memory order.
     d = sio.loadmat(f)
     L, Nt = 6, 377
     traj = np.ascontiguousarray(d["traj"].T, dtype=np.float32)
@@ -357,6 +430,8 @@ def generate_real_2d() -> Path | None:
     x = np.ascontiguousarray(d["x"].T, dtype=np.complex64)
     SEs = np.ascontiguousarray(d["SEs"].T, dtype=np.complex64)
     ref = np.ascontiguousarray(d["AhAx_ref"].T, dtype=np.complex64)
+    # Run every entry point on the real data; the coil count comes from the
+    # maps. The stored CPU finufft result is kept as AhAx_finufft_cpu.
     n_dim = (160, 160)
     outputs, meta = run_case("2D", n_dim, L, SEs.shape[0], traj, phi2, x, SEs)
     meta["source"] = "data/human_C-35_2D_radial.mat (AhAx_finufft_cpu = stored AhAx_ref)"
@@ -389,6 +464,7 @@ def verify(path: Path) -> list[str]:
         List of failure messages (empty if all hard checks pass). A one-line
         summary of the soft metrics is printed.
     """
+    # Hard check 1: no NaN or Inf in any floating-point array.
     z = np.load(path)
     meta = json.loads(str(z["config_json"]))
     fails = []
@@ -396,6 +472,9 @@ def verify(path: Path) -> list[str]:
         a = z[k]
         if a.dtype.kind in "fc" and not np.isfinite(a).all():
             fails.append(f"{k} has non-finite values")
+    # Hard check 2: masking only gathers the kernel at the mask locations, so
+    # the masked kernel must equal the unmasked one indexed by the mask (a
+    # 0-based column-major index is the flat index of the row-major grid).
     for tri in TRIS:
         full = z[f"phi2_toep_{tri}"]
         flat = full.reshape(full.shape[0], -1)
@@ -404,14 +483,21 @@ def verify(path: Path) -> list[str]:
             d = rel(z[f"phi2_toep_{tri}_{m}"], flat[:, mk])
             if d > 1e-6:
                 fails.append(f"phi2_toep_{tri}_{m} != gathered unmasked (rel {d:.2e})")
+    # Hard check 3: both packings describe the same Hermitian block, so the
+    # outputs agree up to single-precision rounding.
     d_tri = rel(z["AhAx_upper"], z["AhAx_lower"])
     if d_tri > 1e-5:
         fails.append(f"AhAx upper vs lower differ (rel {d_tri:.2e})")
+    # Soft metrics (printed only): fraction of the upsampled grid the mask
+    # keeps and the masked-vs-unmasked A^H A x gap.
     pad = int(np.prod(z["phi2_dim"]))
     parts = [f"upper/lower {d_tri:.1e}"]
     for m in MASKS:
         parts.append(f"{m}: keep {z[f'mask_{m}'].size / pad:.0%}, "
                      f"AhA vs unmasked {rel(z[f'AhAx_lower_{m}'], z['AhAx_lower']):.1e}")
+    # Hard check 4 (when present): Toeplitz vs the cufinufft NUFFT operator,
+    # within the NUFFT accuracy. The CPU finufft comparison of the real case is
+    # informational.
     if "AhAx_nufft" in z.files:
         d_nu = rel(z["AhAx_lower"], z["AhAx_nufft"])
         parts.append(f"toep vs nufft {d_nu:.1e}")
@@ -432,6 +518,8 @@ def main() -> int:
                     help="only re-check the files already in data/ref_mlx")
     args = ap.parse_args()
 
+    # Generate every synthetic case, then the real case (skipped when its
+    # data file is missing). --verify-only re-checks existing files only.
     if not args.verify_only:
         for case in CASES:
             print(f"generating {case['name']} ...", flush=True)
@@ -439,6 +527,8 @@ def main() -> int:
         print("generating 2d_real_160x160_L6_c16 ...", flush=True)
         generate_real_2d()
 
+    # Verify every file present in the output directory (including files from
+    # earlier runs) and report all failures together.
     print("verifying:")
     fails = []
     for p in sorted(OUT_DIR.glob("*.npz")):

@@ -94,11 +94,20 @@ function check_op_matlab(varargin)
 %   which would override 'toep_dist', is cleared for the duration. All three
 %   environment variables are restored on return.
 %
+%   REFERENCES. Every reference is computed on the fly from the same random
+%   inputs (seeded with rng(1234)): CALC_TOEP + AHA_TOEPLITZ (the stateless
+%   primitives) for the Toeplitz method, AHA_CUFINUFFT (independent of the
+%   library) and the Toeplitz operator for the NUFFT method, and the
+%   single-GPU operator for every multi-GPU result. Bit-identity is required
+%   wherever the arithmetic is the same (a supplied kernel, kernel copies
+%   that are transferred rather than recomputed).
+%
 %   On the Metal backend only the 'toeplitz', 'nufft' and argument checks
 %   run (one GPU; the operator is Python's mr_aha.create_op).
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % ---- Options (see NAME-VALUE PAIRS above) ---------------------------
     p = inputParser();
     p.addParameter('multi', 'auto');
     p.addParameter('primary', []);
@@ -108,6 +117,8 @@ function check_op_matlab(varargin)
     p.parse(varargin{:});
     opt = p.Results;
 
+    % Primary GPU: on CUDA the requested (or current) gpuDevice, selected
+    % now so that every array created below lives there. Metal has one GPU.
     metal = strcmp(mr_backend(), 'metal');
     if metal
         n_gpu = 1;
@@ -119,24 +130,35 @@ function check_op_matlab(varargin)
         end
         gpuDevice(opt.primary);
     end
+    % 'multi': 'auto' runs the multi-GPU part only with several visible GPUs;
+    % true / false force it on / off. Never on Metal.
     if ischar(opt.multi) || isstring(opt.multi)
         run_multi = ~metal && n_gpu > 1;
     else
         run_multi = ~metal && logical(opt.multi);
     end
+    % The independent NUFFT reference AHA_CUFINUFFT needs cufinufft's MATLAB
+    % interface on CUDA (on Metal it uses the Python package).
     has_nufft_ref = metal || exist('cufinufft_plan', 'file') == 2;
     fprintf('check_op_matlab: backend %s, primary gpuDevice(%d), %d GPU(s) visible\n', ...
             mr_backend(), opt.primary, n_gpu);
 
+    % Save the three environment variables the checks modify and restore them
+    % when this function exits (onCleanup also runs on error). The kernel
+    % distribution override is cleared so that 'toep_dist' is honoured.
     env = {'MR_AHA_MGPU_MIN_WORK', 'MR_AHA_MGPU_SPLIT', 'MR_AHA_TOEP_SPLIT'};
     old_env = cellfun(@getenv, env, 'UniformOutput', false);
     restore_env = onCleanup(@() cellfun(@setenv, env, old_env));
     setenv('MR_AHA_TOEP_SPLIT', '');
 
+    % Fixed seed: repeatable problems. nfail accumulates failed checks.
     rng(1234);
     nfail = 0;
 
     % Problems: traj_type, image size, rank. Even and odd sizes.
+    % Odd sizes test the exact centring remap for odd dimensions; every
+    % problem is run with 5 and 3 coils (with the default coil group of 4,
+    % one full group plus a remainder, and a single partial group).
     cases = {'2D',    [32 32],    3;
              'stack', [24 24 8],  3;
              '3D',    [16 16 12], 2;
@@ -147,12 +169,19 @@ function check_op_matlab(varargin)
     % ------------------------------------------------------------------
     % Toeplitz, one GPU
     % ------------------------------------------------------------------
+    % Tallies: variants run / passed, worst errors, and how many supplied-
+    % kernel variants were bit-identical.
     n_run = 0; n_pass = 0; worst = 0; worst_k = 0; n_ident = 0;
     for ic = 1:size(cases, 1)
         for nc = [5 3]
+            % One random problem per (case, coil count); every variant below
+            % reuses it.
             g = make_problem(cases{ic, :}, nc);
             for tri = {'lower', 'upper'}
                 for masked = [false true]
+                    % Reference for this variant: the kernel from CALC_TOEP
+                    % (which also returns the mask when cfg.is_masked) applied
+                    % by AHA_TOEPLITZ.
                     cfg = g.cfg;
                     cfg.triangulation = tri{1};
                     cfg.is_masked = masked;
@@ -163,9 +192,15 @@ function check_op_matlab(varargin)
                         mask = [];
                     end
                     ref = AhA_Toeplitz(g.x, g.SEs, Om, cfg, mask);
+                    % Every variant once with the maps (and mask) copied and
+                    % once used in place (share_primary).
                     for share = [false true]
                         bad = {};
                         % Supplied kernel: bit-identical to AhA_Toeplitz.
+                        % The operator then runs exactly the plan code of
+                        % AhA_Toeplitz, so both call forms (op.apply and the
+                        % mtimes overload op * x) must reproduce ref bit for
+                        % bit; info() must report the 'supplied' kernel.
                         op = mr_aha.create_op(g.SEs, g.phi2, g.traj, cfg, ...
                             'mask', mask, 'share_primary', share, '_phi2_toep', Om);
                         y1 = op.apply(g.x);
@@ -183,6 +218,8 @@ function check_op_matlab(varargin)
                                                'supplied', share, metal)]; %#ok<AGROW>
                         if share && ~metal
                             % Supplied kernel without the Gram blocks.
+                            % (CUDA only) With '_phi2_toep' the Gram blocks
+                            % and trajectory are not needed and may be [].
                             op = mr_aha.create_op(g.SEs, [], [], cfg, ...
                                 'mask', mask, '_phi2_toep', Om);
                             y3 = op * g.x;
@@ -192,6 +229,10 @@ function check_op_matlab(varargin)
                             end
                         end
                         % Kernel computed by the operator.
+                        % The operator recomputes the kernel with cufinufft,
+                        % which is not bit-reproducible: op * x is compared to
+                        % ref at opt.tol, op.kernel() to Om at 1e-6, and info()
+                        % must report 'broadcast' (computed on the primary).
                         op = mr_aha.create_op(g.SEs, g.phi2, g.traj, cfg, ...
                             'mask', mask, 'share_primary', share);
                         y = op * g.x;
@@ -204,6 +245,8 @@ function check_op_matlab(varargin)
                         if ~(ek < 1e-6), bad{end+1} = sprintf('kernel %.2e', ek); end %#ok<AGROW>
                         bad = [bad, check_info(s, 'toeplitz', nc, opt.primary, ...
                                                'broadcast', share, metal)]; %#ok<AGROW>
+                        % One pass/fail per variant; a failure prints the
+                        % variant and every problem found.
                         n_run = n_run + 1;
                         if isempty(bad)
                             n_pass = n_pass + 1;
@@ -225,6 +268,7 @@ function check_op_matlab(varargin)
     % ------------------------------------------------------------------
     % NUFFT, one GPU, against AhA_cufinufft and the Toeplitz operator
     % ------------------------------------------------------------------
+    % NUFFT method on every case (unmasked: it has no kernel to mask).
     if ~has_nufft_ref
         fprintf(['nufft (1 GPU): cufinufft''s MATLAB interface is not on the ' ...
                  'path, the comparison with AhA_cufinufft is SKIPPED\n']);
@@ -233,10 +277,15 @@ function check_op_matlab(varargin)
     for ic = 1:size(cases, 1)
         for nc = [5 3]
             g = make_problem(cases{ic, :}, nc);
+            % Independent reference (finufft's MATLAB interface, no library
+            % code), when available.
             ref = [];
             if has_nufft_ref
                 ref = AhA_cufinufft(g.x, g.SEs, g.phi2, g.traj, g.cfg);
             end
+            % Default nufft_opts for every case; for the two 2D cases also
+            % gpu_method 1 and gpu_method 2 (with an explicit upsampfac),
+            % which must agree with the defaults to 1e-5.
             opt_sets = {struct()};
             if ic == 1 || ic == 4
                 opt_sets = [opt_sets, {struct('gpu_method', 1), ...
@@ -251,6 +300,8 @@ function check_op_matlab(varargin)
                 y2 = op * g.x;
                 s = op.info();
                 delete(op);
+                % NUFFT operator vs AhA_cufinufft: same transforms, different
+                % summation order, hence 1e-5.
                 if ~isempty(ref)
                     e = rel(y1, ref);
                     worst = max(worst, e);
@@ -262,6 +313,9 @@ function check_op_matlab(varargin)
                 if ~(e2 <= 1e-6), bad{end+1} = sprintf('op * x vs apply %.2e', e2); end %#ok<AGROW>
                 bad = [bad, check_info(s, 'nufft', nc, opt.primary, 'none', ...
                                        true, metal)]; %#ok<AGROW>
+                % Default options: compare with the Toeplitz operator, which
+                % evaluates the same A'A to within the NUFFT tolerance (1e-4).
+                % Other options: compare with the default-options result.
                 if io == 1
                     y0 = y1;
                     opt_t = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg);
@@ -298,6 +352,10 @@ function check_op_matlab(varargin)
     % ------------------------------------------------------------------
     % Argument errors
     % ------------------------------------------------------------------
+    % Every entry is {description, expected error identifier, call}; each
+    % call must fail with exactly that identifier. n0 records the number of
+    % live operators so that the end of the section can check that failed
+    % creations leave nothing in the MEX registry.
     g = make_problem('2D', [32 32], 3, 5);
     cfgm = g.cfg; cfgm.is_masked = true;
     n0 = op_count(metal);
@@ -334,8 +392,12 @@ function check_op_matlab(varargin)
         id = error_id(errs{ie, 3});
         nfail = nfail + report(['error: ' errs{ie, 1}], strcmp(id, errs{ie, 2}), id);
     end
+    % The removed MR_AHA.FROM_GRAM must fail (any identifier).
     id = error_id(@() mr_aha.from_gram(g.SEs, g.phi2, g.traj, g.cfg));
     nfail = nfail + report('error: from_gram no longer exists', ~isempty(id), id);
+    % Errors raised on a live operator: kernel() of a NUFFT operator (it has
+    % none), kernel(k) for a device index beyond the operator's GPUs, and an
+    % x with the wrong size.
     op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft');
     id = error_id(@() op.kernel());
     nfail = nfail + report('error: kernel() of a NUFFT operator', ...
@@ -349,6 +411,8 @@ function check_op_matlab(varargin)
     delete(op);
     nfail = nfail + report('errors leave no operator behind', op_count(metal) == n0, '');
 
+    % The remaining sections (gpuDevice handling, the MEX registry, device
+    % reset, multi-GPU) are specific to the CUDA MEX gateway.
     if metal
         finish(nfail, 'single-GPU checks on Metal');
         return
@@ -357,6 +421,9 @@ function check_op_matlab(varargin)
     % ------------------------------------------------------------------
     % Device hygiene: current gpuDevice unchanged; 'all' and the primary
     % ------------------------------------------------------------------
+    % MATLAB tracks its own current gpuDevice; the library must leave it as
+    % it was after every call (create, apply, info, kernel, delete), and the
+    % result must still be correct.
     g = make_problem('3D', [16 16 12], 2, 8);
     Om = calc_toep(g.phi2, g.traj, g.cfg);
     ref = AhA_Toeplitz(g.x, g.SEs, Om, g.cfg);
@@ -372,10 +439,13 @@ function check_op_matlab(varargin)
     nfail = nfail + report('device unchanged by create/apply/info/kernel/delete', ...
         all([i1 i2 i3 i4] == idx0) && rel(y, ref) < opt.tol, ...
         sprintf('indices %s', num2str([idx0 i1 i2 i3 i4])));
+    % Naming the primary explicitly in 'devices' is the same as the default:
+    % one GPU, the primary.
     op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', opt.primary);
     s = op.info(); y = op * g.x; delete(op);
     nfail = nfail + report('''devices'', <current gpuDevice>', ...
         s.n_devices == 1 && s.devices == opt.primary && rel(y, ref) < opt.tol, '');
+    % With a single visible GPU, 'all' resolves to that GPU.
     if n_gpu == 1
         op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'devices', 'all');
         s = op.info(); y = op * g.x; delete(op);
@@ -386,6 +456,13 @@ function check_op_matlab(varargin)
     % ------------------------------------------------------------------
     % share_primary keeps the shared arrays alive and is copy-on-write safe
     % ------------------------------------------------------------------
+    % share_primary makes the operator use the caller's arrays in place, so
+    % it must keep them alive itself: (1) build it from temporaries that go
+    % out of scope (make_shared_op), overwrite recycled GPU memory, and check
+    % that the operator still gives the reference result; (2) build it from
+    % copies, then modify the caller's copies in place: MATLAB's
+    % copy-on-write must give the caller new storage, never altering the data
+    % the operator reads.
     for method = {'toeplitz', 'nufft'}
         m = method{1};
         if strcmp(m, 'nufft')
@@ -395,11 +472,14 @@ function check_op_matlab(varargin)
         else
             refy = ref;
         end
+        % Allocate and fill a large array so the freed temporaries' memory
+        % would be reused (and overwritten) if the operator had not kept them.
         op = make_shared_op(g, Om, m, opt.primary);   % temporaries only
         junk = gpuArray.rand(4e6, 1, 'single');           % recycle freed memory
         junk(:) = 7; %#ok<NASGU>
         clear junk
         ok_alive = rel(op.apply(g.x), refy) < opt.tol;
+        % Copy-on-write check: SEs2 / Om2 share storage with g until written.
         SEs2 = g.SEs; Om2 = Om;
         if strcmp(m, 'nufft')
             op2 = mr_aha.create_op(SEs2, g.phi2, g.traj, g.cfg, 'method', 'nufft');
@@ -419,6 +499,8 @@ function check_op_matlab(varargin)
     % ------------------------------------------------------------------
     % Handles: deleted operator, unknown handle, live-operator count
     % ------------------------------------------------------------------
+    % A deleted operator and a handle that never existed must raise clean
+    % errors (no crash); destroying an unknown handle is a silent no-op.
     op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg);
     delete(op);
     % MATLAB itself rejects methods of a deleted handle object ...
@@ -429,6 +511,8 @@ function check_op_matlab(varargin)
              strcmp(id2, 'MR_AHA:mr_aha:invalidHandle');
     id = [id ' / ' id2];
     mr_aha_mex('destroy', uint64(12345));            % unknown handle: no-op
+    % Clearing the last reference to an operator must destroy it: the
+    % registry is empty and the MEX file is no longer locked.
     op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft'); %#ok<NASGU>
     clear op
     nfail = nfail + report('apply after delete / on a bad handle errors', ok_del, id);
@@ -439,6 +523,9 @@ function check_op_matlab(varargin)
     % ------------------------------------------------------------------
     % clear mex with a live operator
     % ------------------------------------------------------------------
+    % The MEX file locks itself while operators exist, so `clear mex` must
+    % not unload it (which would orphan GPU memory and handles); the
+    % operator stays usable, and deleting it releases the lock.
     op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg);
     locked_before = mislocked('mr_aha_mex');
     clear mex %#ok<CLMEX>
@@ -455,12 +542,19 @@ function check_op_matlab(varargin)
     % ------------------------------------------------------------------
     % Leaks: repeated create / apply / delete on the primary
     % ------------------------------------------------------------------
+    % See LEAK_CHECK: warm-up, then 10 x (toeplitz + nufft) cycles.
     nfail = nfail + leak_check(opt.primary, []);
 
     % ------------------------------------------------------------------
     % Device reset (both methods)
     % ------------------------------------------------------------------
     for method = {'toeplitz', 'nufft'}
+        % reset(gpuDevice) destroys every CUDA object the operator held. x is
+        % gathered beforehand because the reset also invalidates gpuArrays.
+        % Applying must raise deviceReset, info() must mark the operator
+        % invalid, and delete must only warn (staleDestroy) and release it
+        % through mr_op_abandon, leaving the registry empty and the MEX
+        % unlocked.
         g = make_problem('3D', [16 16 12], 2, 5);
         op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', method{1});
         xh = gather(g.x);
@@ -476,6 +570,7 @@ function check_op_matlab(varargin)
             strcmp(wid, 'MR_AHA:mr_aha:staleDestroy') && ...
             mr_aha_mex('count') == 0 && ~mislocked('mr_aha_mex'), wid);
     end
+    % After the reset, a freshly created operator must work normally.
     g = make_problem('2D', [32 32], 3, 5);
     op = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg);
     Om = calc_toep(g.phi2, g.traj, g.cfg);
@@ -494,6 +589,8 @@ function check_op_matlab(varargin)
                  'true to force)\n'], n_gpu);
     end
 
+    % Final invariants: every operator created above was released. Restore
+    % the primary as the current gpuDevice, then error if anything failed.
     nfail = nfail + report('registry empty and MEX unlocked at the end', ...
         mr_aha_mex('count') == 0 && ~mislocked('mr_aha_mex'), '');
     gpuDevice(opt.primary);
@@ -507,6 +604,7 @@ end
 function nfail = check_multi(opt, n_gpu)
 %CHECK_MULTI  The multi-GPU checks (see the help of CHECK_OP_MATLAB).
     nfail = 0;
+    % Default device sets: the primary plus one other GPU, and all GPUs.
     if isempty(opt.device_sets)
         others = setdiff(1:n_gpu, opt.primary);
         if isempty(others)
@@ -515,6 +613,8 @@ function nfail = check_multi(opt, n_gpu)
             opt.device_sets = {[opt.primary others(1)], 1:n_gpu};
         end
     end
+    % Skip (rather than fail) if a requested set names a GPU that is not
+    % visible.
     need = max([opt.primary, cellfun(@max, opt.device_sets)]);
     if need > n_gpu
         fprintf('multi-GPU checks: need GPUs up to index %d, %d visible: SKIPPED\n', ...
@@ -525,11 +625,15 @@ function nfail = check_multi(opt, n_gpu)
     fprintf('multi-GPU checks: primary gpuDevice(%d), device sets %s\n', ...
             opt.primary, strjoin(cellfun(@(d) ['[' num2str(d) ']'], ...
             opt.device_sets, 'UniformOutput', false), ' '));
+    % These problems are tiny; disable the "too small for several GPUs"
+    % rule so the work is really distributed.
     setenv('MR_AHA_MGPU_MIN_WORK', '0');
     gpuDevice(opt.primary);
 
     % ---- Toeplitz: G GPUs against the primary alone ----------------------
     cases = {'2D', [40 36], 3; 'stack', [32 30 8], 3; '3D', [20 18 16], 2};
+    % toep_source expected for each requested distribution when more than
+    % one GPU is used ('' = auto, which may resolve to split or replicate).
     expect = struct('split', 'split', 'replicate', 'replicate', ...
                     'broadcast', 'broadcast', 'auto', '');
     n_run = 0; n_pass = 0; worst = 0; worst_k = 0;
@@ -550,7 +654,10 @@ function nfail = check_multi(opt, n_gpu)
                     ref = AhA_Toeplitz(g.x, g.SEs, Om, cfg, mask);
                     for ids = 1:numel(opt.device_sets)
                         devs = opt.device_sets{ids};
+                        % Whether the operator should end up on several GPUs.
                         multi = numel(unique([devs opt.primary])) > 1;
+                        % MR_AHA_MGPU_SPLIT: 'on' forces the coils that do not
+                        % divide evenly over the GPUs to be split by rank.
                         for split = {'off', 'on'}
                             setenv('MR_AHA_MGPU_SPLIT', split{1});
                             for dist = {'auto', 'split', 'replicate', 'broadcast'}
@@ -560,10 +667,15 @@ function nfail = check_multi(opt, n_gpu)
                                 op = mr_aha.create_op(g.SEs, g.phi2, g.traj, cfg, ...
                                     'devices', devs, 'mask', mask, ...
                                     'toep_dist', dist{1}, 'share_primary', share);
+                                % Result against the single-GPU reference.
                                 y = op * g.x;
                                 s = op.info();
                                 e = rel(y, ref); worst = max(worst, e);
                                 if ~(e < opt.tol), bad{end+1} = sprintf('AhA %.2e', e); end %#ok<AGROW>
+                                % Each device's kernel copy against CALC_TOEP;
+                                % 'split' and 'broadcast' transfer components
+                                % rather than recompute them, so their copies
+                                % must equal the primary's bit for bit.
                                 K1 = op.kernel(1);
                                 for k = 1:s.n_devices
                                     Kk = op.kernel(k);
@@ -576,6 +688,9 @@ function nfail = check_multi(opt, n_gpu)
                                         bad{end+1} = sprintf('kernel(%d) differs from kernel(1)', k); %#ok<AGROW>
                                     end
                                 end
+                                % Reported distribution: the requested mode
+                                % (auto: split or replicate) on several GPUs;
+                                % 'broadcast' when it stayed on one.
                                 if s.n_devices > 1
                                     want = expect.(dist{1});
                                     if isempty(want)
@@ -587,6 +702,11 @@ function nfail = check_multi(opt, n_gpu)
                                     okk = strcmp(s.toep_source, 'broadcast');
                                 end
                                 if ~okk, bad{end+1} = ['toep_source ' s.toep_source]; end %#ok<AGROW>
+                                % Work distribution: several GPUs exactly when
+                                % expected, primary first and starting at coil
+                                % 1, every coil assigned once (whole or split
+                                % by rank), only requested GPUs used, and the
+                                % current gpuDevice unchanged.
                                 if (s.n_devices > 1) ~= multi || s.primary ~= opt.primary || ...
                                         s.devices(1) ~= opt.primary || s.coil_begin(1) ~= 1 || ...
                                         sum(s.coil_count) + s.n_split_coils ~= nc || ...
@@ -606,6 +726,8 @@ function nfail = check_multi(opt, n_gpu)
                                 end
                             end
                             % Supplied kernel: copied as is to every GPU.
+                            % Every GPU must hold a bit-identical copy of the
+                            % supplied kernel, and toep_source is 'supplied'.
                             op = mr_aha.create_op(g.SEs, g.phi2, g.traj, cfg, ...
                                 'devices', devs, 'mask', mask, '_phi2_toep', Om);
                             e = rel(op * g.x, ref); worst = max(worst, e);
@@ -629,6 +751,7 @@ function nfail = check_multi(opt, n_gpu)
             end
         end
     end
+    % Back to the library's default rank-split policy.
     setenv('MR_AHA_MGPU_SPLIT', '');
     nfail = nfail + (n_run - n_pass);
     fprintf(['multi-GPU toeplitz: %d / %d passed, worst AhA difference %.3e (tol ' ...
@@ -639,6 +762,8 @@ function nfail = check_multi(opt, n_gpu)
     for ic = 1:size(cases, 1)
         for nc = [5 8]
             g = make_problem(cases{ic, :}, nc);
+            % Reference: the library's single-GPU NUFFT operator. Splitting
+            % by coils only changes the order of the final coil sum (1e-6).
             op1 = mr_aha.create_op(g.SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft');
             ref = op1 * g.x;
             delete(op1);
@@ -652,6 +777,9 @@ function nfail = check_multi(opt, n_gpu)
                     s = op.info();
                     delete(op);
                     e = rel(y, ref); worst = max(worst, e);
+                    % Also: several GPUs exactly when expected, method and
+                    % source reported correctly, all coils assigned, primary
+                    % first.
                     ok = e <= 1e-6 && (s.n_devices > 1) == multi && ...
                          strcmp(s.method, 'nufft') && strcmp(s.toep_source, 'none') && ...
                          sum(s.coil_count) == nc && s.devices(1) == opt.primary;
@@ -680,9 +808,14 @@ function nfail = check_multi(opt, n_gpu)
                            sprintf('%d GPUs used', s.n_devices));
 
     % ---- Leaks on every GPU of the largest set --------------------------
+    % Leak check across every GPU of the largest device set.
     nfail = nfail + leak_check(opt.primary, big_set);
 
     % ---- Device change ---------------------------------------------------
+    % A multi-GPU operator belongs to the primary. With another gpuDevice
+    % current, apply must refuse (deviceChanged). Switching gpuDevice in
+    % MATLAB resets the previously selected device, so back on the primary
+    % the operator's resources are gone and apply must report deviceReset.
     if opt.device_change && n_gpu > 1
         gpuDevice(opt.primary);
         g = make_problem('3D', [16 16 12], 2, 8);
@@ -699,6 +832,7 @@ function nfail = check_multi(opt, n_gpu)
         nfail = nfail + report('back on the primary: apply errors (deviceReset)', ...
             strcmp(id2, 'MR_AHA:mr_aha:deviceReset'), id2);
     end
+    % (onCleanup in CHECK_OP_MATLAB restores the original values at exit.)
     setenv('MR_AHA_MGPU_MIN_WORK', '');
 end
 
@@ -710,8 +844,13 @@ function g = make_problem(traj_type, n_dim, L, nc)
 %MAKE_PROBLEM  Random Hermitian Gram blocks, a radial trajectory
 %   (golden-angle in-plane, or golden-means 3D), x and SEs; gpuArrays on
 %   CUDA, ordinary arrays on Metal.
+    % Default configuration (upsampled grid 2*N, Mz = Nz for a stack) with
+    % nc coils.
     cfg = mr_default_config(traj_type, n_dim, L);
     cfg.n_coils = nc;
+    % 24 spokes of 2*Nx samples each, readout positions in [-pi, pi).
+    % Directions: golden-means for 3D, golden-angle in-plane otherwise. The
+    % trajectory is [Nt, Nkx, ndim] (spoke direction times readout radius).
     Nt = 24; Nkx = 2 * n_dim(1);
     k = pi * ((0:Nkx-1) - Nkx/2) / (Nkx/2);
     m = (0:Nt-1).';
@@ -724,6 +863,9 @@ function g = make_problem(traj_type, n_dim, L, nc)
     end
     traj = zeros(Nt, Nkx, size(d, 2), 'single');
     for c = 1:size(d, 2), traj(:, :, c) = d(:, c) * k; end
+    % Gram blocks [Nt, (Nkz,) L, L]: block (t, z) is P*P' for a random
+    % rank x time P with two time points, i.e. Hermitian positive
+    % semi-definite in the library's convention (a stack has one per kz).
     nkz = 1;
     if strcmpi(traj_type, 'stack'), nkz = n_dim(3); end
     phi2 = complex(zeros([Nt, nkz, L, L], 'single'));
@@ -734,6 +876,8 @@ function g = make_problem(traj_type, n_dim, L, nc)
         end
     end
     if nkz == 1, phi2 = reshape(phi2, [Nt, L, L]); end
+    % Random complex single x [n_dim, L] and maps [n_dim, nc], then move all
+    % inputs to the GPU (CUDA) or leave them as ordinary arrays (Metal).
     crand = @(sz) complex(randn(sz, 'single'), randn(sz, 'single'));
     if strcmp(mr_backend(), 'metal')
         dev = @(a) a;
@@ -750,6 +894,10 @@ end
 function bad = check_info(s, method, nc, primary, source, share, metal)
 %CHECK_INFO  Consistency of a single-GPU operator's info(); returns the
 %   list of problems.
+    % Expected for a single-GPU operator: the requested method, exactly the
+    % primary GPU, all nc coils on it starting at coil 1, the expected kernel
+    % source, the share_primary setting as requested, a valid operator and
+    % (CUDA) a measured creation time.
     bad = {};
     if ~strcmp(s.method, method), bad{end+1} = ['method ' s.method]; end
     if s.n_devices ~= 1 || s.devices ~= primary || s.primary ~= primary
@@ -766,6 +914,8 @@ end
 function op = make_shared_op(g, Om, method, primary)
 %MAKE_SHARED_OP  share_primary operator built from temporaries that go out
 %   of scope on return, so only the operator keeps them alive.
+    % "+ 0" / "* 1" force new GPU storage, so these variables own the only
+    % references once the function returns.
     SEs = g.SEs + 0;              % fresh storage
     if strcmp(method, 'nufft')
         op = mr_aha.create_op(SEs, g.phi2, g.traj, g.cfg, 'method', 'nufft', ...
@@ -781,12 +931,17 @@ function nfail = leak_check(primary, devs)
 %LEAK_CHECK  Repeated create / apply / delete of both methods on DEVS (or
 %   the primary only) must not change this process's memory on any GPU.
     nfail = 0;
+    % A larger 3D problem, so a per-cycle leak would be visible above the
+    % allocator noise.
     big = make_problem('3D', [32 32 32], 4, 8);        % ~4 MB x, ~26 MB kernel
     cycle = @(m, share) leak_once(big, m, devs, share);
+    % Warm-up: CUDA contexts on every GPU, cuFFT / cufinufft state and
+    % MATLAB's memory pool reach their steady state before the baseline.
     for it = 1:2                                       % warm up (contexts, plans)
         cycle('toeplitz', true); cycle('nufft', true);
     end
     wait(gpuDevice());
+    % Baseline, then 20 cycles alternating share_primary, then measure again.
     m0 = process_gpu_memory();
     a0 = gpuDevice().AvailableMemory;
     for it = 1:10
@@ -798,6 +953,9 @@ function nfail = leak_check(primary, devs)
     a1 = gpuDevice().AvailableMemory;
     where = sprintf('gpuDevice(%d)', primary);
     if ~isempty(devs), where = ['[' num2str(devs) ']']; end
+    % Without nvidia-smi only the primary's AvailableMemory can be compared
+    % (8 MiB allowance); otherwise this process's usage on every GPU, which
+    % may grow by at most 4 MiB.
     if isempty(m0)
         d_mb = (a0 - a1) / 2^20;
         nfail = nfail + report(['no leak over 20 create/apply/delete on ' where ...
@@ -870,6 +1028,9 @@ function m = process_gpu_memory()
 %PROCESS_GPU_MEMORY  MiB used by this MATLAB process on every GPU (CUDA
 %   ordinal -> MiB), from nvidia-smi; empty when nvidia-smi is unavailable.
     m = [];
+    % Map each GPU UUID to nvidia-smi's index, then pick this process's rows
+    % from the compute-apps list. Note: the keys are nvidia-smi indices,
+    % which follow PCI order, not necessarily CUDA_VISIBLE_DEVICES order.
     pid = feature('getpid');
     [s1, gpus] = system('nvidia-smi --query-gpu=index,uuid --format=csv,noheader');
     [s2, apps] = system(['nvidia-smi --query-compute-apps=pid,gpu_uuid,' ...

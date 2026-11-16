@@ -30,6 +30,9 @@ static thread_local char mr_error_buffer[MR_ERROR_BUFFER_SIZE] = {0};
 
 void mr_set_error(const char *fmt, ...)
 {
+    /* vsnprintf truncates to the buffer and always NUL-terminates, so an
+     * over-long diagnostic is cut short rather than overflowing. A later
+     * failure on the same thread overwrites the message. */
     va_list args;
     va_start(args, fmt);
     vsnprintf(mr_error_buffer, MR_ERROR_BUFFER_SIZE, fmt, args);
@@ -42,6 +45,8 @@ void mr_clear_error(void)
     mr_backend_clear_error();
 }
 
+/* Returns this thread's buffer: valid until the next library call on the same
+ * thread that clears or sets the error; empty ("") when nothing failed. */
 extern "C" const char *mr_last_error(void) { return mr_error_buffer; }
 
 extern "C" const char *mr_status_string(int status)
@@ -71,6 +76,10 @@ extern "C" int mr_config_defaults(mr_config *cfg, mr_traj_type traj_type)
     mr_clear_error();
     MR_REQUIRE(cfg != NULL, "mr_config_defaults: cfg is NULL");
 
+    /* Zero everything first so that fields not listed below (and any padding)
+     * have a defined value, then set the documented defaults. Sizes default
+     * to 1 so that unused axes are already valid; the caller fills in the
+     * real extents. */
     memset(cfg, 0, sizeof(*cfg));
     cfg->traj_type       = traj_type;
     cfg->n_spatial       = (traj_type == MR_TRAJ_2D) ? 2 : 3;
@@ -103,11 +112,15 @@ extern "C" int mr_config_validate(const mr_config *cfg)
                        cfg->traj_type == MR_TRAJ_STACK,
                    "traj_type must be one of MR_TRAJ_2D, MR_TRAJ_3D, MR_TRAJ_STACK");
 
+    /* 2D images have two spatial axes; 3D and stack-of-X images have three. */
     const int expect_spatial = (cfg->traj_type == MR_TRAJ_2D) ? 2 : 3;
     MR_REQUIRE_CFG(cfg->n_spatial == expect_spatial,
                    "n_spatial is %d but trajectory type requires %d",
                    cfg->n_spatial, expect_spatial);
 
+    /* Per-axis geometry: positive extents, unused trailing axes exactly 1,
+     * and an upsampled grid at least as large as the image (the pad/crop
+     * index map of the kernels is only injective for N <= M). */
     for (int d = 0; d < 3; ++d) {
         MR_REQUIRE_CFG(cfg->n_dim[d] >= 1, "n_dim[%d] = %d must be >= 1", d,
                        cfg->n_dim[d]);
@@ -131,6 +144,8 @@ extern "C" int mr_config_validate(const mr_config *cfg)
                        "n_dim[2] (Nz = %d)",
                        cfg->phi2_dim[2], cfg->n_dim[2]);
 
+    /* Scalar parameters. eps is the requested cufinufft tolerance (of
+     * mr_calc_toep and of the NUFFT operator), a relative accuracy in (0, 1). */
     MR_REQUIRE_CFG(cfg->L >= 1, "L = %d must be >= 1", cfg->L);
     MR_REQUIRE_CFG(cfg->n_coils >= 1, "n_coils = %d must be >= 1", cfg->n_coils);
     MR_REQUIRE_CFG(cfg->triangulation == MR_TRI_LOWER ||
@@ -141,6 +156,9 @@ extern "C" int mr_config_validate(const mr_config *cfg)
     MR_REQUIRE_CFG(cfg->mask_radius >= 0, "mask_radius = %d must be >= 0",
                    cfg->mask_radius);
 
+    /* A masked kernel keeps between 1 and all of the upsampled locations.
+     * The mask contents themselves (range, sortedness) are device data and
+     * are not checked here. */
     if (cfg->is_masked) {
         const int64_t pad = mr_pad_size(cfg);
         MR_REQUIRE_CFG(cfg->num_masked > 0,
@@ -202,6 +220,9 @@ extern "C" int64_t mr_se_size(const mr_config *cfg)
 
 void mr_dims_from_config(const mr_config *cfg, mr_dims *d)
 {
+    /* Copy the extents and pre-compute the centre offsets floor(N/2) and
+     * floor(M/2) used by the centred <-> natural index maps of the kernels
+     * (integer division of non-negative values is floor). */
     memset(d, 0, sizeof(*d));
     for (int i = 0; i < 3; ++i) {
         d->n[i]   = cfg->n_dim[i];

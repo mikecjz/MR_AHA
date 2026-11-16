@@ -18,6 +18,16 @@
 /* AhA kernels                                                              */
 /* ------------------------------------------------------------------------ */
 
+/* For each group of coils (grids back to back), the apply path of a plan
+ * (mr_aha.cu) runs
+ *   mr_k_pad_mul_se (per coil) -> forward cuFFT -> block-diagonal multiply
+ *   -> inverse cuFFT -> mr_k_crop_mul_conj_se (per coil, accumulating),
+ * where the multiply is one of: the in-place kernels of mr_bd_lookup (dense
+ * or masked via mr_k_mask_inverse's map), or the generic fallback
+ * mr_k_blockdiag_dense, resp. mr_k_blockdiag_masked + memset +
+ * mr_k_scatter_masked. All work on the padded [Mx, My, Mz, L] grid in natural
+ * (FFT) order; only phi2_toep and the mask use centred order. */
+
 /**
  * @brief Multiply by one coil sensitivity map and scatter onto the padded grid.
  *
@@ -174,7 +184,8 @@ struct mr_bd_range {
     long long vstride; /**< Element stride between consecutive ranks.      */
 };
 
-/** @brief ::mr_bd_range covering the whole upsampled grid of @p dims. */
+/** @brief ::mr_bd_range covering the whole upsampled grid of @p dims (data
+ *         and kernel then share the stride `pad_size`). */
 inline mr_bd_range mr_bd_whole(const mr_dims &dims)
 {
     return mr_bd_range{0, dims.pad_size, dims.pad_size};

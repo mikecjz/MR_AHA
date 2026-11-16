@@ -7,7 +7,7 @@ specific build) on the stored inputs and compares every output. It works for
 either backend: arrays are CuPy arrays for ``mr_aha.backend() == 'cuda'`` and
 NumPy arrays for ``'metal'``.
 
-Three independent stages can be checked, so that a backend can be validated
+Five independent stages can be checked, so that a backend can be validated
 piece by piece while it is being ported:
 
 ``aha``
@@ -37,6 +37,23 @@ piece by piece while it is being ported:
     by the independent :class:`mr_aha.aha_nufft_plan`) and against the
     Toeplitz ``AhAx_lower``, which agree to the NUFFT tolerance.
 
+Tolerances (relative 2-norm error against the stored array, computed in
+double precision):
+
+* ``aha``, ``nufft`` and the Toeplitz part of ``op``: ``--tol-aha``
+  (default ``1e-5``), single-precision FFT / NUFFT round-off on a different
+  backend or summation order.
+* ``toep``: ``--tol-toep``, default ``1e-5`` with the library's own
+  cufinufft and ``5e-5`` with an external NUFFT (any ``--nufft`` other than
+  ``library``, and always on Metal).
+* ``mask``: ``0`` (the share of indices in only one of the two masks).
+* NUFFT method vs Toeplitz in the ``op`` stage: ``1e-4``, since each is only
+  accurate to the NUFFT tolerance.
+
+Files whose ``config_json`` lacks ``gram_convention = "multitasking"`` were
+written for the old Gram-block convention and are reported as failures
+without being compared.
+
 Usage (from the repository root)::
 
     MR_AHA_LIBRARY=build/lib/libmr_aha_c.so python tests/check_reference.py
@@ -54,11 +71,14 @@ from pathlib import Path
 
 import numpy as np
 
+# Import the in-tree package so the library under test is the one selected by
+# $MR_AHA_LIBRARY (or the default build of this checkout).
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python"))
 
 import mr_aha  # noqa: E402
 
+# Stored kernel variants: both packings, each unmasked and with every mask.
 TRIS = ("lower", "upper")
 #: Suffix of the stored masked variants (``mask_neighbour``,
 #: ``phi2_toep_<tri>_neighbour``, ``AhAx_<tri>_neighbour``).
@@ -76,8 +96,11 @@ def rel(a: np.ndarray, b: np.ndarray) -> float:
     Returns:
         The relative difference, or ``inf`` when the shapes differ.
     """
+    # A shape mismatch (e.g. a layout bug) is reported as an infinite error
+    # rather than raising, so the remaining comparisons still run.
     if a.shape != b.shape:
         return float("inf")
+    # Promote to double so the difference norm is not limited by float32.
     a = a.astype(np.complex128 if np.iscomplexobj(a) else np.float64)
     b = b.astype(a.dtype)
     nb = np.linalg.norm(b.ravel())
@@ -114,6 +137,9 @@ def configs(z) -> dict:
         Dict with the positional ``traj_type``, ``n_dim``, ``L`` and the common
         keyword arguments.
     """
+    # n_dim / phi2_dim are stored column-major (Nx, Ny[, Nz]) as make_config
+    # expects; the mask radius is stored as cfg_mask_radius (see
+    # make_reference.py) to keep it apart from the mask_* arrays.
     return dict(
         traj_type=str(z["traj_type"]),
         n_dim=[int(v) for v in z["n_dim"]],
@@ -142,6 +168,9 @@ def variants():
 
 def check_aha(z, bk: Backend, c: dict, tol: float) -> list:
     """Stage ``aha``: apply the operator to every stored ``phi2_toep`` variant."""
+    # Each stage returns rows (name, relative error, tolerance); main() turns
+    # them into ok / FAIL. Here only the block-diagonal application is under
+    # test: the kernels and masks are the stored CUDA ones, not recomputed.
     rows = []
     x, SEs = bk.put(z["x"]), bk.put(z["SEs"])
     for suf, tri, m in variants():
@@ -149,6 +178,7 @@ def check_aha(z, bk: Backend, c: dict, tol: float) -> list:
         if m is None:
             cfg = make_cfg(c, triangulation=tri)
         else:
+                # Masked variant: num_masked is set from the stored mask.
             mask_np = z[f"mask_{m}"]
             cfg = make_cfg(c, triangulation=tri, is_masked=True,
                            num_masked=int(mask_np.size))
@@ -169,9 +199,16 @@ def check_toep(z, bk: Backend, c: dict, tol: float, nufft=None,
     with each new kernel and compared with the stored ``AhAx_*``.
     """
     rows = []
+    # An "external" NUFFT (anything but the CUDA library's built-in
+    # cufinufft path, and always on Metal) cannot reproduce the stored kernel
+    # to the tight tolerance, so its kernels are additionally judged by the
+    # A^H A x they produce.
     external = nufft not in (None, "library") or bk.name != "cuda"
     phi2, traj = bk.put(z["phi2"]), bk.put(z["traj"])
     x, SEs = bk.put(z["x"]), bk.put(z["SEs"])
+    # Recompute each kernel from the stored Gram blocks, trajectory and (for
+    # masked variants) the stored mask, so this stage is independent of the
+    # mask stage.
     for suf, tri, m in variants():
         mask = None
         if m is None:
@@ -194,6 +231,9 @@ def check_mask(z, bk: Backend, c: dict) -> list:
     reported. No NUFFT is involved and both backends round the samples the
     same way, so the mask must match exactly.
     """
+    # Recompute the mask with the radius the reference used. The error is the
+    # size of the symmetric difference relative to the reference size, with a
+    # tolerance of exactly zero.
     traj = bk.put(z["traj"])
     got = bk.get(mr_aha.calc_mask(make_cfg(c), traj, radius=c["mask_radius"]))
     rows = []
@@ -205,6 +245,8 @@ def check_mask(z, bk: Backend, c: dict) -> list:
 
 def check_nufft(z, bk: Backend, c: dict, tol: float) -> list:
     """Stage ``nufft``: the NUFFT reference operator vs the stored one."""
+    # The NUFFT reference is optional in the files (cufinufft may have been
+    # unavailable when they were made); nothing to compare then.
     if "AhAx_nufft" not in z.files:
         return []
     with mr_aha.aha_nufft_plan(make_cfg(c), bk.put(z["traj"])) as plan:
@@ -222,6 +264,9 @@ def check_op(z, bk: Backend, c: dict, tol: float, tol_methods: float) -> list:
     with the Toeplitz ``AhAx_lower`` at ``tol_methods``.
     """
     rows = []
+    # Toeplitz method: the operator computes its own kernel (and uses the
+    # stored mask), so this checks calc_toep + aha_toeplitz as wired inside
+    # the operator object.
     x, SEs = bk.put(z["x"]), bk.put(z["SEs"])
     phi2, traj = bk.put(z["phi2"]), bk.put(z["traj"])
     for suf, tri, m in variants():
@@ -234,6 +279,9 @@ def check_op(z, bk: Backend, c: dict, tol: float, tol_methods: float) -> list:
         with mr_aha.create_op(cfg, SEs, phi2, traj, mask) as op:
             rows.append((f"op toeplitz AhAx_{suf}", rel(bk.get(op(x)), z[f"AhAx_{suf}"]),
                          tol))
+    # NUFFT method (unmasked default config): against the independent Python
+    # NUFFT reference when stored, and always against the Toeplitz result,
+    # which it matches only to the NUFFT accuracy (tol_methods).
     with mr_aha.create_op(make_cfg(c), SEs, phi2, traj, method="nufft") as op:
         out = bk.get(op(x))
     if "AhAx_nufft" in z.files:
@@ -256,6 +304,7 @@ def main() -> int:
                     help="NUFFT engine of the toep stage (default: backend's)")
     args = ap.parse_args()
 
+    # Select the reference files (all, or the requested stems).
     bk = Backend()
     files = sorted(args.data.glob("*.npz"))
     if args.cases:
@@ -263,10 +312,14 @@ def main() -> int:
     if not files:
         print(f"no reference files found in {args.data}")
         return 1
+    # Report which shared library was actually loaded, so a stale build is
+    # easy to spot.
     print(f"backend: {bk.name}; library: {mr_aha._lib.lib._name}")
 
     failed = 0
     for f in files:
+        # Refuse files made for the old Gram-block convention: their phi2 axes
+        # (and hence every kernel) are transposed relative to the current one.
         z = np.load(f)
         if json.loads(str(z["config_json"])).get("gram_convention") != "multitasking":
             print(f"FAIL {f.stem}: written before the MR-Multitasking Gram convention "
@@ -274,6 +327,8 @@ def main() -> int:
                   "tests/make_reference.py")
             failed += 1
             continue
+        # Run the requested stages; the toep tolerance depends on whether an
+        # external NUFFT computes the kernels (see the module docstring).
         c = configs(z)
         rows = []
         if "aha" in args.stages:
@@ -288,6 +343,10 @@ def main() -> int:
             rows += check_nufft(z, bk, c, args.tol_aha)
         if "op" in args.stages:
             rows += check_op(z, bk, c, args.tol_aha, 1e-4)
+        # A row passes when error <= tolerance (a NaN error fails). The
+        # summary names the worst row, ranked by error / tolerance (or by the
+        # raw error for the zero-tolerance mask rows); every failing row is
+        # listed after it.
         bad = [r for r in rows if not r[1] <= r[2]]
         failed += len(bad)
         worst = max(rows, key=lambda r: r[1] / r[2] if r[2] else r[1])
@@ -295,6 +354,7 @@ def main() -> int:
               f"worst {worst[0]} = {worst[1]:.2e}")
         for name, val, tol in bad:
             print(f"       {name}: {val:.3e} > {tol:.0e}")
+    # Final machine-readable summary line for scripts and CI logs.
     print(json.dumps({"backend": bk.name, "files": len(files), "failed": failed}))
     return 1 if failed else 0
 

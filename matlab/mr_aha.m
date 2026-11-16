@@ -249,6 +249,9 @@ classdef mr_aha < handle
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % Public, read-only state: what the operator was built with. Kept on the MATLAB
+    % side so that INFO, APPLY (Metal) and the caller can inspect it without a MEX
+    % round trip.
     properties (SetAccess = private)
         %CONFIG  Configuration the operator was built with (with .n_coils
         %   and, for a masked operator, .num_masked filled in).
@@ -257,6 +260,10 @@ classdef mr_aha < handle
         Method = ''
     end
 
+    % Backend resources. Exactly one of Handle (CUDA) and PyOp (Metal) is set
+    % while the operator is alive. They are Transient: a SAVEd operator is loaded
+    % with Handle = 0 and PyOp = [], so CHECK_ALIVE rejects it instead of
+    % dereferencing a handle from another MATLAB session.
     properties (Access = private, Transient)
         %HANDLE  uint64 operator handle of mr_aha_mex (CUDA); 0 once
         %   destroyed.
@@ -271,6 +278,10 @@ classdef mr_aha < handle
     methods
         function op = mr_aha(varargin)
             %MR_AHA  Not public: use MR_AHA.CREATE_OP.
+
+            % The constructor only produces an empty shell; CREATE_OP fills it in.
+            % Requiring the private token keeps users from building an object
+            % with no backend resource behind it.
             if nargin ~= 1 || ~ischar(varargin{1}) || ...
                     ~strcmp(varargin{1}, mr_op_token())
                 error('MR_AHA:mr_aha:useCreateOp', ...
@@ -285,17 +296,28 @@ classdef mr_aha < handle
             op.check_alive();
             if ~isempty(op.PyOp)
                 % Metal: the Python operator on ordinary arrays.
+                % The Python package expects complex64 in its row-major layout;
+                % MR_TO_NUMPY reverses the dimensions without moving data, and
+                % the n_spatial+1 padding keeps an L = 1 trailing dimension.
+                % The result comes back reshaped to the caller's x.
                 x = complex(single(gather(x)));
                 y = op.PyOp.apply(mr_to_numpy(x, mr_op_n_spatial(op.Config) + 1));
                 AhAx = reshape(mr_from_numpy(y), size(x));
                 return
             end
+            % CUDA: coerce x to a complex single gpuArray (no copy if it
+            % already is one) and let the MEX gateway run mr_op_execute on
+            % the stored handle. The gateway checks x's type and element
+            % count and that the primary GPU is still current and not reset.
             x = mr_op_complex_single(x, 'x');
             AhAx = mr_aha_mex('apply', op.Handle, x);
         end
 
         function AhAx = mtimes(op, x)
             %MTIMES  op * x is the same as op.apply(x).
+
+            % MATLAB dispatches mtimes to this class for x * op as well; only
+            % the operator-on-the-left form means A'A x.
             if ~isa(op, 'mr_aha')
                 error('MR_AHA:mr_aha:mtimes', ...
                       'Only op * x is supported (the operator on the left).');
@@ -307,10 +329,16 @@ classdef mr_aha < handle
             %INFO  How the operator was built; see the class help.
             op.check_alive();
             if ~isempty(op.PyOp)
+                % Both branches yield the same struct with 0-based device and
+                % coil indices (the C library's mr_op_info_t convention).
                 s = mr_op_info_metal(op);
             else
                 s = mr_aha_mex('info', op.Handle);
             end
+            % Convert to MATLAB conventions: keep the raw CUDA ordinals in
+            % .cuda_devices, shift devices/primary to 1-based gpuDevice
+            % indices and coil_begin to 1-based coil numbers, then fix the
+            % field order so CUDA and Metal print identically.
             s.cuda_devices = s.devices;
             s.devices = s.devices + 1;            % gpuDevice indices
             s.primary = s.primary + 1;
@@ -328,13 +356,18 @@ classdef mr_aha < handle
             %   the class help. k (default 1) selects the GPU, as an index
             %   into info().devices.
             op.check_alive();
+            % k defaults to the primary GPU (first entry of info().devices).
             if nargin < 2 || isempty(k)
                 k = 1;
             end
+            % Only the lower bound is checked here; an index beyond the
+            % number of GPUs used is rejected by the library (mr_op_kernel).
             if ~(isnumeric(k) && isscalar(k) && isreal(k) && k == round(k) && k >= 1)
                 error('MR_AHA:mr_aha:kernel', ...
                       'k must be a positive integer (an index into info().devices).');
             end
+            % The NUFFT route never builds phi2_toep, so there is nothing to
+            % copy out.
             if strcmp(op.Method, 'nufft')
                 error('MR_AHA:mr_aha:noKernel', ...
                       ['This operator uses the NUFFT method, which has no ' ...
@@ -345,20 +378,33 @@ classdef mr_aha < handle
                     error('MR_AHA:mr_aha:kernel', ...
                           'The Metal backend has a single GPU: k must be 1.');
                 end
+                % Metal: the Python operator returns its kernel as a NumPy
+                % array (0-based device index), converted back to MATLAB.
                 Om = mr_from_numpy(op.PyOp.kernel(int64(0)));
                 return
             end
+            % CUDA: the gateway copies the kernel held on GPU k-1 (0-based)
+            % into a new gpuArray on the primary GPU.
             Om = mr_aha_mex('kernel', op.Handle, double(k) - 1);
         end
 
         function tf = is_alive(op)
             %IS_ALIVE  True until the operator has been deleted (independent
             %   of device resets; see INFO's .valid for that).
+
+            % Alive means a backend resource is still attached.
             tf = op.Handle ~= 0 || ~isempty(op.PyOp);
         end
 
         function delete(op)
             %DELETE  Release the operator on every GPU. Never throws.
+
+            % CUDA: clear the handle *before* calling the gateway so that a
+            % failure cannot leave a dangling handle and a second delete (or
+            % the destructor running again) does not double-free. Errors are
+            % downgraded to warnings because destructors must not throw.
+            % The gateway also releases its mexLock when the last operator
+            % goes away.
             if op.Handle ~= 0
                 h = op.Handle;
                 op.Handle = uint64(0);
@@ -370,6 +416,8 @@ classdef mr_aha < handle
                 end
             end
             if ~isempty(op.PyOp)
+                % Metal: the same pattern for the Python operator
+                % (close() releases its MLX/library resources).
                 p = op.PyOp;
                 op.PyOp = [];
                 try
@@ -391,11 +439,16 @@ classdef mr_aha < handle
             %   op = mr_aha.create_op(..., 'method', 'toeplitz', ...
             %            'devices', [], 'mask', [], 'toep_dist', 'auto', ...
             %            'share_primary', true, 'nufft_opts', struct())
+
+            % SEs, phi2, traj and config are required; the rest are
+            % name-value pairs.
             narginchk(4, inf);
             % '_phi2_toep' (private, for tests): a finished kernel used
             % instead of computing one. Not a valid inputParser name.
             [varargin, phi2_toep] = mr_op_take(varargin, '_phi2_toep');
 
+            % Parse the public name-value pairs. Defaults match the class help;
+            % unknown names are an error (inputParser's default).
             p = inputParser();
             p.FunctionName = 'mr_aha.create_op';
             p.addParameter('method', 'toeplitz');
@@ -408,6 +461,8 @@ classdef mr_aha < handle
             opt = p.Results;
 
             % ---- Arguments independent of the backend ----------------------
+            % Validate every option before touching any GPU, so that a typo
+            % fails fast and identically on CUDA and Metal.
             method = mr_op_choice(opt.method, {'toeplitz', 'nufft'}, ...
                                   'method', 'MR_AHA:mr_aha:method');
             toep_dist = mr_op_choice(opt.toep_dist, ...
@@ -415,12 +470,16 @@ classdef mr_aha < handle
                 'MR_AHA:mr_aha:toepDist');
             nufft = strcmp(method, 'nufft');
             nopts = mr_op_nufft_opts(opt.nufft_opts, nufft);
+            % share_primary: any logical or numeric scalar, stored as logical.
             if ~(isscalar(opt.share_primary) && ...
                  (islogical(opt.share_primary) || isnumeric(opt.share_primary)))
                 error('MR_AHA:mr_aha:sharePrimary', ...
                       'share_primary must be a logical scalar.');
             end
             share = logical(opt.share_primary);
+            % Reject combinations that have no meaning: a mask restricts the
+            % Toeplitz kernel, and a supplied kernel only replaces the
+            % Toeplitz computation.
             is_masked = isfield(config, 'is_masked') && config.is_masked;
             if nufft && is_masked
                 error('MR_AHA:mr_aha:maskedNufft', ...
@@ -432,10 +491,14 @@ classdef mr_aha < handle
                       '_phi2_toep is only used with method ''toeplitz''.');
             end
 
+            % Create the empty object, record the choices, then attach the
+            % backend resource.
             op = mr_aha(mr_op_token());
             op.Method = method;
             op.SharePrimary = share;
 
+            % Metal builds the operator through the Python package (see
+            % CREATE_METAL); everything below is the CUDA path.
             if strcmp(mr_backend(), 'metal')
                 op.create_metal(SEs, phi2, traj, config, opt.devices, ...
                                 opt.mask, toep_dist, share, nopts, phi2_toep);
@@ -443,7 +506,10 @@ classdef mr_aha < handle
             end
 
             % ---- CUDA: same conversions as calc_toep.m and AhA_Toeplitz.m --
+            % Translate 'devices' to 0-based CUDA ordinals (or 'all' / []).
             devices = mr_op_devices(opt.devices);
+            % The library reads complex single (interleaved) device arrays and a
+            % real single trajectory.
             SEs  = mr_op_complex_single(SEs,  'SEs');
             % With a supplied kernel the Gram blocks and the trajectory are
             % not needed and may both be empty (passed on as empty).
@@ -454,7 +520,13 @@ classdef mr_aha < handle
             if ~isempty(phi2_toep)
                 phi2_toep = mr_op_complex_single(phi2_toep, '_phi2_toep');
             end
+            % n_coils defaults to the trailing dimension of SEs (an explicit
+            % config.n_coils is kept).
             config = mr_op_fill_n_coils(config, SEs);
+            % Masked Toeplitz operator: without an explicit mask, derive it
+            % from the trajectory exactly as calc_toep.m does, so op and
+            % calc_toep + AhA_Toeplitz use the same sample set. MR_OP_MASK then
+            % converts it to 0-based int64 and fills config.num_masked.
             mask = opt.mask;
             if is_masked && isempty(mask)
                 if isempty(traj)
@@ -466,11 +538,18 @@ classdef mr_aha < handle
             end
             [mask, config] = mr_op_mask(mask, config);
 
+            % Options struct read by mr_aha_mex('create'); it maps onto
+            % mr_op_options (method, devices, toep_dist, flags) plus the
+            % cufinufft settings of the NUFFT route (0 = library default).
             mex_opts = struct('method', method, 'devices', devices, ...
                 'toep_dist', toep_dist, 'share_primary', share, ...
                 'nufft_upsampfac', nopts.upsampfac, ...
                 'nufft_gpu_method', nopts.gpu_method);
             mex_opts.phi2_toep = phi2_toep;     % may be [] (not computed)
+            % Build the operator in the library (mr_op_create): this computes
+            % the Toeplitz kernel (or plans the NUFFTs) on every GPU used and
+            % returns an opaque uint64 handle. Config is stored only after
+            % success, with n_coils and num_masked filled in.
             op.Handle = mr_aha_mex('create', SEs, phi2, traj, config, ...
                                       mask, mex_opts);
             op.Config = config;
@@ -481,6 +560,9 @@ classdef mr_aha < handle
         function check_alive(op)
             %CHECK_ALIVE  Error if the operator was deleted or not created
             %   in this session (e.g. loaded from a MAT-file).
+
+            % Neither backend resource attached: deleted, or a loaded copy
+            % (the resource properties are Transient).
             if op.Handle == 0 && isempty(op.PyOp)
                 error('MR_AHA:mr_aha:invalidHandle', ...
                       'This mr_aha has been deleted (or was loaded from a file).');
@@ -499,6 +581,7 @@ classdef mr_aha < handle
             %   the operator.
             % 'all' resolves to the one GPU, so that the same script runs on
             % CUDA and Metal (as in Python).
+            % Accept only the device specifications that mean "the one GPU".
             if ~(isempty(devices) || (ischar(devices) || isstring(devices)) ...
                      && strcmpi(devices, 'all') || ...
                  (isnumeric(devices) && isscalar(devices) && devices == 1))
@@ -506,6 +589,9 @@ classdef mr_aha < handle
                       ['The metal backend has a single GPU: devices must be ' ...
                        '[], 1 or ''all''.']);
             end
+            % Convert inputs to ordinary host arrays of the types the Python
+            % package expects: complex64 for SEs and phi2, real float32 for
+            % traj (gather is a no-op on host arrays).
             host = @(a) complex(single(gather(a)));
             SEs  = host(SEs);
             phi2 = host(phi2);
@@ -514,9 +600,13 @@ classdef mr_aha < handle
                 error('MR_AHA:mr_aha:complexTraj', 'traj must be real-valued.');
             end
             config = mr_op_fill_n_coils(config, SEs);
+            % nsp + 1 is the full rank of SEs ([space..., Ncoils]); a stack's
+            % phi2 has one more leading dimension (Nkz) than 2D/3D.
             nsp = mr_op_n_spatial(config);
             stack = strcmpi(config.traj_type, 'stack');
 
+            % Masked operator: compute or take the mask, fill num_masked and
+            % pass it as a 0-based, 1-D int64 NumPy array (a private copy).
             mask_py = py.None;
             if isfield(config, 'is_masked') && config.is_masked
                 if isempty(mask)
@@ -527,6 +617,9 @@ classdef mr_aha < handle
                 mask_py = mr_to_numpy(mask - 1).ravel().copy();   % 0-based, 1-D
             end
 
+            % Keyword arguments of mr_aha.create_op. 'devices' is None (the
+            % default GPU); nufft_opts carries only the fields the caller set,
+            % with gpu_method as a Python int.
             mr = mr_python();
             kw = py.dict(pyargs('method', op.Method, 'devices', py.None, ...
                 'toep_dist', toep_dist, 'share_primary', share));
@@ -540,14 +633,20 @@ classdef mr_aha < handle
                 py.operator.setitem(kw, 'nufft_opts', nd);
             end
             if ~isempty(phi2_toep)
+                % Test hook: hand a finished kernel to the Python operator.
                 Om = host(phi2_toep);
                 py.operator.setitem(kw, '_phi2_toep', ...
                                     mr_to_numpy(Om, ndims(Om)).copy());
             end
+            % For the Toeplitz route phi2 is only read while the kernel is
+            % computed, so a view of MATLAB's memory suffices; the NUFFT
+            % operator keeps it and therefore gets its own copy.
             phi2_py = mr_to_numpy(phi2, 3 + stack);
             if strcmp(op.Method, 'nufft')
                 phi2_py = phi2_py.copy();   % kept by the NUFFT operator
             end
+            % Positional arguments: (cfg, SEs, phi2, traj, mask). SEs is copied
+            % because the operator keeps it.
             args = py.tuple({mr_py_config(config), ...
                              mr_to_numpy(SEs, nsp + 1).copy(), phi2_py, ...
                              mr_to_numpy(traj, 3), mask_py});
@@ -572,6 +671,10 @@ end
 function [args, value] = mr_op_take(args, name)
 %MR_OP_TAKE  Remove the name-value pair NAME from ARGS; VALUE is [] when
 %   absent.
+
+    % Scan the name positions (1, 3, 5, ...) only, so that a value equal
+    % to NAME is not mistaken for the name. Matched pairs are removed in
+    % place; k then already points at the next name.
     value = [];
     k = 1;
     while k < numel(args)
@@ -587,6 +690,8 @@ end
 function v = mr_op_choice(v, choices, name, id)
 %MR_OP_CHOICE  Validate a string option (case-insensitive); returns it in
 %   lower case.
+
+    % Must be a char row or string scalar equal to one of CHOICES.
     if ~((ischar(v) && (isrow(v) || isempty(v))) || (isstring(v) && isscalar(v))) ...
             || ~any(strcmpi(v, choices))
         error(id, '%s must be one of %s.', name, ...
@@ -598,6 +703,8 @@ end
 function n = mr_op_nufft_opts(s, nufft)
 %MR_OP_NUFFT_OPTS  Validate 'nufft_opts'; returns .upsampfac and
 %   .gpu_method (0 for the library defaults) and .given (the fields set).
+
+    % [] (e.g. from a caller passing an empty default) means no options.
     if isempty(s) && ~isstruct(s)
         s = struct();
     end
@@ -615,6 +722,8 @@ function n = mr_op_nufft_opts(s, nufft)
               'Unknown nufft_opts field(s) %s; accepted: upsampfac, gpu_method.', ...
               strjoin(bad, ', '));
     end
+    % 0 tells the library to use its default for that setting; .given
+    % keeps only what the caller set (forwarded as-is on Metal).
     n = struct('upsampfac', 0, 'gpu_method', 0, 'given', s);
     for k = 1:numel(f)
         v = s.(f{k});
@@ -630,6 +739,8 @@ function devices = mr_op_devices(devices)
 %MR_OP_DEVICES  'devices' argument -> what mr_aha_mex expects: [] (the
 %   primary only), 'all', or an int32 row of CUDA ordinals (from 1-based
 %   gpuDevice indices).
+
+    % [] -> primary GPU only (an empty int32 row for the gateway).
     if isempty(devices) && ~ischar(devices) && ~isstring(devices)
         devices = int32([]);
         return
@@ -642,6 +753,9 @@ function devices = mr_op_devices(devices)
         error('MR_AHA:mr_aha:devices', ...
               'devices must be [], ''all'' or a vector of gpuDevice indices.');
     end
+    % Numeric vector: validate the 1-based gpuDevice indices against the
+    % number of visible GPUs, then shift to 0-based CUDA ordinals.
+    % Duplicates and the primary are resolved by the library.
     n_gpu = gpuDeviceCount();
     if ~(isnumeric(devices) && isreal(devices) && isvector(devices))
         error('MR_AHA:mr_aha:devices', ...
@@ -679,6 +793,9 @@ function a = mr_op_complex_single(a, name)
 %MR_OP_COMPLEX_SINGLE  Coerce an array to a complex single gpuArray (the
 %   CUDA branch of AhA_Toeplitz.m's conversion). No copy when the input
 %   already has that form.
+
+    % Each step converts only when needed, so a complex single gpuArray
+    % passes through without a copy.
     if ~isa(a, 'gpuArray')
         a = gpuArray(a);
     end
@@ -715,6 +832,8 @@ function config = mr_op_fill_n_coils(config, SEs)
     if isfield(config, 'n_coils') && ~isempty(config.n_coils)
         return
     end
+    % SEs is [space..., Ncoils]; the coil count is the dimension right
+    % after the spatial ones.
     n_spatial = mr_op_n_spatial(config);
     sz = size(SEs);
     sz(end+1:n_spatial + 1) = 1;   % restore MATLAB's dropped trailing ones
@@ -724,6 +843,13 @@ end
 function s = mr_op_info_metal(op)
 %MR_OP_INFO_METAL  INFO on Metal: the Python operator's info dictionary in
 %   the (0-based) form mr_aha_mex('info', h) returns on CUDA.
+
+    % Convert the Python dict field by field, then build the struct with
+    % the same fields as the CUDA gateway's info (still 0-based; INFO
+    % applies the 1-based shift for both backends). Fields the Python
+    % operator does not report (primary, n_coils, share_primary, valid)
+    % are filled from the MATLAB side; reset checks do not apply on
+    % Metal, so valid is always true.
     d = struct(op.PyOp.info);
     f = fieldnames(d);
     for k = 1:numel(f)
@@ -754,6 +880,8 @@ end
 function v = mr_op_from_py(v)
 %MR_OP_FROM_PY  Python scalar / string / list value -> MATLAB (double row,
 %   char, logical or double).
+
+    % Lists/tuples are assumed numeric (device and coil lists, timings).
     if isa(v, 'py.list') || isa(v, 'py.tuple')
         v = cellfun(@double, cell(v));
     elseif isa(v, 'py.str')

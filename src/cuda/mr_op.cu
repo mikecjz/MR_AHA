@@ -182,8 +182,15 @@ struct mr_op_parts {
  */
 __global__ void mr_k_op_reduce(mr_complex *out, mr_op_parts parts, long long n)
 {
+    /* One thread per complex element of the image-space output `[Nx, Ny, Nz,
+     * L]`, flattened (1D grid of MR_OP_BLOCK threads, rounded up; the tail
+     * threads exit). 64-bit index: the output can exceed 2^31 elements. */
     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
+    /* Read the primary's own partial result once, add the staged partials of
+     * the other devices in a fixed order (deterministic rounding from run to
+     * run) and write once: a single read-modify-write pass whatever the
+     * number of devices, instead of one pass per device. */
     mr_complex acc = out[i];
     for (int k = 0; k < parts.n; ++k) acc = cuCaddf(acc, parts.p[k][i]);
     out[i] = acc;
@@ -196,6 +203,8 @@ __global__ void mr_k_op_reduce(mr_complex *out, mr_op_parts parts, long long n)
 /** @brief Read an integer environment variable, or @p def when unset. */
 static long long mr_op_env(const char *name, long long def)
 {
+    /* Unset and empty variables both mean "use the default"; anything else
+     * is parsed with atoll (no validation: a non-number reads as 0). */
     const char *e = std::getenv(name);
     return (e && e[0]) ? atoll(e) : def;
 }
@@ -209,6 +218,8 @@ static long long mr_op_env(const char *name, long long def)
 static int mr_op_tag(int dev, int rc)
 {
     if (rc != MR_SUCCESS) {
+        /* Copy first: mr_set_error formats into the same thread-local buffer
+         * that mr_last_error returns, so it must not read from it. */
         char msg[1024];
         snprintf(msg, sizeof(msg), "%s", mr_last_error());
         mr_set_error("device %d: %s", dev, msg);
@@ -225,8 +236,15 @@ static int mr_op_tag(int dev, int rc)
  */
 static int mr_op_pick_count(int C, int G)
 {
+    /* Never more devices than coils (a device without coils would only add
+     * transfers), and at least one. */
     if (G > C) G = C;
     if (G < 1) return 1;
+    /* per = ceil(C/G) coils on the busiest device. Walk G downwards while
+     * ceil(C/(g-1)) is still `per`: e.g. C = 8, G = 6 gives per = 2 and
+     * returns 4 (4 x 2 coils), not 6 (2 + 2 + 1 + 1 + 1 + 1), which would
+     * be no faster but would copy x to, and partials back from, two more
+     * devices. */
     const int per = (C + G - 1) / G;
     int g = G;
     while (g > 1 && (C + (g - 1) - 1) / (g - 1) == per) --g;
@@ -242,6 +260,9 @@ static int mr_op_pick_count(int C, int G)
  */
 static int mr_op_ctx_id(int dev, unsigned long long *id)
 {
+    /* The runtime creates (or retains) the device's primary context lazily;
+     * cudaFree(0) is the customary no-op that forces it into existence, so
+     * that the driver-API query below has a current context to identify. */
     MR_CUDA_CHECK(cudaSetDevice(dev));
     MR_CUDA_CHECK(cudaFree(0)); /* make sure the primary context exists */
     CUcontext ctx = NULL;
@@ -271,13 +292,21 @@ static int mr_op_ctx_id(int dev, unsigned long long *id)
  */
 static int mr_op_dev_alive(const mr_op_dev *d)
 {
+    /* 1. Never set up (no handles yet), so nothing can be stale. */
     if (d->ctx_id == 0) return 1;
+    /* 2. Is the primary context active? cuDevicePrimaryCtxGetState only
+     *    reads the state; unlike any runtime call, it does not silently
+     *    create a fresh context on a device that was reset. */
     CUdevice cud;
     unsigned int flags = 0;
     int active = 0;
     if (cuDeviceGet(&cud, d->dev) != CUDA_SUCCESS ||
         cuDevicePrimaryCtxGetState(cud, &flags, &active) != CUDA_SUCCESS || !active)
         return 0;
+    /* 3. Make it current (it exists, so this creates nothing) and compare
+     *    the identity of the current context instance with the one recorded
+     *    in mr_op_ctx_id. Errors are cleared and answered with "not alive":
+     *    the caller then drops the handles rather than touching them. */
     if (cudaSetDevice(d->dev) != cudaSuccess) {
         cudaGetLastError();
         return 0;
@@ -303,6 +332,13 @@ static int mr_op_dev_alive(const mr_op_dev *d)
  */
 static void mr_op_dev_release(mr_op p, mr_op_dev *d, int alive, int primary_alive)
 {
+    /* Live context: release in the reverse order of dependence. The engines
+     * first (they may hold references into the constants and queue work on
+     * the stream), then the arrays the slot owns (aliased caller arrays,
+     * owns_const / owns_toep == 0, are left alone), the remainder-split
+     * resources, the events and finally the stream, if it is ours rather
+     * than the caller's (direct path). Return codes are ignored: this is a
+     * best-effort teardown that must free as much as possible. */
     if (alive) {
         cudaSetDevice(d->dev);
         if (d->plan) mr_aha_plan_destroy(d->plan);
@@ -329,6 +365,8 @@ static void mr_op_dev_release(mr_op p, mr_op_dev *d, int alive, int primary_aliv
         if (d->plan) mr_aha_plan_forget(d->plan);
         if (d->nu) mr_nufft_eng_destroy(d->nu, 0);
     }
+    /* The staging buffer lives on the primary device, not on the slot's own
+     * device, so its fate depends on the primary's context. */
     if (d->d_stage && primary_alive) {
         cudaSetDevice(p->primary);
         cudaFree(d->d_stage);
@@ -346,16 +384,22 @@ static void mr_op_dev_release(mr_op p, mr_op_dev *d, int alive, int primary_aliv
  */
 static void mr_op_release(mr_op p, int primary_lost = 0)
 {
+    /* Probe every slot once up front: the primary's liveness decides about
+     * the staging buffers of all the other slots and about the start event,
+     * so it has to be known before any slot is released. */
     int alive[MR_OP_MAX_DEVICES];
     for (int k = 0; k < p->ndev; ++k)
         alive[k] = (k == 0 && primary_lost) ? 0 : mr_op_dev_alive(&p->dev[k]);
     const int primary_alive = (p->ndev > 0) ? alive[0] : !primary_lost;
     for (int k = 0; k < p->ndev; ++k)
         mr_op_dev_release(p, &p->dev[k], alive[k], primary_alive);
+    /* The start event (multi-device only) belongs to the primary device. */
     if (p->start && primary_alive) {
         cudaSetDevice(p->primary);
         cudaEventDestroy(p->start);
     }
+    /* Clear any error the best-effort teardown left behind so that it does
+     * not surface in an unrelated later CUDA call of the caller. */
     cudaGetLastError();
     free(p);
 }
@@ -363,6 +407,9 @@ static void mr_op_release(mr_op p, int primary_lost = 0)
 /* Body of mr_enable_peer, documented in mr_internal.cuh. */
 int mr_enable_peer(int a, int b)
 {
+    /* Peer access is enabled per direction and per context; it is only
+     * worth anything (and only reported as on) when both directions are
+     * possible. A failed capability query counts as "no". */
     int ab = 0, ba = 0;
     if (cudaDeviceCanAccessPeer(&ab, a, b) != cudaSuccess) ab = 0;
     if (cudaDeviceCanAccessPeer(&ba, b, a) != cudaSuccess) ba = 0;
@@ -370,6 +417,10 @@ int mr_enable_peer(int a, int b)
         cudaGetLastError();
         return 0;
     }
+    /* cudaDeviceEnablePeerAccess(peer) acts from the *current* device, so
+     * switch to each side in turn. Re-enabling an existing mapping (another
+     * operator, or an earlier call for the same pair) returns
+     * cudaErrorPeerAccessAlreadyEnabled, which counts as success. */
     int ok = 1;
     if (cudaSetDevice(a) == cudaSuccess) {
         cudaError_t e = cudaDeviceEnablePeerAccess(b, 0);
@@ -395,14 +446,30 @@ int mr_enable_peer(int a, int b)
  */
 static int mr_op_split_setup(mr_op p, mr_op_dev *d, const mr_complex *d_SEs)
 {
+    /* se_bytes: maps of all nsplit remaining coils `[Nx, Ny, Nz, nsplit]`.
+     * Every device needs all of them, since each one processes its ranks
+     * R_g of every remaining coil. */
     const mr_config *cfg = &p->cfg;
     const size_t c8 = sizeof(mr_complex);
     const long long pad = p->dims.pad_size;
     const size_t se_bytes = (size_t)mr_image_size(cfg) * p->nsplit * c8;
 
+    /* Events that order the all-to-all exchanges between the devices'
+     * streams (see mr_op_issue_split); timing is disabled, which makes
+     * recording and waiting cheaper. */
     MR_CUDA_CHECK(cudaEventCreateWithFlags(&d->ev_fft, cudaEventDisableTiming));
     MR_CUDA_CHECK(cudaEventCreateWithFlags(&d->ev_bd, cudaEventDisableTiming));
 
+    /* Buffers, allocated with one error chain so that a single message
+     * reports the failure; whatever was allocated stays in the slot and is
+     * freed by mr_op_release:
+     *  - d_A `[Mx*My*Mz, nr]`: the padded volumes of the device's ranks
+     *    (natural order), transformed in place; absent when nr == 0 (L < G);
+     *  - d_B `[nk, L]`: all L ranks of the device's slab K_g, rank-major
+     *    with stride nk, the layout the block-diagonal kernels take through
+     *    an mr_bd_range {k0, nk, nk};
+     *  - d_inv `[Mx*My*Mz]` (masked mode): grid location -> mask entry map
+     *    used by the masked block-diagonal kernel. */
     cudaError_t ce = cudaMalloc((void **)&d->d_SEs_rem, se_bytes);
     if (ce == cudaSuccess && d->nr > 0)
         ce = cudaMalloc((void **)&d->d_A, (size_t)pad * d->nr * c8);
@@ -415,6 +482,9 @@ static int mr_op_split_setup(mr_op p, mr_op_dev *d, const mr_complex *d_SEs)
         MR_FAIL(MR_ERR_ALLOC, "failed to allocate the remainder-split buffers: %s",
                 cudaGetErrorString(ce));
     }
+    /* Copy the remaining coils' maps (coils split0 .. C-1 of the caller's
+     * array on the primary) to this device. Asynchronous on the slot's
+     * stream; the synchronisation at the end of the function completes it. */
     MR_CUDA_CHECK(cudaMemcpyPeerAsync(
         d->d_SEs_rem, d->dev, d_SEs + (size_t)mr_image_size(cfg) * p->split0,
         p->primary, se_bytes, d->stream));
@@ -423,6 +493,11 @@ static int mr_op_split_setup(mr_op p, mr_op_dev *d, const mr_complex *d_SEs)
         /* The mask is constant for the operator's lifetime: build the map
          * once. */
         const long long nm = (long long)cfg->num_masked;
+        /* All bytes 0xFF = -1 in every int: "location not in the mask".
+         * mr_k_mask_inverse then writes, for each of the num_masked entries
+         * (one thread each), its index at the grid location it names. It
+         * reads the slot's own copy of the mask (or the aliased caller mask
+         * on a shared primary), already in place. */
         MR_CUDA_CHECK(cudaMemsetAsync(d->d_inv, 0xFF, (size_t)pad * sizeof(int),
                                       d->stream));
         mr_k_mask_inverse<<<(int)mr_ceil_div(nm, MR_OP_BLOCK), MR_OP_BLOCK, 0,
@@ -432,6 +507,14 @@ static int mr_op_split_setup(mr_op p, mr_op_dev *d, const mr_complex *d_SEs)
 
     if (d->nr > 0) {
         /* Batched cuFFT over this device's nr padded volumes. */
+        /* cuFFT takes the dimensions slowest-varying first, while the
+         * arrays are column-major `[Mx, My, Mz]` (x fastest), hence the
+         * reversed order of phi2_dim. The nr volumes are contiguous
+         * (idist = odist = pad, unit stride), one transform per rank. The
+         * work area is allocated by us (auto-allocation off) so that an
+         * out-of-memory is reported as MR_ERR_ALLOC with its size context,
+         * and the plan is bound to the slot's stream so the transforms
+         * order with the exchanges issued there. */
         const int rank = cfg->n_spatial;
         long long n[3];
         if (rank == 3) {
@@ -456,6 +539,8 @@ static int mr_op_split_setup(mr_op p, mr_op_dev *d, const mr_complex *d_SEs)
         MR_CUFFT_CHECK(cufftSetWorkArea(d->fft_r, d->d_work_r));
         MR_CUFFT_CHECK(cufftSetStream(d->fft_r, d->stream));
     }
+    /* Complete the map copy and the mask map before returning: creation is
+     * synchronous, so the slot is ready for any stream once it returns. */
     MR_CUDA_CHECK(cudaStreamSynchronize(d->stream));
     return MR_SUCCESS;
 }
@@ -473,6 +558,10 @@ static int mr_op_split_setup(mr_op p, mr_op_dev *d, const mr_complex *d_SEs)
  */
 static int mr_op_probe_bw(int primary, int dev, double *gbs)
 {
+    /* A source buffer on the primary, a destination buffer and a private
+     * non-blocking stream on dev (so the probe neither waits for nor delays
+     * the caller's work). The error chain stops at the first failure; the
+     * cleanup below runs in every case. */
     const size_t bytes = 64u << 20;
     void *src = NULL, *dst = NULL;
     cudaStream_t st = NULL;
@@ -485,6 +574,9 @@ static int mr_op_probe_bw(int primary, int dev, double *gbs)
     if (ce == cudaSuccess) ce = cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking);
     if (ce == cudaSuccess) ce = cudaEventCreate(&e0);
     if (ce == cudaSuccess) ce = cudaEventCreate(&e1);
+    /* One untimed warm-up copy (it pays for the first-use setup of the peer
+     * mapping or of the host staging path), then three copies bracketed by
+     * events; the rate is 3 * 64 MB over the elapsed time. */
     if (ce == cudaSuccess) ce = cudaMemcpyPeerAsync(dst, dev, src, primary, bytes, st);
     if (ce == cudaSuccess) ce = cudaEventRecord(e0, st);
     for (int k = 0; k < 3 && ce == cudaSuccess; ++k)
@@ -492,6 +584,8 @@ static int mr_op_probe_bw(int primary, int dev, double *gbs)
     if (ce == cudaSuccess) ce = cudaEventRecord(e1, st);
     if (ce == cudaSuccess) ce = cudaEventSynchronize(e1);
     if (ce == cudaSuccess) ce = cudaEventElapsedTime(&ms, e0, e1);
+    /* Release in reverse order, each buffer from its own device; the
+     * primary is left current. */
     const cudaError_t err = ce;
     if (e0) cudaEventDestroy(e0);
     if (e1) cudaEventDestroy(e1);
@@ -528,6 +622,9 @@ static int mr_op_probe_coils(mr_op p, int ncoil, const mr_complex *d_SEs,
                              const mr_complex *d_toep, const int64_t *d_mask,
                              double *ms)
 {
+    /* Configuration of a device that would own the first ncoil coils: same
+     * geometry, fewer coils, so mr_aha_plan_create picks the coil groups
+     * that a device of the operator with ncoil coils would use. */
     mr_config c1 = p->cfg;
     c1.n_coils = ncoil;
     c1.verbose = 0;
@@ -538,6 +635,10 @@ static int mr_op_probe_coils(mr_op p, int ncoil, const mr_complex *d_SEs,
     mr_aha_plan tp = NULL;
     float t = 0.0f;
     int rc = MR_SUCCESS;
+    /* Private stream, zero input x and a scratch output y, both
+     * `[Nx, Ny, Nz, L]`. The maps, kernel and mask are the caller's (or
+     * the operator's copy on the primary); they are only read. The value
+     * of the input does not change the run time, so zeros suffice. */
     cudaError_t ce = cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking);
     if (ce == cudaSuccess) ce = cudaMalloc((void **)&x, x_bytes);
     if (ce == cudaSuccess) ce = cudaMalloc((void **)&y, x_bytes);
@@ -545,6 +646,9 @@ static int mr_op_probe_coils(mr_op p, int ncoil, const mr_complex *d_SEs,
     if (ce == cudaSuccess) ce = cudaEventCreate(&e0);
     if (ce == cudaSuccess) ce = cudaEventCreate(&e1);
     if (ce == cudaSuccess) {
+        /* Plan on the private stream; the first application warms up (cuFFT
+         * and kernel first-launch costs), the second is timed between two
+         * events. rc tracks library errors, ce CUDA runtime errors. */
         c1.stream = (void *)st;
         rc = mr_aha_plan_create(&c1, &tp);
         if (rc == MR_SUCCESS)
@@ -556,6 +660,8 @@ static int mr_op_probe_coils(mr_op p, int ncoil, const mr_complex *d_SEs,
         if (rc == MR_SUCCESS && ce == cudaSuccess) ce = cudaEventSynchronize(e1);
         if (rc == MR_SUCCESS && ce == cudaSuccess) ce = cudaEventElapsedTime(&t, e0, e1);
     }
+    /* Cleanup in every case, whether or not the runs succeeded; then
+     * report the library error first, else the CUDA one. */
     if (tp) mr_aha_plan_destroy(tp);
     if (e0) cudaEventDestroy(e0);
     if (e1) cudaEventDestroy(e1);
@@ -601,6 +707,12 @@ static int mr_op_dev_setup(mr_op p, mr_op_dev *d, const mr_op_inputs *in,
     const size_t x_bytes = (size_t)mr_x_size(cfg) * c8;
     const mr_complex *se_src = in->d_SEs + (size_t)mr_image_size(cfg) * d->coil0;
 
+    /* Stream and completion event. On the direct path (one device, no
+     * split) the engine is issued straight onto the caller's stream, so the
+     * caller's own stream ordering covers it and no event is needed.
+     * Otherwise each device gets a private non-blocking stream (it must not
+     * serialise with the legacy default stream) and a `done` event that the
+     * caller's stream waits on in mr_op_execute_impl. */
     MR_CUDA_CHECK(cudaSetDevice(d->dev));
     if (p->direct) {
         /* One device: the engine runs on the caller's stream. */
@@ -611,6 +723,8 @@ static int mr_op_dev_setup(mr_op p, mr_op_dev *d, const mr_op_inputs *in,
         d->owns_stream = 1;
         MR_CUDA_CHECK(cudaEventCreateWithFlags(&d->done, cudaEventDisableTiming));
     }
+    /* Remember which context instance the slot's handles belong to (see
+     * mr_op_dev_alive). */
     {
         const int rc = mr_op_ctx_id(d->dev, &d->ctx_id);
         if (rc != MR_SUCCESS) return rc;
@@ -619,6 +733,15 @@ static int mr_op_dev_setup(mr_op p, mr_op_dev *d, const mr_op_inputs *in,
     /* A kernel already in place (computed by mr_op_compute_kernel) is kept;
      * otherwise it is aliased (shared primary) or copied. */
     const int need_toep = toeplitz && (d->d_toep == NULL);
+    /* Device-resident constants. Two cases:
+     *  - shared primary (MR_OP_SHARE_PRIMARY): no copy at all, the slot
+     *    points into the caller's arrays, which must then outlive the
+     *    operator (owns_const = owns_toep = 0, never freed here);
+     *  - otherwise: private copies of this device's maps
+     *    `[Nx, Ny, Nz, ncoil]` (coils coil0 .. coil0+ncoil-1), of the mask
+     *    and, unless already present, of the kernel, copied peer-to-peer
+     *    from the primary. A slot with no whole coils (ncoil == 0, split
+     *    mode with C < G) has se_bytes == 0 and gets no maps. */
     if (is_primary && share) {
         /* Alias the caller's arrays: the maps of the primary's coils start at
          * coil0 of the caller's array. */
@@ -647,6 +770,10 @@ static int mr_op_dev_setup(mr_op p, mr_op_dev *d, const mr_op_inputs *in,
                     need_toep ? "phi2_toep, " : "", mask_bytes ? " and the mask" : "",
                     cudaGetErrorString(ce));
         }
+        /* Copies on the slot's stream (direct over NVLink/PCIe with peer
+         * access, staged through the host otherwise), then wait for them:
+         * the inputs are the caller's, which it may release or overwrite
+         * once mr_op_create returns. */
         if (need_toep)
             MR_CUDA_CHECK(cudaMemcpyPeerAsync(d->d_toep, d->dev, d_toep, p->primary,
                                               toep_bytes, d->stream));
@@ -660,6 +787,11 @@ static int mr_op_dev_setup(mr_op p, mr_op_dev *d, const mr_op_inputs *in,
     }
 
     if (!is_primary) {
+        /* Non-primary devices work on their own copy of x and produce a
+         * partial A^H A x `[Nx, Ny, Nz, L]` locally; it is then copied into
+         * d_stage on the primary, where mr_k_op_reduce adds it into the
+         * caller's output. The primary needs none of these: it reads the
+         * caller's x and writes the caller's output directly. */
         cudaError_t ce = cudaMalloc((void **)&d->d_x, x_bytes);
         if (ce == cudaSuccess) ce = cudaMalloc((void **)&d->d_part, x_bytes);
         if (ce != cudaSuccess) {
@@ -680,12 +812,21 @@ static int mr_op_dev_setup(mr_op p, mr_op_dev *d, const mr_op_inputs *in,
         MR_CUDA_CHECK(cudaSetDevice(d->dev));
     }
 
+    /* Remainder-split resources (needed on every device, including those
+     * without whole coils). */
     if (p->nsplit > 0) {
         const int rc = mr_op_split_setup(p, d, in->d_SEs);
         if (rc != MR_SUCCESS) return rc;
     }
 
     /* The engine of this device's whole coils, on its stream. */
+    /* Configuration of the engine: this device's coils only, pinned to
+     * this device and stream; maps are passed per execution (d_SEs, already
+     * offset to coil0). The Toeplitz plan is created quietly (its own
+     * report would repeat for every device); the NUFFT engine keeps the
+     * caller's verbosity. The NUFFT engine copies and reorders the Gram
+     * blocks and trajectory from the primary itself. A slot without whole
+     * coils (split mode, C < G) needs no engine. */
     if (d->ncoil == 0) return MR_SUCCESS;
     mr_config dc = *cfg;
     dc.n_coils = d->ncoil;
@@ -735,11 +876,18 @@ static int mr_op_compute_kernel(mr_op p, const int *cand, int G, int G1, int nre
     const auto t0 = std::chrono::steady_clock::now();
     mr_config cfg = p->cfg; /* gpu_device_id = primary, stream = caller's */
     const size_t toep_bytes = (size_t)mr_phi2_toep_size(&cfg) * sizeof(mr_complex);
+    /* Alone: nothing to distribute (a single applying device, a single
+     * candidate, or broadcast requested). Only the primary keeps a computed
+     * copy; mr_op_dev_setup copies it to any other device that needs one. */
     const int alone = (mode == MR_TDIST_ALONE || G1 == 1 || G == 1);
     if (alone) nrecv = 1;
 
     /* The operator's copies, before any calc_toep transient (whose chunks are
      * sized against the memory left). */
+    /* Allocate the full kernel on every receiver (slots 0 .. nrecv-1, in
+     * candidate order, so slot k becomes device cand[k] of the operator).
+     * p->ndev grows with every slot so that a failure here leaves exactly
+     * the allocated slots to mr_op_release. */
     for (int k = 0; k < nrecv; ++k) {
         mr_op_dev *d = &p->dev[k];
         d->dev = cand[k];
@@ -757,6 +905,8 @@ static int mr_op_compute_kernel(mr_op p, const int *cand, int G, int G1, int nre
     }
 
     int rc;
+    /* Single device: the ordinary calc_toep body on the caller's stream,
+     * into the primary's copy. */
     if (alone) {
         MR_CUDA_CHECK(cudaSetDevice(p->primary));
         rc = mr_calc_toep_impl(&cfg, in->d_phi2, in->d_traj, in->Ntrajs, in->Nkx,
@@ -767,6 +917,11 @@ static int mr_op_compute_kernel(mr_op p, const int *cand, int G, int G1, int nre
         p->toep_source = MR_OP_TOEP_BROADCAST;
         p->toep_devices = 1;
     } else {
+        /* Several devices: every candidate takes part. The first nrecv are
+         * receivers (they end up with the whole kernel in their slot's
+         * buffer); the others are helpers that only compute components for
+         * the receivers (d_full == NULL). mr_toep_distribute is synchronous
+         * and reports what it did; the report feeds mr_op_info. */
         mr_toep_dist_dev devs[MR_OP_MAX_DEVICES];
         for (int k = 0; k < G; ++k) {
             devs[k].dev = cand[k];
@@ -782,6 +937,7 @@ static int mr_op_compute_kernel(mr_op p, const int *cand, int G, int G1, int nre
         p->toep_comp_ms = rep.entry_ms;
         p->toep_gbs = rep.gather_gbs;
     }
+    /* Wall time of the whole kernel computation, including allocation. */
     p->toep_ms = std::chrono::duration<double, std::milli>(
                      std::chrono::steady_clock::now() - t0)
                      .count();
@@ -795,12 +951,17 @@ static int mr_op_compute_kernel(mr_op p, const int *cand, int G, int G1, int nre
 static int mr_op_check(const mr_config *cfg, const mr_op_inputs *in,
                        const mr_op_options *o)
 {
+    /* Geometry, rank, coils and mask consistency (shared with the
+     * stateless primitives). */
     int rc = mr_config_validate(cfg);
     if (rc != MR_SUCCESS) return rc;
     MR_REQUIRE(o->method == MR_OP_TOEPLITZ || o->method == MR_OP_NUFFT,
                "mr_op_create: method = %d is neither MR_OP_TOEPLITZ nor MR_OP_NUFFT",
                (int)o->method);
     MR_REQUIRE(in->d_SEs != NULL, "mr_op_create: d_SEs is NULL");
+    /* The Gram blocks and trajectory are needed whenever the operator has to
+     * build something from them: always for NUFFT (applied directly), and
+     * for Toeplitz when no finished kernel is supplied (calc_toep). */
     const int need_gram = (o->method == MR_OP_NUFFT || in->d_phi2_toep == NULL);
     if (need_gram) {
         MR_REQUIRE(in->d_phi2 != NULL, "mr_op_create: d_phi2 is NULL");
@@ -809,6 +970,9 @@ static int mr_op_check(const mr_config *cfg, const mr_op_inputs *in,
                    "mr_op_create: Ntrajs = %lld and Nkx = %lld must be > 0",
                    (long long)in->Ntrajs, (long long)in->Nkx);
     }
+    /* Method-specific rules: NUFFT has no Cartesian kernel, so a mask or a
+     * supplied kernel is meaningless; Toeplitz with a mask needs the mask
+     * array itself. */
     if (o->method == MR_OP_NUFFT) {
         MR_REQUIRE(!cfg->is_masked,
                    "mr_op_create: the NUFFT method has no kernel to mask; set "
@@ -833,6 +997,10 @@ extern "C" int mr_op_options_defaults(mr_op_options *opt)
 {
     mr_clear_error();
     MR_REQUIRE(opt != NULL, "mr_op_options_defaults: opt is NULL");
+    /* Zero first so that fields added to mr_op_options in later versions
+     * start at 0, then set the documented defaults explicitly: Toeplitz on
+     * the primary only, automatic kernel distribution, caller's arrays used
+     * in place on the primary, cufinufft's own NUFFT parameters. */
     memset(opt, 0, sizeof(*opt));
     opt->method = MR_OP_TOEPLITZ;
     opt->devices = NULL;
@@ -867,6 +1035,7 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
                              const mr_op_options *o, mr_op *op_out)
 {
     const auto t_create = std::chrono::steady_clock::now();
+    /* Argument validation; nothing allocated yet, so plain returns. */
     int rc = mr_op_check(cfg, in, o);
     if (rc != MR_SUCCESS) return rc;
     const int toeplitz = (o->method == MR_OP_TOEPLITZ);
@@ -893,6 +1062,8 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
      * measured by the upsampled grid times L; a NUFFT operator also works on
      * every sample (spreading, interpolation, Gram multiplication), so it
      * takes the larger of the grid and the sample count. */
+    /* For NUFFT the samples per rank are Ntrajs * Nkx readout points, times
+     * the Nkz partitions of a stack trajectory (MR_TRAJ_STACK). */
     const int C = cfg->n_coils;
     long long per_rank = mr_pad_size(cfg);
     if (!toeplitz) {
@@ -905,6 +1076,12 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
     const int small = (G > 1 && work < min_work);
     const int G1 = small ? 1 : mr_op_pick_count(C, G);
 
+    /* Operator struct, zeroed (calloc): every handle starts NULL / 0, which
+     * is what makes mr_op_release safe on a partially built operator.
+     * gpu_device_id is pinned to the resolved primary (it may have been -1,
+     * "current device"). The specialised block-diagonal kernels are looked
+     * up for L (Toeplitz only), unless MR_AHA_CUDA_GENERIC_BD forces the
+     * generic ones; the remainder split requires them. */
     mr_op p = (mr_op)calloc(1, sizeof(struct mr_op_s));
     if (p == NULL) MR_FAIL(MR_ERR_ALLOC, "failed to allocate the operator struct");
     p->cfg = *cfg;
@@ -927,6 +1104,11 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
     }
 
     /* Remainder split (Toeplitz only); see the function comment. */
+    /* mode: 1 = forced on, 0 = forced off, 2 = auto (unset or any other
+     * value). can_split collects the preconditions: Toeplitz, several
+     * candidates, an uneven division of the coils, a problem that is not
+     * tiny, in-place block-diagonal kernels for the location range, and a
+     * mask small enough for the int-valued grid-to-mask map. */
     const char *se = std::getenv("MR_AHA_MGPU_SPLIT");
     const int mode = (se && !strcmp(se, "on")) ? 1 : (se && !strcmp(se, "off")) ? 0 : 2;
     const int can_split = (toeplitz && mode != 0 && G > 1 && C % G != 0 && !small &&
@@ -954,6 +1136,8 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
         p->toep_source = toeplitz ? MR_OP_TOEP_SUPPLIED : MR_OP_TOEP_NONE;
     }
 
+    /* Cost model of the remainder split (auto mode only); see the function
+     * comment for the formulas. Step 1: bandwidth. */
     double bw = 0.0, t_whole = 0.0, t_split = 0.0;
     if (can_split && mode == 2) {
         /* Bandwidth for the cost model (all G candidates). It is not
@@ -972,6 +1156,11 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
         bw = (ok && nprobe > 1) ? bmin : 0.0;
         mr_clear_error(); /* a failed probe is not an error of the operator */
     }
+    /* Step 2: timings on the primary, with the (now available) kernel:
+     * T(1), T(ceil(C/G1)) for the whole-coil plan and T(floor(C/G)) for the
+     * whole-coil part of the split plan (skipped when q == 0, i.e. C < G).
+     * t_a2a is the time of the two all-to-all exchanges of one coil: each
+     * device sends (G-1)/G of its L/G ranks' padded data, twice. */
     if (can_split && mode == 2 && bw > 0.0) {
         const int q = C / G, r = C % G, nw = (C + G1 - 1) / G1;
         double t1 = 0.0, tq = 0.0, tw = 0.0;
@@ -991,6 +1180,8 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
         mr_clear_error(); /* a failed probe is not an error of the operator */
     }
 
+    /* Final device count and coil assignment. The direct path needs exactly
+     * one device and no split. */
     const int Gp = split ? G : G1;
     p->ndev = Gp;
     p->direct = (Gp == 1 && !split);
@@ -1025,6 +1216,8 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
     }
 
     /* Multi-device execution: the start event on the caller's stream. */
+    /* It is recorded on the caller's stream at each execute; the other
+     * devices' streams wait on it before reading x. */
     if (!p->direct) {
         cudaError_t ce = cudaSetDevice(primary);
         if (ce == cudaSuccess)
@@ -1040,6 +1233,9 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
 
     /* Peer access: primary <-> every device, and every pair for the split's
      * all-to-all exchange. */
+    /* peer_all records whether every primary <-> device pair has direct
+     * access (reported in mr_op_info); without it the runtime stages the
+     * copies through host memory, which is correct but slower. */
     int peer_all = 1;
     for (int k = 1; k < Gp; ++k) peer_all &= mr_enable_peer(primary, cand[k]);
     if (split)
@@ -1057,6 +1253,10 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
         }
     }
 
+    /* Fill the report returned by mr_op_info: device list and coil ranges,
+     * group sizes (Toeplitz: from the plan; NUFFT: one coil at a time; 0: a
+     * device without whole coils), split, peer access and how the kernel
+     * was obtained. */
     mr_op_info_t *nf = &p->info;
     memset(nf, 0, sizeof(*nf));
     nf->method = (int)o->method;
@@ -1111,10 +1311,14 @@ extern "C" int mr_op_create(const mr_config *cfg, const mr_op_inputs *in,
     *op_out = NULL;
     MR_REQUIRE(cfg != NULL, "mr_op_create: cfg is NULL");
     MR_REQUIRE(in != NULL, "mr_op_create: in is NULL");
+    /* Local copy of the options (defaults when none are given), so the
+     * caller's struct is never modified. */
     mr_op_options o;
     if (opt == NULL) mr_op_options_defaults(&o);
     else o = *opt;
 
+    /* The implementation switches devices freely; restore the caller's
+     * current device on every exit path. */
     int prev = 0;
     MR_CUDA_CHECK(cudaGetDevice(&prev));
     const int rc = mr_op_create_impl(cfg, in, &o, op_out);
@@ -1167,12 +1371,30 @@ static int mr_op_issue_split(mr_op p, const mr_complex *d_x, mr_complex *const *
     const size_t c8 = sizeof(mr_complex);
     const int G = p->ndev;
 
+    /* One remaining coil j at a time (its maps are column j of each
+     * device's d_SEs_rem). The host only issues work; all ordering between
+     * devices is carried by the per-device events ev_fft and ev_bd. Reuse of
+     * d_A / d_B across consecutive coils is safe because each device's
+     * stream only re-records its event after it has finished consuming the
+     * other devices' buffers of the previous coil:
+     *  - step 1 of coil j+1 on device g follows step 4 of coil j on the
+     *    same stream, which waited for every ev_bd of coil j, so no device
+     *    still reads g's d_A when it is overwritten;
+     *  - step 2 of coil j+1 on device h waits for every ev_fft of coil j+1,
+     *    recorded after the step-4 copies of coil j out of h's d_B. */
     for (int j = 0; j < p->nsplit; ++j) {
         /* 1. Pad and transform ranks R_g of the remaining coil j. */
         for (int g = 0; g < G; ++g) {
             mr_op_dev *d = &p->dev[g];
             MR_CUDA_CHECK(cudaSetDevice(d->dev));
             if (d->nr > 0) {
+                /* Pad the ranks r0 .. r0+nr-1 of x (`[Nx, Ny, Nz, L]`, so
+                 * rank r starts at x + img*r) times S_j into the nr padded
+                 * volumes of d_A, natural order, then forward-FFT them all
+                 * in one batched cuFFT. dr.L = nr makes the kernel treat the
+                 * device's ranks as a complete rank axis. Non-primary
+                 * devices read their own copy of x, issued earlier on the
+                 * same stream. */
                 mr_dims dr = dims;
                 dr.L = d->nr;
                 const mr_complex *xg = (g == 0) ? d_x : d->d_x;
@@ -1182,6 +1404,8 @@ static int mr_op_issue_split(mr_op p, const mr_complex *d_x, mr_complex *const *
                 MR_KERNEL_CHECK("mr_k_pad_mul_se (split)");
                 MR_CUFFT_CHECK(cufftExecC2C(d->fft_r, d->d_A, d->d_A, CUFFT_FORWARD));
             }
+            /* Recorded even with nr == 0, so that the event is always valid
+             * (it is only waited on for devices with ranks). */
             MR_CUDA_CHECK(cudaEventRecord(d->ev_fft, d->stream));
         }
 
@@ -1203,6 +1427,11 @@ static int mr_op_issue_split(mr_op p, const mr_complex *d_x, mr_complex *const *
                         dg->d_A + pad * l + dh->k0, dg->dev,
                         (size_t)dh->nk * c8, dh->stream));
             }
+            /* d_B now holds `[nk, L]`: all L ranks of the locations
+             * k0 .. k0+nk-1. Apply the replicated kernel in place to that
+             * location range only (loc0 = k0 gives the kernel the global
+             * location of each row, to index phi2_toep / d_inv; vstride =
+             * nk is the rank stride in d_B), as one "coil". */
             const mr_bd_range rg = {dh->k0, dh->nk, dh->nk};
             const int brc =
                 cfg->is_masked
@@ -1216,6 +1445,12 @@ static int mr_op_issue_split(mr_op p, const mr_complex *d_x, mr_complex *const *
         }
 
         /* 4. Return the slabs, inverse transform and crop ranks R_g. */
+        /* Mirror image of step 2: device g fetches, from every device h, the
+         * slab K_h of its own ranks R_g, once h's multiply (ev_bd) is done.
+         * Its d_A then holds the multiplied k-space of its ranks over the
+         * whole grid; inverse FFT, crop and multiply by conj(S_j), and
+         * accumulate (accumulate = 1) into ranks R_g of the device's output,
+         * on top of its whole-coil result. */
         for (int g = 0; g < G; ++g) {
             mr_op_dev *dg = &p->dev[g];
             if (dg->nr == 0) continue;
@@ -1253,6 +1488,9 @@ static int mr_op_execute_impl(mr_op p, const mr_complex *d_x, mr_complex *d_AhAx
         /* One device: the engine on the caller's stream, arrays in place. */
         return mr_op_engine_execute(&p->dev[0], d_x, d_AhAx);
     }
+    /* Fork: everything below happens on the devices' private streams,
+     * each first waiting for this event, i.e. for whatever the caller queued
+     * on its stream before (in particular the production of x). */
     MR_CUDA_CHECK(cudaEventRecord(p->start, p->stream));
 
     /* Whole coils. Other devices first (their copies of x are the longest
@@ -1265,6 +1503,9 @@ static int mr_op_execute_impl(mr_op p, const mr_complex *d_x, mr_complex *d_AhAx
         const mr_complex *xk = (k == 0) ? d_x : d->d_x;
         MR_CUDA_CHECK(cudaSetDevice(d->dev));
         MR_CUDA_CHECK(cudaStreamWaitEvent(d->stream, p->start, 0));
+        /* Non-primary devices: copy x from the primary into their buffer.
+         * Their engine (or the memset) is queued behind the copy on the
+         * same stream. */
         if (k > 0)
             MR_CUDA_CHECK(cudaMemcpyPeerAsync(d->d_x, d->dev, d_x, p->primary,
                                               x_bytes, d->stream));
@@ -1283,6 +1524,9 @@ static int mr_op_execute_impl(mr_op p, const mr_complex *d_x, mr_complex *d_AhAx
     }
 
     /* Partial results back to the primary device. */
+    /* Each non-primary device copies its partial result into its staging
+     * buffer on the primary, on its own stream (behind its engine and its
+     * split work), and every device, primary included, records `done`. */
     for (int k = 0; k < p->ndev; ++k) {
         mr_op_dev *d = &p->dev[k];
         MR_CUDA_CHECK(cudaSetDevice(d->dev));
@@ -1294,6 +1538,12 @@ static int mr_op_execute_impl(mr_op p, const mr_complex *d_x, mr_complex *d_AhAx
 
     /* Reduce on the caller's stream once every device is done. */
     MR_CUDA_CHECK(cudaSetDevice(p->primary));
+    /* Join: the caller's stream waits for all `done` events, which covers
+     * the primary's engine output in d_AhAx and every staged partial; the
+     * reduction then adds the staged partials into d_AhAx on the caller's
+     * stream, so the caller sees a finished result in stream order and the
+     * host never blocks. The pointers travel in the kernel's by-value
+     * argument (at most MR_OP_MAX_DEVICES - 1 of them). */
     mr_op_parts parts;
     memset(&parts, 0, sizeof(parts));
     for (int k = 0; k < p->ndev; ++k) {
@@ -1306,6 +1556,8 @@ static int mr_op_execute_impl(mr_op p, const mr_complex *d_x, mr_complex *d_AhAx
             d_AhAx, parts, n);
         MR_KERNEL_CHECK("mr_k_op_reduce");
     }
+    /* Verbose mode only: wait so that the message is printed after the
+     * work is really done (this does block the host). */
     if (cfg->verbose) {
         MR_CUDA_CHECK(cudaStreamSynchronize(p->stream));
         printf("[mr_aha] AhA applied over %d coil(s) on %d device(s)\n", cfg->n_coils,
@@ -1322,6 +1574,8 @@ extern "C" int mr_op_execute(mr_op op, const mr_complex *d_x, mr_complex *d_AhAx
     MR_REQUIRE(d_AhAx != NULL, "mr_op_execute: d_AhAx is NULL");
     MR_REQUIRE(d_AhAx != d_x, "mr_op_execute: d_AhAx must not alias d_x");
 
+    /* Run the body and restore the caller's device. On the direct path all
+     * work was on the caller's stream, so a failure needs no extra care. */
     int prev = 0;
     MR_CUDA_CHECK(cudaGetDevice(&prev));
     const int rc = mr_op_execute_impl(op, d_x, d_AhAx);
@@ -1342,6 +1596,7 @@ extern "C" int mr_op_info(mr_op op, mr_op_info_t *info)
     mr_clear_error();
     MR_REQUIRE(op != NULL, "mr_op_info: op is NULL");
     MR_REQUIRE(info != NULL, "mr_op_info: info is NULL");
+    /* Snapshot filled once at creation; the operator does not change. */
     *info = op->info;
     return MR_SUCCESS;
 }
@@ -1350,6 +1605,8 @@ extern "C" int mr_op_destroy(mr_op op)
 {
     mr_clear_error();
     if (op == NULL) return MR_SUCCESS;
+    /* The current device may not be queryable (e.g. after a reset); only
+     * restore it when it was. */
     int prev = 0;
     const cudaError_t ce = cudaGetDevice(&prev);
     /* Let in-flight work finish before freeing what it uses (on the devices
@@ -1359,6 +1616,8 @@ extern "C" int mr_op_destroy(mr_op op)
         if (op->dev[k].stream) cudaStreamSynchronize(op->dev[k].stream);
         if (k == 0) cudaStreamSynchronize(op->stream); /* NULL: legacy stream */
     }
+    /* Errors from the waits (e.g. a faulted kernel) are not this call's
+     * concern: clear them and release anyway. */
     cudaGetLastError();
     mr_op_release(op);
     if (ce == cudaSuccess) cudaSetDevice(prev);

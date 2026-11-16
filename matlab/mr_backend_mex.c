@@ -25,8 +25,11 @@
  */
 void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
 {
+    /* No inputs; at most one output. prhs is unused. */
     (void)prhs;
     if (nrhs != 0) mexErrMsgIdAndTxt("MR_AHA:backend", "No inputs expected.");
     if (nlhs > 1) mexErrMsgIdAndTxt("MR_AHA:backend", "Too many outputs.");
+    /* mr_backend() returns a static string naming the backend the linked
+     * library was built for; copy it into a MATLAB char array. */
     plhs[0] = mxCreateString(mr_backend());
 }

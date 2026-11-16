@@ -54,10 +54,15 @@ struct mr_metal_fft {
 int mr_metal_fft_create(const mr_metal_ctx *ctx, int rank, const int dims[3],
                         int batch, mr_metal_fft **out)
 {
+    /* Argument checks. *out is cleared first so that callers can always pass
+     * it to mr_metal_fft_destroy, even after a failure. */
     *out = nullptr;
     MR_REQUIRE(rank >= 1 && rank <= 3, "mr_metal_fft_create: rank %d", rank);
     MR_REQUIRE(batch >= 1, "mr_metal_fft_create: batch %d", batch);
 
+    /* Size guard: the whole batch (volume x batch complex values) must stay
+     * within VkFFT's 32-bit indexing on Metal (see MR_FFT_MAX_VALUES). The
+     * check is done in 64 bits before VkFFT ever sees the sizes. */
     uint64_t volume = 1;
     for (int d = 0; d < rank; ++d) volume *= (uint64_t)dims[d];
     if (volume * (uint64_t)batch > MR_FFT_MAX_VALUES)
@@ -67,10 +72,19 @@ int mr_metal_fft_create(const mr_metal_ctx *ctx, int rank, const int dims[3],
                 (unsigned long long)(volume * (uint64_t)batch), batch,
                 (unsigned long long)volume);
 
+    /* The plan object owns `bytes`: VkFFTConfiguration::bufferSize is a
+     * pointer that VkFFT stores in the application rather than a value, so it
+     * must outlive the plan and therefore cannot be a local variable. */
     mr_metal_fft *f = new (std::nothrow) mr_metal_fft();
     if (!f) MR_FAIL(MR_ERR_ALLOC, "failed to allocate an FFT plan");
     f->bytes = volume * (uint64_t)batch * sizeof(mr_complex);
 
+    /* VkFFT configuration, the counterpart of cufftPlanMany in the CUDA
+     * backend. Only the sizes and the batch count are set; with VkFFT's
+     * defaults the volumes are contiguous with size[0] fastest and batches
+     * stored back to back, i.e. the column-major [dims..., batch] layout of
+     * the callers. No buffer is attached here: it is supplied per launch in
+     * mr_metal_fft_encode, so one plan serves any buffer of this size. */
     VkFFTConfiguration cfg = {};
     cfg.FFTdim = (pfUINT)rank;
     for (int d = 0; d < rank; ++d) cfg.size[d] = (pfUINT)dims[d];
@@ -81,6 +95,10 @@ int mr_metal_fft_create(const mr_metal_ctx *ctx, int rank, const int dims[3],
     cfg.normalize = 0;              /* unnormalised inverse, like cuFFT */
     cfg.coalescedMemory = 32;
 
+    /* Plan creation: VkFFT generates the Metal kernels for both directions
+     * and compiles them here (the expensive part, see the header). On
+     * failure initializeVkFFT already calls deleteVkFFT on the application
+     * itself, so only the wrapper struct is freed here. */
     const VkFFTResult r = initializeVkFFT(&f->app, cfg);
     if (r != VKFFT_SUCCESS) {
         delete f;
@@ -97,6 +115,12 @@ int mr_metal_fft_encode(mr_metal_fft *fft, MTL::CommandBuffer *cb,
                         MTL::ComputeCommandEncoder *enc, MTL::Buffer *buf,
                         bool inverse)
 {
+    /* Launch parameters: the buffer to transform in place, plus the caller's
+     * command buffer and open compute encoder. VkFFT appends its dispatches
+     * to that encoder instead of creating its own command buffer, so the
+     * FFT runs in order with the surrounding kernels of the same encoder and
+     * nothing is committed here (the counterpart of cufftExecC2C on the
+     * plan's stream in the CUDA backend). */
     VkFFTLaunchParams lp = {};
     lp.buffer = &buf;
     lp.commandBuffer = cb;
@@ -111,6 +135,8 @@ int mr_metal_fft_encode(mr_metal_fft *fft, MTL::CommandBuffer *cb,
 
 void mr_metal_fft_destroy(mr_metal_fft *fft)
 {
+    /* NULL-tolerant so that half-built plans can be freed unconditionally.
+     * deleteVkFFT releases the kernels and pipelines VkFFT created. */
     if (!fft) return;
     deleteVkFFT(&fft->app);
     delete fft;

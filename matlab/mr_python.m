@@ -24,12 +24,20 @@ function mr = mr_python()
 
 %   Author: Junzhou Chen (junzhou@chen.engineer)
 
+    % ---- Cached module ----------------------------------------------------
+    % Importing is done once per MATLAB session; later calls return the
+    % cached module handle.
     persistent mod
     if ~isempty(mod)
         mr = mod;
         return
     end
 
+    % ---- Interpreter selection ----------------------------------------------
+    % pyenv can only be configured before Python is first loaded. If it is
+    % not loaded yet, select MR_AHA_PYTHON or the repository's .venv, in
+    % process so NumPy arrays share MATLAB's memory. If the chosen file does
+    % not exist, MATLAB's default interpreter is used as-is.
     root = fileparts(fileparts(mfilename('fullpath')));   % repository root
     pe = pyenv;
     if pe.Status == "NotLoaded"
@@ -42,6 +50,10 @@ function mr = mr_python()
         end
     end
 
+    % ---- Import -------------------------------------------------------------
+    % Prepend the repository's python/ folder to sys.path (once) so the
+    % in-tree mr_aha package is found, then import it. Import failures are
+    % rethrown with a hint about the interpreter configuration.
     pyroot = fullfile(root, 'python');
     syspath = py.sys.path;
     if ~any(string(cell(syspath)) == string(pyroot))

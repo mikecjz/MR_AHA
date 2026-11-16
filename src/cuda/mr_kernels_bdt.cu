@@ -123,6 +123,10 @@ __host__ __device__ __forceinline__ int mr_bdt_collen(int c, int L, int upper)
 __device__ __forceinline__ void mr_bdt_panel(int c0, int L, int upper, int E,
                                              int *c1, int *cnt)
 {
+    /* Greedily add whole columns while they fit. Since E >= L >= any column
+     * length, at least column c0 always fits, so every panel makes progress.
+     * Every thread computes the same panel (uniform arguments), so the panel
+     * boundaries need no communication. */
     int c = c0, n = 0;
     while (c < L && n + mr_bdt_collen(c, L, upper) <= E) {
         n += mr_bdt_collen(c, L, upper);
@@ -154,6 +158,8 @@ __device__ __forceinline__ void mr_bdt_fetch(mr_complex *dst, const mr_complex *
                                              const long long *kidx, long long kstride,
                                              int t0, int cnt, int P)
 {
+    /* Block-strided loop over the cnt * P panel entries: idx = pp + P * e,
+     * location pp fastest, element e of the panel (packed offset t0 + e). */
     for (int idx = threadIdx.x; idx < cnt * P; idx += blockDim.x) {
         const int pp = idx % P, e = idx / P;
         const long long kk = kidx[pp];
@@ -163,6 +169,9 @@ __device__ __forceinline__ void mr_bdt_fetch(mr_complex *dst, const mr_complex *
         else
             dst[idx] = make_cuFloatComplex(0.0f, 0.0f);
     }
+    /* Close this thread's batch of async copies and wait for all of them.
+     * This only covers the calling thread's own copies; other threads' data
+     * becomes visible after the caller's __syncthreads. */
     __pipeline_commit();
     __pipeline_wait_prior(0);
 }
@@ -212,6 +221,12 @@ mr_k_bdt(mr_complex *__restrict__ d_pad, const mr_complex *__restrict__ d_toep,
          const int *__restrict__ d_inv, long long num_masked, mr_dims dims,
          int ncoil, mr_bd_range rg, int P, int E)
 {
+    /* Thread roles. The T threads of the block form a G x P arrangement:
+     * p = threadIdx.x % P selects the tile location the thread computes for,
+     * g = threadIdx.x / P its output group (outputs g, g + G, g + 2G, ...).
+     * Consecutive threads therefore work on consecutive locations, which
+     * makes their accesses to the location-fastest [.][P] arrays (v, tile,
+     * and d_pad / d_toep in global memory) contiguous. */
     extern __shared__ __align__(16) unsigned char mr_bdt_smem[];
     const int L = dims.L;
     const int upper = dims.tri_upper;
@@ -221,7 +236,9 @@ mr_k_bdt(mr_complex *__restrict__ d_pad, const mr_complex *__restrict__ d_toep,
     const int g = threadIdx.x / P;
 
     /* Shared memory: kernel index of each tile location (-1 = no work),
-     * staged inputs v[NC][L][P], panel tile[E][P]. */
+     * staged inputs v[NC][L][P], panel tile[E][P]. The kidx array comes first
+     * so the complex arrays behind it stay 8-byte aligned (P * 8 bytes); the
+     * total matches mr_bdt_cfg::shared as computed by mr_bdt_pick. */
     long long *kidx = reinterpret_cast<long long *>(mr_bdt_smem);
     mr_complex *v = reinterpret_cast<mr_complex *>(kidx + P);
     mr_complex *tile = v + (size_t)NC * L * P;
@@ -229,6 +246,10 @@ mr_k_bdt(mr_complex *__restrict__ d_pad, const mr_complex *__restrict__ d_toep,
     const mr_complex zero = make_cuFloatComplex(0.0f, 0.0f);
     const long long first = (long long)blockIdx.x * P; /* range-relative */
 
+    /* 0. Resolve, once per tile, where each location's block lives in d_toep:
+     * the mask column (masked; -1 outside the mask) or the centred grid index
+     * (dense). Locations past the end of the range (last tile) get -1 too.
+     * The first P threads do it; the barrier publishes kidx to the block. */
     if (threadIdx.x < P) {
         const long long i = first + threadIdx.x;
         long long k = -1;
@@ -253,6 +274,11 @@ mr_k_bdt(mr_complex *__restrict__ d_pad, const mr_complex *__restrict__ d_toep,
     }
     __syncthreads();
 
+    /* Per-thread view of its location p. `inrange` decides whether the
+     * location is written back at all; `active` whether it gets a product
+     * (an in-range location outside the mask is written as zero). Note that
+     * no thread returns early: every thread must reach every __syncthreads
+     * below, and also helps stage inputs and panels for the others. */
     const long long tid = first + p;
     const bool inrange = tid < rg.nloc;
     const bool active = kidx[p] >= 0;   /* in range and, masked, in the mask */
@@ -260,16 +286,24 @@ mr_k_bdt(mr_complex *__restrict__ d_pad, const mr_complex *__restrict__ d_toep,
     const long long slot = padn * L;
     const long long kstride = MASKED ? num_masked : dims.pad_size;
 
+    /* Coil batches of NC coils (nb <= NC in the last batch). The whole
+     * triangle is re-streamed from global memory once per batch, which is why
+     * larger NC cuts DRAM traffic. */
     for (int s0 = 0; s0 < ncoil; s0 += NC) {
         const int nb = (ncoil - s0 < NC) ? ncoil - s0 : NC;
 
+        /* Register accumulators y[k][j]: coil s0 + k, output o = g + j * G. */
         mr_complex y[NC][OPT];
 #pragma unroll
         for (int k = 0; k < NC; ++k)
 #pragma unroll
             for (int j = 0; j < OPT; ++j) y[k][j] = zero;
 
-        /* 1. Stage the inputs (the previous batch must be done with v). */
+        /* 1. Stage the inputs (the previous batch must be done with v).
+         * idx = pp + P * (l + L * k): coil k, rank l, location pp. Coils
+         * beyond nb and inactive locations are staged as zeros so the
+         * arithmetic below needs no extra guards. In-place safety: the
+         * block only ever writes back its own P locations, after staging. */
         __syncthreads();
         for (int idx = threadIdx.x; idx < NC * L * P; idx += T) {
             const int pp = idx % P;
@@ -281,7 +315,13 @@ mr_k_bdt(mr_complex *__restrict__ d_pad, const mr_complex *__restrict__ d_toep,
             v[idx] = a;
         }
 
-        /* 2.-3. Walk the triangle in panels of whole stored columns. */
+        /* 2.-3. Walk the triangle in panels of whole stored columns.
+         * Panel [c0, c1) holds packed offsets [t0, t0 + cnt), contiguous
+         * because packed order is column by column. Two barriers per panel:
+         * the first makes sure every thread is done reading the previous
+         * panel (and, on the first panel, that the inputs are staged) before
+         * the tile is overwritten; the second that the whole new panel has
+         * landed before anyone reads it. */
         for (int c0 = 0, c1, cnt; c0 < L; c0 = c1) {
             mr_bdt_panel(c0, L, upper, E, &c1, &cnt);
             const int t0 = mr_bdt_colstart(c0, L, upper);
@@ -289,16 +329,25 @@ mr_k_bdt(mr_complex *__restrict__ d_pad, const mr_complex *__restrict__ d_toep,
             mr_bdt_fetch(tile, d_toep, kidx, kstride, t0, cnt, P);
             __syncthreads();
 
+            /* Accumulate this panel's contributions to the thread's outputs.
+             * Inactive threads skip the arithmetic but still loop over the
+             * panels to keep hitting the barriers. */
             if (active) {
 #pragma unroll
                 for (int j = 0; j < OPT; ++j) {
+                    /* Output o of this thread; OPT is rounded up, so the
+                     * last slots of high-g threads may have nothing to do. */
                     const int o = g + j * G;
                     if (o >= L) break;
                     mr_complex acc[NC];
 #pragma unroll
                     for (int k = 0; k < NC; ++k) acc[k] = zero;
 
-                    /* (a) Stored column o, when it is in this panel. */
+                    /* (a) Stored column o, when it is in this panel.
+                     * y_o += sum_r A_ro v_r over the column's stored rows
+                     * r = rmin .. rmin + n - 1 (0..o upper, o..L-1 lower):
+                     * tp walks the column in the tile, vp the matching
+                     * staged ranks (offset by coil k * L * P). */
                     if (o >= c0 && o < c1) {
                         const int rmin = upper ? 0 : o;
                         const int n = mr_bdt_collen(o, L, upper);
@@ -315,7 +364,11 @@ mr_k_bdt(mr_complex *__restrict__ d_pad, const mr_complex *__restrict__ d_toep,
                         }
                     }
 
-                    /* (b) Row o of the panel's other columns, conjugated. */
+                    /* (b) Row o of the panel's other columns, conjugated.
+                     * y_o += sum_c conj(A_oc) v_c = sum_c A_co v_c for the
+                     * panel columns c in [cb, ce) that store row o
+                     * (upper: c > o; lower: c < o), i.e. the mirrored half
+                     * of column o of the full block. */
                     const int cb = upper ? max(c0, o + 1) : c0;
                     const int ce = upper ? c1 : min(c1, o);
                     if (cb < ce) {
@@ -335,13 +388,18 @@ mr_k_bdt(mr_complex *__restrict__ d_pad, const mr_complex *__restrict__ d_toep,
                             e += upper ? c + 1 : L - c - 1;
                         }
                     }
+                    /* Fold the panel's partial sums into the accumulators. */
 #pragma unroll
                     for (int k = 0; k < NC; ++k) y[k][j] = cuCaddf(y[k][j], acc[k]);
                 }
             }
         }
 
-        /* 4. Write back in place (zero outside the mask). */
+        /* 4. Write back in place (zero outside the mask). Directly from the
+         * registers, no barrier needed: the inputs were already consumed from
+         * shared memory, and this thread's (location, outputs, coils) are
+         * written by it alone. For a fixed output the P threads of a group
+         * store consecutive addresses. */
         if (inrange) {
 #pragma unroll
             for (int k = 0; k < NC; ++k) {
@@ -386,6 +444,9 @@ static int mr_bdt_env(const char *name, int def)
 template <bool MASKED>
 static mr_bdt_fn_t mr_bdt_select(int nc, int opt)
 {
+    /* Runtime -> compile-time dispatch: NC in {1, 2, 4} times the even OPT
+     * values 2..MR_BDT_MAX_OPT, 24 instances per MASKED value. OPT and NC
+     * must be template parameters so that y[NC][OPT] stays in registers. */
 #define MR_BDT_OPT(NC)                                                         \
     switch (opt) {                                                             \
     case 2: return mr_k_bdt<NC, 2, MASKED>;                                    \
@@ -441,6 +502,9 @@ static mr_bdt_fn_t mr_bdt_select(int nc, int opt)
  */
 static int mr_bdt_pick(int L, int ncoil, bool masked, mr_bdt_cfg *c)
 {
+    /* Device limits: shared memory per SM (shared by resident blocks), the
+     * opt-in maximum per block (above the 48 KB default; never below it),
+     * and the register file per SM. */
     int dev = 0, sm_smem = 0, optin = 0, deflt = 0, sm_regs = 0;
     MR_CUDA_CHECK(cudaGetDevice(&dev));
     MR_CUDA_CHECK(cudaDeviceGetAttribute(
@@ -453,6 +517,11 @@ static int mr_bdt_pick(int L, int ncoil, bool masked, mr_bdt_cfg *c)
         &sm_regs, cudaDevAttrMaxRegistersPerMultiprocessor, dev));
     if (optin < deflt) optin = deflt;
 
+    /* Tile width P (8, 16 or 32; anything else becomes 16), then halved
+     * until each of the G = threads / P output groups needs at most
+     * MR_BDT_MAX_OPT outputs. Below P = 8 the rank is unsupported. The
+     * outputs per thread are rounded up to an even count (instances exist
+     * for even OPT only). */
     int P = mr_bdt_env("MR_AHA_CUDA_BDT_P", 16);
     if (P != 8 && P != 32) P = 16;
     while (P >= 8 && (L + MR_BDT_THREADS / P - 1) / (MR_BDT_THREADS / P) > MR_BDT_MAX_OPT)
@@ -463,6 +532,8 @@ static int mr_bdt_pick(int L, int ncoil, bool masked, mr_bdt_cfg *c)
     int opt = (L + G - 1) / G;
     opt += opt & 1;
 
+    /* Coil batch: forced by the environment, else the smallest of 1, 2, 4
+     * covering the group (capped at 4). */
     int nc = mr_bdt_env("MR_AHA_CUDA_BDT_NC", 0);
     if (nc != 1 && nc != 2 && nc != 4) nc = (ncoil <= 1) ? 1 : (ncoil <= 2) ? 2 : 4;
     const int force_bps = mr_bdt_env("MR_AHA_CUDA_BDT_BLOCKS", 0);
@@ -473,6 +544,9 @@ static int mr_bdt_pick(int L, int ncoil, bool masked, mr_bdt_cfg *c)
     const size_t tri = (size_t)L * (L + 1) / 2;
     /* Shared memory the driver reserves per resident block (sm_80+: 1 KB). */
     const size_t reserve = 1024;
+    /* Search: for each coil batch, largest first, try the blocks-per-SM
+     * counts in `order`; the first combination that fits wins. Shrinking NC
+     * only happens when no blocks-per-SM count fits the shared memory. */
     for (; nc >= 1; nc /= 2) {
         mr_bdt_fn_t f = masked ? mr_bdt_select<true>(nc, opt) : mr_bdt_select<false>(nc, opt);
         if (f == nullptr)
@@ -485,16 +559,28 @@ static int mr_bdt_pick(int L, int ncoil, bool masked, mr_bdt_cfg *c)
         const int warp_regs = (fa.numRegs * 32 + 255) / 256 * 256;
         const int reg_bps = sm_regs / (warp_regs * (MR_BDT_THREADS / 32));
 
+        /* Shared memory independent of the panel: kidx[P] + v[nc][L][P]. */
         const size_t fixed = (size_t)P * sizeof(long long) + (size_t)nc * L * P * c8;
         for (int oi = 0; oi < 2; ++oi) {
             const int bps = order[oi];
+            /* Registers would not allow bps resident blocks (one block is
+             * always possible: __launch_bounds__ guarantees it). */
             if (bps > reg_bps && bps > 1) continue;
+            /* Per-block budget: an equal share of the SM's shared memory,
+             * minus the driver's per-block reserve, capped by the opt-in
+             * per-block limit. */
             size_t budget = (size_t)sm_smem / bps;
             budget = (budget > reserve) ? budget - reserve : 0;
             if (budget > (size_t)optin) budget = (size_t)optin;
+            /* The panel must hold at least one longest column (L elements). */
             if (budget < fixed + (size_t)L * P * c8) continue;
+            /* Panel capacity: whatever the budget leaves, at most the whole
+             * triangle (then a single panel, fetched once per coil batch). */
             size_t E = (budget - fixed) / ((size_t)P * c8);
             if (E > tri) E = tri;
+            /* Two blocks with a small panel measured slower than one block
+             * with a large panel (see above); unless two are forced, require
+             * a panel of at least 2L elements or the whole triangle. */
             if (bps == 2 && force_bps != 2 && E < 2 * (size_t)L && E < tri) continue;
             c->P = P;
             c->NC = nc;
@@ -516,6 +602,9 @@ static int mr_bdt_launch(bool masked, mr_complex *d_pad, const mr_complex *d_toe
                          const int *d_inv, long long num_masked, const mr_dims &dims,
                          int ncoil, mr_bd_range rg, cudaStream_t s)
 {
+    /* Nothing to do (also avoids an invalid zero-block launch). The
+     * configuration is recomputed per launch: it depends on the current
+     * device and on ncoil. */
     if (rg.nloc <= 0 || ncoil <= 0) return MR_SUCCESS;
     mr_bdt_cfg c;
     int rc = mr_bdt_pick(dims.L, ncoil, masked, &c);
@@ -525,6 +614,7 @@ static int mr_bdt_launch(bool masked, mr_complex *d_pad, const mr_complex *d_toe
                                        (int)c.shared));
     MR_CUDA_CHECK(cudaFuncSetAttribute(c.fn, cudaFuncAttributePreferredSharedMemoryCarveout,
                                        (int)cudaSharedmemCarveoutMaxShared));
+    /* One block per tile of P locations; MR_BDT_THREADS threads each. */
     const long long grid = (rg.nloc + c.P - 1) / c.P;
     c.fn<<<(unsigned)grid, MR_BDT_THREADS, c.shared, s>>>(d_pad, d_toep, d_inv, num_masked,
                                                           dims, ncoil, rg, c.P, c.E);
@@ -540,6 +630,8 @@ int mr_bd_launch_dense(const mr_bd_kernels &k, int threads, mr_complex *d_pad,
                        const mr_complex *d_toep, const mr_dims &dims, int ncoil,
                        mr_bd_range rg, cudaStream_t s)
 {
+    /* Tiled: the launcher picks its own geometry. Specialised: one thread per
+     * location, `threads` per block, no shared memory. */
     if (k.tiled)
         return mr_bdt_launch(false, d_pad, d_toep, nullptr, 0, dims, ncoil, rg, s);
     const int grid = (int)((rg.nloc + threads - 1) / threads);
@@ -553,6 +645,7 @@ int mr_bd_launch_masked(const mr_bd_kernels &k, int threads, mr_complex *d_pad,
                         long long num_masked, const mr_dims &dims, int ncoil,
                         mr_bd_range rg, cudaStream_t s)
 {
+    /* Same dispatch as mr_bd_launch_dense, with the grid-to-mask map. */
     if (k.tiled)
         return mr_bdt_launch(true, d_pad, d_toep, d_inv, num_masked, dims, ncoil, rg, s);
     const int grid = (int)((rg.nloc + threads - 1) / threads);
