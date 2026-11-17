@@ -8,13 +8,18 @@
 
 # MR_AHA
 
-MR_AHA evaluates the forward normal operator $A^H A$ on the GPU for **non-Cartesian MRI with
-low-rank (subspace) modelling**. It uses a Toeplitz embedding, so one
-application costs two FFTs per coil instead of two NUFFTs; a NUFFT-based operator with the same
-interface is included as the reference.
+MR_AHA is a highly optimized GPU library for evaluating the forward normal operator $A^H A$ for
+**non-Cartesian MRI with low-rank (subspace) modelling**. It uses a Toeplitz embedding; a
+NUFFT-based operator with the same interface is included as the reference.
 
-One C++ library does the numerics for **MATLAB, Python and C/C++**. It builds for **CUDA**
-(NVIDIA, single- or multi-GPU) or **Metal** (Apple silicon).
+In the literature, most low-rank reconstructions, such as MR Multitasking, MR fingerprinting,
+T2 shuffling and GRASP-Pro, take an hour or more per data set.
+
+**MR_AHA aims to bring down hours of subspace reconstruction to as fast as seconds on modern GPU
+hardware.**
+
+The operator is implemented in C++/CUDA/Metal, and MATLAB, Python and C/C++ simply call the
+library. The library is compatible with NVIDIA GPUs (multi-GPU supported) and Apple silicon.
 
 **Documentation: <https://mikecjz.github.io/MR_AHA_docs/>** (conventions, array shapes, masking,
 multi-GPU, Apple silicon, API reference, benchmark results).
