@@ -15,7 +15,13 @@ NUFFT-based operator with the same interface is included as the reference.
 In the literature, most low-rank reconstructions, such as MR Multitasking, MR fingerprinting,
 T2 shuffling and GRASP-Pro, take an hour or more per data set.
 
-<mark><strong>MR_AHA aims to bring down hours of subspace reconstruction to as fast as seconds on modern GPU hardware.</strong></mark>
+<p>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/tagline/tagline-dark.svg">
+    <img src="assets/tagline/tagline-light.svg" width="880"
+         alt="MR_AHA aims to bring down hours of subspace reconstruction to as fast as seconds on modern GPU hardware.">
+  </picture>
+</p>
 
 The operator is implemented in C++/CUDA/Metal, and MATLAB, Python and C/C++ simply call the
 library. The library is compatible with NVIDIA GPUs (multi-GPU supported) and Apple silicon.
