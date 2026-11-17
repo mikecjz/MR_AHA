@@ -1,13 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="880" height="40" viewBox="0 0 880 40" role="img" aria-label="MR_AHA aims to bring down hours of subspace reconstruction to as fast as seconds on modern GPU hardware.">
   <title>MR_AHA aims to bring down hours of subspace reconstruction to as fast as seconds on modern GPU hardware.</title>
-  <defs>
-    <linearGradient id="hl" x1="0" x2="1" y1="0" y2="0">
-      <stop offset="0" stop-color="rgb(255,200,0)" stop-opacity="0.1"/>
-      <stop offset="0.04" stop-color="rgb(255,200,0)" stop-opacity="0.45"/>
-      <stop offset="1" stop-color="rgb(255,200,0)" stop-opacity="0.2"/>
-    </linearGradient>
-  </defs>
-  <path fill="url(#hl)" d="M14 5 H874 a5 5 0 0 1 5 5 V30 a14 14 0 0 1 -14 5 H6 a5 5 0 0 1 -5 -5 V19 a14 14 0 0 1 13 -14 Z"/>
+  <path fill="rgb(255,200,0)" fill-opacity="0.35" d="M14 5 H874 a5 5 0 0 1 5 5 V30 a14 14 0 0 1 -14 5 H6 a5 5 0 0 1 -5 -5 V19 a14 14 0 0 1 13 -14 Z"/>
   <text x="440" y="26" text-anchor="middle" textLength="836" lengthAdjust="spacingAndGlyphs"
         font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif"
         font-size="16" font-weight="700" fill="#f0f6fc">MR_AHA aims to bring down hours of subspace reconstruction to as fast as seconds on modern GPU hardware.</text>
