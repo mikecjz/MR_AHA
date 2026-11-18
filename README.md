@@ -1,3 +1,5 @@
+“AHA! It’s so fast!”
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/banner/dark/concept-c-square.png">
