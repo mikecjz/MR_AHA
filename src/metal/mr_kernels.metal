@@ -432,8 +432,8 @@ kernel void mr_k_bd_masked(device float2       *compact    [[buffer(0)]],
     }
 }
 
-/* Explicit instantiations, L = 1..32. Larger ranks use the generic
- * threadgroup-memory kernels above. */
+/* Explicit instantiations, L = 1..32. Larger ranks use the tiled kernels
+ * (mr_k_bdt) below. */
 #define MR_BD_INSTANTIATE(L)                                                     \
     template [[host_name("mr_k_bd_dense_" #L)]] [[kernel]] void                 \
     mr_k_bd_dense<L>(device float2 *pad [[buffer(0)]],                           \
@@ -459,6 +459,317 @@ MR_BD_INSTANTIATE(21) MR_BD_INSTANTIATE(22) MR_BD_INSTANTIATE(23) MR_BD_INSTANTI
 MR_BD_INSTANTIATE(25) MR_BD_INSTANTIATE(26) MR_BD_INSTANTIATE(27) MR_BD_INSTANTIATE(28)
 MR_BD_INSTANTIATE(29) MR_BD_INSTANTIATE(30) MR_BD_INSTANTIATE(31) MR_BD_INSTANTIATE(32)
 #undef MR_BD_INSTANTIATE
+
+/* ------------------------------------------------------------------------ */
+/* Tiled block-diagonal kernels for ranks above the specialised range       */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * @brief Largest tile width (locations per threadgroup) of ::mr_k_bdt; sizes
+ *        the static `kidx` array. The host picks P in {4, 8, 16, 32}.
+ */
+#define MR_BDT_MAX_P 32
+
+/** @brief Packed offset of the first stored element of column @p c. */
+static inline int mr_bdt_colstart(int c, int L, int upper)
+{
+    return upper ? c * (c + 1) / 2 : c * L - c * (c - 1) / 2;
+}
+
+/** @brief Number of stored elements of column @p c. */
+static inline int mr_bdt_collen(int c, int L, int upper)
+{
+    return upper ? c + 1 : L - c;
+}
+
+/**
+ * @brief Tiled in-place block-diagonal multiplication for a group of coils
+ *        (host names `mr_k_bdt_{dense,masked}_nc<NC>_opt<OPT>`).
+ *
+ * Port of `mr_k_bdt` in `src/cuda/mr_kernels_bdt.cu`; see that file for the
+ * full derivation. The specialised kernels above keep a location's rank
+ * vectors in registers and stop at L = 32; the generic ones stage one rank
+ * vector per thread in threadgroup memory (few threads per threadgroup at
+ * large L), fetch every off-diagonal element of `phi2_toep` twice and handle
+ * one coil per dispatch. Here:
+ *
+ *  - a threadgroup of T threads owns a tile of P consecutive grid locations
+ *    and the NC coils of a batch; the inputs are staged once in threadgroup
+ *    memory as `v[k][l][p]` (location fastest, so the device loads are
+ *    contiguous);
+ *  - the stored triangle is walked in panels of whole stored columns (a
+ *    contiguous range of packed offsets), each copied once from device
+ *    memory into threadgroup memory, `tile[e][p]`, and used for all NC
+ *    coils: `phi2_toep` is read from DRAM once per coil batch instead of
+ *    twice per coil;
+ *  - thread (g, p) = (lid / P, lid % P) accumulates the outputs
+ *    `o = g, g + G, ...` (G = T / P) of location p in registers, for all
+ *    coils of the batch, and writes them back in place.
+ *
+ * Masked operator: @p inv maps every grid location to its column of the
+ * masked `phi2_toep` (-1 outside the mask), so the kernel works in place on
+ * the grid like the dense one and writes zeros outside the mask: no compact
+ * buffer, zeroing pass or scatter. A tile with no location in the mask only
+ * writes zeros and reads nothing else.
+ *
+ * Differences from the CUDA kernel: no `cp.async` on Apple GPUs, so the
+ * panel is fetched with ordinary loads issued four at a time per thread
+ * (independent loads in flight before the threadgroup stores); and the
+ * panel / tile sizes come from the 32 KB threadgroup-memory limit
+ * (host `mr_bdt_pick` in mr_aha_metal.cpp).
+ *
+ * @param pad        `[pad_size, L, ncoil]` grids, transformed in place.
+ * @param toep       `[Mx, My, Mz, (L^2+L)/2]` (centred) or
+ *                   `[num_masked, (L^2+L)/2]` (masked).
+ * @param inv        Masked only: grid-to-mask map (-1 outside the mask).
+ * @param num_masked Masked only: number of retained locations.
+ * @param geo        `(P, E)`: locations per tile and panel capacity in
+ *                   stored elements (`E >= L`).
+ * @param sh         Threadgroup memory: `v[NC][L][P]` then `tile[E][P]`.
+ */
+template <int NC, int OPT, bool MASKED>
+kernel void mr_k_bdt(device float2       *pad        [[buffer(0)]],
+                     device const float2 *toep       [[buffer(1)]],
+                     device const int    *inv        [[buffer(2)]],
+                     constant long       &num_masked [[buffer(3)]],
+                     constant mr_dims    &d          [[buffer(4)]],
+                     constant int        &ncoil      [[buffer(5)]],
+                     constant int2       &geo        [[buffer(6)]],
+                     threadgroup float2  *sh         [[threadgroup(0)]],
+                     uint tg  [[threadgroup_position_in_grid]],
+                     uint lid [[thread_index_in_threadgroup]],
+                     uint T   [[threads_per_threadgroup]])
+{
+    threadgroup long kidx[MR_BDT_MAX_P];
+    const int L = d.L;
+    const int upper = d.tri_upper;
+    const int P = geo.x;
+    const int E = geo.y;
+    const int G = (int)T / P;
+    const int p = (int)lid % P;
+    const int g = (int)lid / P;
+    threadgroup float2 *v = sh;
+    threadgroup float2 *tile = sh + NC * L * P;
+
+    const long nloc = d.pad_size;
+    const long first = (long)tg * P;
+
+    /* 0. Where each location's block lives in toep: centred grid index
+     * (dense) or mask column (masked); -1 = no work. */
+    if ((int)lid < P) {
+        const long i = first + (long)lid;
+        long k = -1;
+        if (i < nloc) {
+            if (MASKED) {
+                k = (long)inv[i];
+            } else {
+                const uint3 jc = mr_decompose3((uint)i, (uint)d.m[0], (uint)d.m[1]);
+                const long k0 = mr_nat2cent((int)jc.x, d.m[0], d.c_m[0]);
+                const long k1 = mr_nat2cent((int)jc.y, d.m[1], d.c_m[1]);
+                const long k2 = mr_nat2cent((int)jc.z, d.m[2], d.c_m[2]);
+                k = k0 + (long)d.m[0] * (k1 + (long)d.m[1] * k2);
+            }
+        }
+        kidx[lid] = k;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const long tid = first + p;
+    const bool inrange = tid < nloc;
+    const bool active = kidx[p] >= 0;
+    const ulong padn = (ulong)d.pad_size;
+    const ulong slot = padn * (ulong)L;
+    const ulong kstride = MASKED ? (ulong)num_masked : padn;
+
+    /* Masked tile entirely outside the mask: write its zeros and leave. The
+     * test reads the same kidx values in every thread, so the whole
+     * threadgroup leaves together and no barrier below is skipped by some
+     * threads only. */
+    if (MASKED) {
+        bool has_work = false;
+        for (int q = 0; q < P; ++q) has_work = has_work || (kidx[q] >= 0);
+        if (!has_work) {
+            if (inrange)
+                for (int k = 0; k < ncoil; ++k)
+                    for (int o = g; o < L; o += G)
+                        pad[slot * (ulong)k + padn * (ulong)o + (ulong)tid] = float2(0.0f);
+            return;
+        }
+    }
+
+    for (int s0 = 0; s0 < ncoil; s0 += NC) {
+        const int nb = min(ncoil - s0, NC);
+
+        float2 y[NC][OPT];
+#pragma unroll
+        for (int k = 0; k < NC; ++k)
+#pragma unroll
+            for (int j = 0; j < OPT; ++j) y[k][j] = float2(0.0f);
+
+        /* 1. Stage the inputs, idx = pp + P * (l + L * k); missing coils and
+         * inactive locations as zeros. The barrier keeps the previous batch's
+         * readers of v ahead of these writes. */
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int idx = (int)lid; idx < NC * L * P; idx += (int)T) {
+            const int pp = idx % P;
+            const int kl = idx / P;
+            const int k = kl / L, l = kl % L;
+            float2 a = float2(0.0f);
+            if (k < nb && kidx[pp] >= 0)
+                a = pad[slot * (ulong)(s0 + k) + padn * (ulong)l + (ulong)(first + pp)];
+            v[idx] = a;
+        }
+
+        /* 2.-3. Panels of whole stored columns [c0, c1), packed offsets
+         * [t0, t0 + cnt). */
+        for (int c0 = 0, c1 = 0; c0 < L; c0 = c1) {
+            int cnt = 0;
+            c1 = c0;
+            while (c1 < L && cnt + mr_bdt_collen(c1, L, upper) <= E) {
+                cnt += mr_bdt_collen(c1, L, upper);
+                ++c1;
+            }
+            const int t0 = mr_bdt_colstart(c0, L, upper);
+
+            threadgroup_barrier(mem_flags::mem_threadgroup); /* tile free */
+            {
+                /* Four independent loads per thread in flight, then the
+                 * threadgroup stores. idx = pp + P * e. */
+                const int n = cnt * P;
+                for (int base = (int)lid; base < n; base += 4 * (int)T) {
+                    float2 a[4];
+#pragma unroll
+                    for (int u = 0; u < 4; ++u) {
+                        const int idx = base + u * (int)T;
+                        a[u] = float2(0.0f);
+                        if (idx < n) {
+                            const long kk = kidx[idx % P];
+                            if (kk >= 0)
+                                a[u] = toep[(ulong)kk + (ulong)(t0 + idx / P) * kstride];
+                        }
+                    }
+#pragma unroll
+                    for (int u = 0; u < 4; ++u) {
+                        const int idx = base + u * (int)T;
+                        if (idx < n) tile[idx] = a[u];
+                    }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup); /* panel landed */
+
+            if (active) {
+#pragma unroll
+                for (int j = 0; j < OPT; ++j) {
+                    const int o = g + j * G;
+                    if (o >= L) break;
+                    float2 acc[NC];
+#pragma unroll
+                    for (int k = 0; k < NC; ++k) acc[k] = float2(0.0f);
+
+                    /* (a) Stored column o: y_o += sum_r A_ro v_r. */
+                    if (o >= c0 && o < c1) {
+                        const int rmin = upper ? 0 : o;
+                        const int n = mr_bdt_collen(o, L, upper);
+                        threadgroup const float2 *tp =
+                            tile + (mr_bdt_colstart(o, L, upper) - t0) * P + p;
+                        threadgroup const float2 *vp = v + rmin * P + p;
+                        for (int r = 0; r < n; ++r) {
+                            const float2 a = tp[r * P];
+#pragma unroll
+                            for (int k = 0; k < NC; ++k)
+                                acc[k] += mr_cmul(a, vp[(k * L + r) * P]);
+                        }
+                    }
+
+                    /* (b) Row o of the panel's other columns, conjugated:
+                     * y_o += sum_c conj(A_oc) v_c (upper: c > o, lower: c < o). */
+                    const int cb = upper ? max(c0, o + 1) : c0;
+                    const int ce = upper ? c1 : min(c1, o);
+                    if (cb < ce) {
+                        int e = mr_bdt_colstart(cb, L, upper) - t0 + (upper ? o : o - cb);
+                        for (int c = cb; c < ce; ++c) {
+                            const float2 a = tile[e * P + p];
+#pragma unroll
+                            for (int k = 0; k < NC; ++k)
+                                acc[k] += mr_cmul_conj(a, v[(k * L + c) * P + p]);
+                            e += upper ? c + 1 : L - c - 1;
+                        }
+                    }
+#pragma unroll
+                    for (int k = 0; k < NC; ++k) y[k][j] += acc[k];
+                }
+            }
+        }
+
+        /* 4. Write back in place (zero outside the mask). */
+        if (inrange) {
+#pragma unroll
+            for (int k = 0; k < NC; ++k) {
+                if (k >= nb) break;
+#pragma unroll
+                for (int j = 0; j < OPT; ++j) {
+                    const int o = g + j * G;
+                    if (o >= L) break;
+                    pad[slot * (ulong)(s0 + k) + padn * (ulong)o + (ulong)tid] =
+                        active ? y[k][j] : float2(0.0f);
+                }
+            }
+        }
+    }
+}
+
+/* Instances: NC in {1, 2, 4} times even OPT in 2..16, dense and masked (the
+ * host picks one per plan; NC and OPT size the register accumulators). */
+#define MR_BDT_INST1(NAME, NC, OPT, MASKED)                                      \
+    template [[host_name(NAME)]] [[kernel]] void mr_k_bdt<NC, OPT, MASKED>(     \
+        device float2 *pad [[buffer(0)]],                                         \
+        device const float2 *toep [[buffer(1)]],                                  \
+        device const int *inv [[buffer(2)]],                                      \
+        constant long &num_masked [[buffer(3)]],                                  \
+        constant mr_dims &d [[buffer(4)]],                                        \
+        constant int &ncoil [[buffer(5)]],                                        \
+        constant int2 &geo [[buffer(6)]],                                         \
+        threadgroup float2 *sh [[threadgroup(0)]],                                \
+        uint tg [[threadgroup_position_in_grid]],                                 \
+        uint lid [[thread_index_in_threadgroup]],                                 \
+        uint T [[threads_per_threadgroup]]);
+#define MR_BDT_INST(NC, OPT)                                                     \
+    MR_BDT_INST1("mr_k_bdt_dense_nc" #NC "_opt" #OPT, NC, OPT, false)           \
+    MR_BDT_INST1("mr_k_bdt_masked_nc" #NC "_opt" #OPT, NC, OPT, true)
+#define MR_BDT_INST_NC(NC)                                                       \
+    MR_BDT_INST(NC, 2) MR_BDT_INST(NC, 4) MR_BDT_INST(NC, 6) MR_BDT_INST(NC, 8)  \
+    MR_BDT_INST(NC, 10) MR_BDT_INST(NC, 12) MR_BDT_INST(NC, 14) MR_BDT_INST(NC, 16)
+MR_BDT_INST_NC(1)
+MR_BDT_INST_NC(2)
+MR_BDT_INST_NC(4)
+#undef MR_BDT_INST_NC
+#undef MR_BDT_INST
+#undef MR_BDT_INST1
+
+/**
+ * @brief Grid-to-mask map of the tiled masked kernel: `inv[natural(mask[i])]
+ *        = i`. The host first fills @p inv with -1 (::mr_k_fill_i32). Port
+ *        of `mr_k_mask_inverse`.
+ */
+kernel void mr_k_mask_inverse(device int        *inv        [[buffer(0)]],
+                              device const long *mask       [[buffer(1)]],
+                              constant long     &num_masked [[buffer(2)]],
+                              constant mr_dims  &d          [[buffer(3)]],
+                              uint tid [[thread_position_in_grid]])
+{
+    if ((long)tid >= num_masked) return;
+    inv[mr_mask_to_natural(mask[tid], d)] = (int)tid;
+}
+
+/** @brief Fill @p n ints with @p value. */
+kernel void mr_k_fill_i32(device int    *p     [[buffer(0)]],
+                          constant long &n     [[buffer(1)]],
+                          constant int  &value [[buffer(2)]],
+                          uint tid [[thread_position_in_grid]])
+{
+    if ((long)tid >= n) return;
+    p[tid] = value;
+}
 
 /**
  * @brief Scatter the compact masked result back into the (zeroed) padded

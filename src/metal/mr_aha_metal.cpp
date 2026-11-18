@@ -57,6 +57,20 @@ static_assert(sizeof(mr_dims) == 80,
  *         on the M3 Ultra; `MR_AHA_METAL_COIL_GROUP` overrides it. */
 #define MR_METAL_COIL_GROUP 4
 
+/** @brief Threads per threadgroup of the tiled block-diagonal kernels. */
+#define MR_METAL_BDT_THREADS 256
+
+/** @brief Largest outputs per thread of a tiled kernel instance (even values
+ *         2..16 exist, see `mr_k_bdt` in mr_kernels.metal). */
+#define MR_METAL_BDT_MAX_OPT 16
+
+/** @brief Block-diagonal kernel family of a plan. */
+enum mr_bd_kind {
+    MR_BD_GENERIC = 0,  /**< mr_k_blockdiag_*: one coil, threadgroup vectors. */
+    MR_BD_SPECIALISED,  /**< mr_k_bd_*_<L>: register vectors, L <= 32.        */
+    MR_BD_TILED         /**< mr_k_bdt_*: threadgroup tiles, any larger L.     */
+};
+
 /** @brief Internal state of a reusable Metal @f$A^H A@f$ plan. */
 struct mr_aha_plan_s {
     mr_config           cfg;      /**< Copy of the caller's configuration.     */
@@ -67,14 +81,22 @@ struct mr_aha_plan_s {
     mr_metal_fft       *fft_rem;  /**< FFT over the last, smaller group, or
                                        NULL when `n_coils % group == 0`.      */
     MTL::Buffer        *pad;      /**< Padded grids `[Mx,My,Mz,L,group]`.      */
-    MTL::Buffer        *compact;  /**< `[num_masked,L,group]`; masked only.    */
+    MTL::Buffer        *compact;  /**< `[num_masked,L,group]`; masked with the
+                                       specialised or generic kernels only.  */
     MTL::ComputePipelineState *k_pad;     /**< mr_k_pad_mul_se.               */
     MTL::ComputePipelineState *k_crop;    /**< mr_k_crop_mul_conj_se.         */
     MTL::ComputePipelineState *k_bd;      /**< Dense or masked block-diagonal. */
     MTL::ComputePipelineState *k_scatter; /**< mr_k_scatter_masked (masked).  */
     MTL::ComputePipelineState *k_zero;    /**< mr_k_zero (masked).            */
+    MTL::ComputePipelineState *k_inv;     /**< mr_k_mask_inverse (tiled, masked). */
+    MTL::ComputePipelineState *k_fill;    /**< mr_k_fill_i32 (tiled, masked). */
+    MTL::Buffer        *inv;      /**< `[Mx,My,Mz]` int grid-to-mask map;
+                                       tiled masked only.                     */
+    mr_bd_kind          bd_kind;    /**< Block-diagonal kernel family.         */
     NS::UInteger        bd_threads; /**< Threads per threadgroup, block-diag.  */
     NS::UInteger        bd_tgmem;   /**< Threadgroup bytes, block-diag.        */
+    int                 bdt_P;      /**< Tiled: locations per threadgroup.     */
+    int                 bdt_E;      /**< Tiled: panel capacity (elements).     */
 };
 
 /* ------------------------------------------------------------------------ */
@@ -93,6 +115,7 @@ static void mr_plan_free(mr_aha_plan p)
     mr_metal_fft_destroy(p->fft_rem);
     if (p->pad) p->pad->release();
     if (p->compact) p->compact->release();
+    if (p->inv) p->inv->release();
     delete p;
 }
 
@@ -127,6 +150,104 @@ static int mr_pick_bd(const mr_metal_ctx *ctx, const MTL::ComputePipelineState *
     *threads = t;
     *tgmem = need;
     return MR_SUCCESS;
+}
+
+/** @brief Integer from the environment, or @p def when unset. */
+static int mr_env_int(const char *name, int def)
+{
+    const char *e = std::getenv(name);
+    return (e && e[0]) ? atoi(e) : def;
+}
+
+/**
+ * @brief Choose the tiled block-diagonal kernel (`mr_k_bdt`) and its launch
+ *        geometry for rank @p L and coil groups of @p group coils.
+ *
+ * Threadgroups of ::MR_METAL_BDT_THREADS threads. The threadgroup memory
+ * holds the staged inputs `v[NC][L][P]` (fixed) and the panel `tile[E][P]`
+ * (the rest, up to the whole triangle), within the device's limit (32 KB on
+ * Apple GPUs) minus the kernel's static `kidx` array. In order of
+ * preference:
+ *
+ * - the coil batch @f$NC@f$: each panel fetched from memory serves NC coils,
+ *   so @f$NC@f$ = the smallest of 1, 2, 4 that covers the group comes first
+ *   (`MR_AHA_METAL_BDT_NC` = 1, 2 or 4 replaces it), halved while nothing
+ *   fits;
+ * - the tile width @f$P@f$ = 16, 8 or 4 locations (`MR_AHA_METAL_BDT_P`
+ *   = 4, 8, 16 or 32 forces it): wider tiles make longer contiguous runs in
+ *   `phi2_toep` but take more threadgroup memory per coil;
+ * - a panel of at least @f$2L@f$ elements (or the whole triangle) on a first
+ *   pass, any panel that holds a column (@f$E \ge L@f$) on a second.
+ *
+ * At L = 72 with groups of 4 coils this gives NC = 4, P = 8 and a panel of
+ * 220 elements (the triangle has 2628). P = 16 would need 36 KB for the
+ * inputs of 4 coils alone.
+ *
+ * @return ::MR_SUCCESS, ::MR_ERR_METAL, or ::MR_ERR_UNSUPPORTED when no
+ *         instance fits (then the caller falls back to the generic kernels).
+ */
+static int mr_bdt_pick(const mr_metal_ctx *ctx, int L, int group, bool masked,
+                       MTL::ComputePipelineState **pso_out, int *P_out, int *E_out,
+                       NS::UInteger *tgmem_out)
+{
+    const int T = MR_METAL_BDT_THREADS;
+    const size_t c8 = sizeof(mr_complex);
+    const size_t tri = (size_t)L * (L + 1) / 2;
+
+    int nc_max = mr_env_int("MR_AHA_METAL_BDT_NC", 0);
+    if (nc_max != 1 && nc_max != 2 && nc_max != 4)
+        nc_max = (group <= 1) ? 1 : (group <= 2) ? 2 : 4;
+    const int forced_P = mr_env_int("MR_AHA_METAL_BDT_P", 0);
+    int Ps[4] = {16, 8, 4, 0};
+    if (forced_P == 4 || forced_P == 8 || forced_P == 16 || forced_P == 32) {
+        Ps[0] = forced_P;
+        Ps[1] = 0;
+    }
+
+    for (int strict = 1; strict >= 0; --strict) {
+        for (int nc = nc_max; nc >= 1; nc /= 2) {
+            for (int pi = 0; Ps[pi] != 0; ++pi) {
+                const int P = Ps[pi];
+                const int G = T / P;
+                int opt = (L + G - 1) / G;
+                opt += opt & 1;
+                if (opt > MR_METAL_BDT_MAX_OPT) continue;
+
+                char name[64];
+                snprintf(name, sizeof(name), "mr_k_bdt_%s_nc%d_opt%d",
+                         masked ? "masked" : "dense", nc, opt);
+                MTL::ComputePipelineState *pso = nullptr;
+                const int rc = mr_metal_pipeline(name, &pso);
+                if (rc != MR_SUCCESS) return rc;
+                /* Heavy register use can lower the pipeline's limit. */
+                if (pso->maxTotalThreadsPerThreadgroup() < (NS::UInteger)T) continue;
+
+                const size_t limit_all = ctx->device->maxThreadgroupMemoryLength();
+                const size_t stat = pso->staticThreadgroupMemoryLength();
+                if (limit_all <= stat) continue;
+                const size_t limit = (limit_all - stat) & ~(size_t)15;
+                const size_t fixed = (size_t)nc * L * P * c8;
+                if (fixed + (size_t)L * P * c8 > limit) continue;
+                size_t E = (limit - fixed) / ((size_t)P * c8);
+                if (E > tri) E = tri;
+                if (strict && E < 2 * (size_t)L && E < tri) continue;
+                /* Metal wants the length in multiples of 16 bytes. */
+                size_t bytes = fixed + E * P * c8;
+                bytes = (bytes + 15) & ~(size_t)15;
+                if (bytes > limit) continue;
+
+                *pso_out = pso;
+                *P_out = P;
+                *E_out = (int)E;
+                *tgmem_out = (NS::UInteger)bytes;
+                return MR_SUCCESS;
+            }
+        }
+    }
+    MR_FAIL(MR_ERR_UNSUPPORTED,
+            "tiled block-diagonal kernel: L = %d does not fit %lu bytes of "
+            "threadgroup memory", L,
+            (unsigned long)ctx->device->maxThreadgroupMemoryLength());
 }
 
 extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
@@ -166,59 +287,94 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
                 p->dims.pad_size);
     }
 
-    /* Pipelines. The block-diagonal stage uses the kernels specialised on L
-     * (register vectors, each stored element read once, coil groups) for
-     * L <= 32, and the generic threadgroup-memory kernels (one coil at a time)
-     * otherwise or when MR_AHA_METAL_GENERIC_BD=1 (kept for comparison). */
-    const char *gen = std::getenv("MR_AHA_METAL_GENERIC_BD");
-    const bool specialised =
-        cfg->L <= MR_METAL_BD_MAX_L && !(gen && gen[0] && gen[0] != '0');
-    char bd_name[64];
-    if (specialised)
-        snprintf(bd_name, sizeof(bd_name), "%s%d",
-                 cfg->is_masked ? "mr_k_bd_masked_" : "mr_k_bd_dense_", cfg->L);
+    /* Block-diagonal kernel family: specialised on L (register vectors,
+     * each stored element read once, coil groups) for L <= 32, tiled
+     * (threadgroup-memory panels, same guarantees) above, and the generic
+     * threadgroup-memory kernels (one coil at a time) when
+     * MR_AHA_METAL_GENERIC_BD=1 or when nothing else fits.
+     * MR_AHA_METAL_TILED_BD=1 forces the tiled kernels for every L (for
+     * testing). The tiled masked kernel indexes the mask with an int map,
+     * so it needs num_masked < 2^31. */
+    if (mr_env_int("MR_AHA_METAL_GENERIC_BD", 0) != 0)
+        p->bd_kind = MR_BD_GENERIC;
+    else if (cfg->L <= MR_METAL_BD_MAX_L && mr_env_int("MR_AHA_METAL_TILED_BD", 0) == 0)
+        p->bd_kind = MR_BD_SPECIALISED;
+    else if (!cfg->is_masked || cfg->num_masked <= 2147483647LL)
+        p->bd_kind = MR_BD_TILED;
     else
-        snprintf(bd_name, sizeof(bd_name), "%s",
-                 cfg->is_masked ? "mr_k_blockdiag_masked" : "mr_k_blockdiag_dense");
-    if ((rc = mr_metal_pipeline("mr_k_pad_mul_se", &p->k_pad)) != MR_SUCCESS ||
-        (rc = mr_metal_pipeline("mr_k_crop_mul_conj_se", &p->k_crop)) != MR_SUCCESS ||
-        (rc = mr_metal_pipeline(bd_name, &p->k_bd)) != MR_SUCCESS ||
-        (cfg->is_masked &&
-         ((rc = mr_metal_pipeline("mr_k_scatter_masked", &p->k_scatter)) != MR_SUCCESS ||
-          (rc = mr_metal_pipeline("mr_k_zero", &p->k_zero)) != MR_SUCCESS))) {
-        mr_plan_free(p);
-        return rc;
-    }
-    /* Launch geometry of the block-diagonal kernel. The specialised kernels
-     * keep their vectors in registers and need no threadgroup memory; the
-     * generic ones stage L values per thread, which bounds the threadgroup
-     * size (mr_pick_bd). */
-    if (specialised) {
-        p->bd_threads = 0; /* default threadgroup size, no threadgroup memory */
-        p->bd_tgmem = 0;
-    } else if ((rc = mr_pick_bd(ctx, p->k_bd, cfg->L, &p->bd_threads,
-                                &p->bd_tgmem)) != MR_SUCCESS) {
-        mr_plan_free(p);
-        return rc;
-    }
+        p->bd_kind = MR_BD_GENERIC;
 
     /* Coil group size: the default (or MR_AHA_METAL_COIL_GROUP), at most the
      * number of coils, a group's FFT must stay below 2^31 complex values
      * (mr_metal_fft.cpp), and its grids within a quarter of the GPU's
      * recommended working set. The generic kernels handle one coil. */
     const uint64_t per_coil = (uint64_t)p->dims.pad_size * (uint64_t)cfg->L;
-    int group = MR_METAL_COIL_GROUP;
-    {
-        const char *e = std::getenv("MR_AHA_METAL_COIL_GROUP");
-        if (e && e[0]) group = atoi(e);
-    }
-    if (!specialised || group < 1) group = 1;
+    int group = mr_env_int("MR_AHA_METAL_COIL_GROUP", MR_METAL_COIL_GROUP);
+    if (group < 1) group = 1;
     if (group > cfg->n_coils) group = cfg->n_coils;
     while (group > 1 && (per_coil * (uint64_t)group > (1ull << 31) - 1 ||
                          per_coil * (uint64_t)group * sizeof(mr_complex) >
                              ctx->device->recommendedMaxWorkingSetSize() / 4))
         --group;
+
+    /* Block-diagonal pipeline and launch geometry. The specialised kernels
+     * keep their vectors in registers and need no threadgroup memory; the
+     * tiled ones choose tile, coil batch and panel from the threadgroup
+     * memory (mr_bdt_pick, falling back to the generic kernels when no
+     * instance fits); the generic ones stage L values per thread, which
+     * bounds the threadgroup size (mr_pick_bd). */
+    if (p->bd_kind == MR_BD_TILED) {
+        rc = mr_bdt_pick(ctx, cfg->L, group, cfg->is_masked != 0, &p->k_bd,
+                         &p->bdt_P, &p->bdt_E, &p->bd_tgmem);
+        if (rc == MR_ERR_UNSUPPORTED) {
+            mr_clear_error();
+            p->bd_kind = MR_BD_GENERIC;
+        } else if (rc != MR_SUCCESS) {
+            mr_plan_free(p);
+            return rc;
+        } else {
+            p->bd_threads = MR_METAL_BDT_THREADS;
+        }
+    }
+    if (p->bd_kind == MR_BD_GENERIC) group = 1;
     p->group = group;
+
+    char bd_name[64] = "";
+    if (p->bd_kind == MR_BD_SPECIALISED)
+        snprintf(bd_name, sizeof(bd_name), "%s%d",
+                 cfg->is_masked ? "mr_k_bd_masked_" : "mr_k_bd_dense_", cfg->L);
+    else if (p->bd_kind == MR_BD_GENERIC)
+        snprintf(bd_name, sizeof(bd_name), "%s",
+                 cfg->is_masked ? "mr_k_blockdiag_masked" : "mr_k_blockdiag_dense");
+    const bool compact_path = cfg->is_masked && p->bd_kind != MR_BD_TILED;
+    const bool inv_path = cfg->is_masked && p->bd_kind == MR_BD_TILED;
+    if ((rc = mr_metal_pipeline("mr_k_pad_mul_se", &p->k_pad)) != MR_SUCCESS ||
+        (rc = mr_metal_pipeline("mr_k_crop_mul_conj_se", &p->k_crop)) != MR_SUCCESS ||
+        (bd_name[0] && (rc = mr_metal_pipeline(bd_name, &p->k_bd)) != MR_SUCCESS) ||
+        (compact_path &&
+         ((rc = mr_metal_pipeline("mr_k_scatter_masked", &p->k_scatter)) != MR_SUCCESS ||
+          (rc = mr_metal_pipeline("mr_k_zero", &p->k_zero)) != MR_SUCCESS)) ||
+        (inv_path &&
+         ((rc = mr_metal_pipeline("mr_k_mask_inverse", &p->k_inv)) != MR_SUCCESS ||
+          (rc = mr_metal_pipeline("mr_k_fill_i32", &p->k_fill)) != MR_SUCCESS))) {
+        mr_plan_free(p);
+        return rc;
+    }
+    if (p->bd_kind == MR_BD_SPECIALISED) {
+        p->bd_threads = 0; /* default threadgroup size, no threadgroup memory */
+        p->bd_tgmem = 0;
+    } else if (p->bd_kind == MR_BD_GENERIC &&
+               (rc = mr_pick_bd(ctx, p->k_bd, cfg->L, &p->bd_threads,
+                                &p->bd_tgmem)) != MR_SUCCESS) {
+        mr_plan_free(p);
+        return rc;
+    }
+    if (cfg->verbose)
+        printf("[mr_aha] plan: %s block-diagonal kernels, %d coil(s) per group\n",
+               p->bd_kind == MR_BD_TILED        ? "tiled"
+               : p->bd_kind == MR_BD_SPECIALISED ? "specialised"
+                                                 : "generic",
+               p->group);
 
     /* Working buffers: GPU-only, so private storage. `pad` holds `group`
      * slots of [Mx, My, Mz, L] (one per coil of a group, which the batched
@@ -234,7 +390,16 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
         MR_FAIL(MR_ERR_ALLOC, "failed to allocate the %lu-byte padded buffer",
                 (unsigned long)pad_bytes);
     }
-    if (cfg->is_masked) {
+    if (inv_path) {
+        const NS::UInteger ib = (NS::UInteger)p->dims.pad_size * sizeof(int);
+        p->inv = ctx->device->newBuffer(ib, MTL::ResourceStorageModePrivate);
+        if (!p->inv) {
+            mr_plan_free(p);
+            MR_FAIL(MR_ERR_ALLOC, "failed to allocate the %lu-byte mask map",
+                    (unsigned long)ib);
+        }
+    }
+    if (compact_path) {
         const NS::UInteger cb = (NS::UInteger)cfg->num_masked * cfg->L * group *
                                 sizeof(mr_complex);
         p->compact = ctx->device->newBuffer(cb, MTL::ResourceStorageModePrivate);
@@ -382,7 +547,45 @@ static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
      *    retained locations, into `compact` (one thread per location for
      *    all coils of the group); the grid is then zeroed and the compact
      *    result scattered back, since phi2_toep is zero elsewhere. */
-    if (p->cfg.is_masked) {
+    if (p->bd_kind == MR_BD_TILED) {
+        /* Tiled: in place on the whole grid, one threadgroup per tile of P
+         * locations for all coils of the group. Masked, the grid-to-mask map
+         * is built once per execution, in the first group's command buffer
+         * (the queue runs the later groups after it): -1 everywhere, then
+         * each mask entry's position at its grid location. */
+        const long long nm = p->cfg.is_masked ? (long long)p->cfg.num_masked : 0;
+        if (p->cfg.is_masked && coil0 == 0) {
+            const long long n = d.pad_size;
+            const int minus1 = -1;
+            enc->setComputePipelineState(p->k_fill);
+            enc->setBuffer(p->inv, 0, 0);
+            enc->setBytes(&n, sizeof(n), 1);
+            enc->setBytes(&minus1, sizeof(minus1), 2);
+            mr_metal_dispatch_1d(enc, p->k_fill, (uint64_t)n);
+            enc->setComputePipelineState(p->k_inv);
+            enc->setBuffer(p->inv, 0, 0);
+            mr_metal_bind(enc, mask, 1);
+            enc->setBytes(&nm, sizeof(nm), 2);
+            enc->setBytes(&d, sizeof(d), 3);
+            mr_metal_dispatch_1d(enc, p->k_inv, (uint64_t)nm);
+        }
+        const int geo[2] = {p->bdt_P, p->bdt_E};
+        enc->setComputePipelineState(p->k_bd);
+        enc->setBuffer(p->pad, 0, 0);
+        mr_metal_bind(enc, toep, 1);
+        /* Dense: the map is unused; bind the grid so every argument is set. */
+        if (p->cfg.is_masked) enc->setBuffer(p->inv, 0, 2);
+        else enc->setBuffer(p->pad, 0, 2);
+        enc->setBytes(&nm, sizeof(nm), 3);
+        enc->setBytes(&d, sizeof(d), 4);
+        enc->setBytes(&nc, sizeof(nc), 5);
+        enc->setBytes(geo, sizeof(geo), 6);
+        enc->setThreadgroupMemoryLength(p->bd_tgmem, 0);
+        const uint64_t tiles = ((uint64_t)d.pad_size + (uint64_t)p->bdt_P - 1) /
+                               (uint64_t)p->bdt_P;
+        enc->dispatchThreadgroups(MTL::Size((NS::UInteger)tiles, 1, 1),
+                                  MTL::Size(p->bd_threads, 1, 1));
+    } else if (p->cfg.is_masked) {
         const long long nm = (long long)p->cfg.num_masked;
         const NS::UInteger cslot =
             (NS::UInteger)nm * (NS::UInteger)d.L * sizeof(mr_complex);
