@@ -19,7 +19,7 @@
  * the neighborhood of radius @f$r@f$ keeps; far from every sample only the
  * slowly decaying tails remain, and @f$\hat{T}@f$ is small there whatever the
  * subspace. Measurements are in the documentation
- * (https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html).
+ * (https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbor-mask.html).
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */

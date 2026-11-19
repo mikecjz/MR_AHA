@@ -67,7 +67,7 @@ static_assert(sizeof(mr_dims) == 80,
 /** @brief Block-diagonal kernel family of a plan. */
 enum mr_bd_kind {
     MR_BD_GENERIC = 0,  /**< mr_k_blockdiag_*: one coil, threadgroup vectors. */
-    MR_BD_SPECIALISED,  /**< mr_k_bd_*_<L>: register vectors, L <= 32.        */
+    MR_BD_SPECIALIZED,  /**< mr_k_bd_*_<L>: register vectors, L <= 32.        */
     MR_BD_TILED         /**< mr_k_bdt_*: threadgroup tiles, any larger L.     */
 };
 
@@ -298,7 +298,7 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
     if (mr_env_int("MR_AHA_METAL_GENERIC_BD", 0) != 0)
         p->bd_kind = MR_BD_GENERIC;
     else if (cfg->L <= MR_METAL_BD_MAX_L && mr_env_int("MR_AHA_METAL_TILED_BD", 0) == 0)
-        p->bd_kind = MR_BD_SPECIALISED;
+        p->bd_kind = MR_BD_SPECIALIZED;
     else if (!cfg->is_masked || cfg->num_masked <= 2147483647LL)
         p->bd_kind = MR_BD_TILED;
     else
@@ -340,7 +340,7 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
     p->group = group;
 
     char bd_name[64] = "";
-    if (p->bd_kind == MR_BD_SPECIALISED)
+    if (p->bd_kind == MR_BD_SPECIALIZED)
         snprintf(bd_name, sizeof(bd_name), "%s%d",
                  cfg->is_masked ? "mr_k_bd_masked_" : "mr_k_bd_dense_", cfg->L);
     else if (p->bd_kind == MR_BD_GENERIC)
@@ -360,7 +360,7 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
         mr_plan_free(p);
         return rc;
     }
-    if (p->bd_kind == MR_BD_SPECIALISED) {
+    if (p->bd_kind == MR_BD_SPECIALIZED) {
         p->bd_threads = 0; /* default threadgroup size, no threadgroup memory */
         p->bd_tgmem = 0;
     } else if (p->bd_kind == MR_BD_GENERIC &&
@@ -372,7 +372,7 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
     if (cfg->verbose)
         printf("[mr_aha] plan: %s block-diagonal kernels, %d coil(s) per group\n",
                p->bd_kind == MR_BD_TILED        ? "tiled"
-               : p->bd_kind == MR_BD_SPECIALISED ? "specialized"
+               : p->bd_kind == MR_BD_SPECIALIZED ? "specialized"
                                                  : "generic",
                p->group);
 

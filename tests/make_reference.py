@@ -33,8 +33,8 @@ key                   row-major shape (saved)          column-major (C API docs)
 ``x``, ``AhAx_*``     ``(L, [Nz,] Ny, Nx)``            ``[Nx, Ny, [Nz,] L]``
 ``SEs``               ``(Nc, [Nz,] Ny, Nx)``           ``[Nx, Ny, [Nz,] Nc]``
 ``phi2_toep_<tri>``   ``(T, [Mz,] My, Mx)``            ``[Mx, My, [Mz,] T]``
-``phi2_toep_<tri>_neighbour`` ``(T, num_masked)``      ``[num_masked, T]``
-``mask_neighbour``    ``(num_masked,)`` int64          0-based linear indices
+``phi2_toep_<tri>_neighbor`` ``(T, num_masked)``      ``[num_masked, T]``
+``mask_neighbor``    ``(num_masked,)`` int64          0-based linear indices
 ====================  ===============================  =========================
 
 ``T = L (L + 1) / 2``. ``phi2[j, i, ...]`` holds entry ``(i, j)`` of the
@@ -43,7 +43,7 @@ convention, recorded as ``gram_convention`` in ``config_json``). Mask indices ar
 centered upsampled grid ``[Mx, My, Mz]`` in column-major order, which equals
 the flat index of the row-major ``(Mz, My, Mx)`` array. For a stack the mask
 repeats the in-plane selection over all ``Mz = Nz`` planes. The masked
-variants carry the suffix ``neighbour``, after the neighborhood construction
+variants carry the suffix ``neighbor``, after the neighborhood construction
 of :func:`mr_aha.calc_mask`. All k-space arrays have the center in the middle
 of the array (index ``M // 2``).
 
@@ -149,7 +149,7 @@ CASES = [
 TRIS = ("lower", "upper")
 #: Suffix of the masked variants (the neighborhood mask of
 #: :func:`mr_aha.calc_mask`).
-MASKS = ("neighbour",)
+MASKS = ("neighbor",)
 GOLDEN = (np.sqrt(5.0) - 1.0) / 2.0  # golden-angle fraction
 
 
@@ -283,11 +283,11 @@ def run_case(traj_type, n_dim, L, n_coils, traj, phi2, x, SEs, phi2_dim=None,
 
     # The unmasked default configuration ('lower' triangulation) is used for
     # the mask and the NUFFT reference. The neighborhood mask is computed
-    # with the configuration's default radius and saved as mask_neighbour.
+    # with the configuration's default radius and saved as mask_neighbor.
     base = mr_aha.make_config(traj_type, n_dim, L, **kw)
     meta["base_config"] = cfg_dict(base)
     masks = {
-        "neighbour": mr_aha.calc_mask(base, g_traj, radius=int(base.mask_radius)),
+        "neighbor": mr_aha.calc_mask(base, g_traj, radius=int(base.mask_radius)),
     }
     for m, v in masks.items():
         out[f"mask_{m}"] = v.get()

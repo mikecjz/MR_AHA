@@ -192,7 +192,7 @@ typedef struct MR_ALIGN8 mr_complex_s {
  * Installed into ::mr_config::mask_radius by ::mr_config_defaults.
  *
  * Measured in the documentation
- * (https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html):
+ * (https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbor-mask.html):
  * with radius 2 the masked operator matches
  * the unmasked one to within the single-precision NUFFT tolerance on
  * image-like inputs for the 280-spoke radial (79 % of the grid kept) and 3D

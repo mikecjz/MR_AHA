@@ -15,7 +15,7 @@ function mask = calc_mask(traj, config)
 %   larger radius.
 %
 %   For a 'stack' trajectory the in-plane mask is repeated on every kz plane.
-%   https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html
+%   https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbor-mask.html
 %   has the measurements.
 %
 %   INPUTS

@@ -450,7 +450,7 @@ def calc_mask(cfg: MRConfig, traj, *, radius: Optional[int] = None):
     trajectories need a larger radius.
 
     For a stack trajectory the in-plane mask is repeated over all kz planes.
-    https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html
+    https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbor-mask.html
     has the measurements.
 
     Typical use::
