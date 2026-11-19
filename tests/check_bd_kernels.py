@@ -2,8 +2,8 @@
 
 Both backends use block-diagonal kernels specialised on ``L`` (CUDA:
 ``mr_k_bd_dense_t<L>`` / ``mr_k_bd_masked_t<L>``; Metal: ``mr_k_bd_dense<L>``
-/ ``mr_k_bd_masked<L>``; L = 1..30 on CUDA, 1..32 on Metal). CUDA uses tiled
-shared-memory kernels (``mr_k_bdt``) above L = 30, up to 512; both backends
+/ ``mr_k_bd_masked<L>``; L = 1..30 on CUDA, 1..32 on Metal). Above that both
+use tiled shared/threadgroup-memory kernels (``mr_k_bdt``); both backends
 fall back to the generic shared/threadgroup-memory kernels otherwise or when
 ``MR_AHA_<BACKEND>_GENERIC_BD=1``. The reference data cover only a few ranks,
 so this test applies the operator with both kernel families on random inputs
@@ -13,9 +13,12 @@ unmasked and masked, and checks that they agree to single-precision rounding.
 The specialised kernels also process coils in groups
 (``MR_AHA_<BACKEND>_COIL_GROUP``); with 5 coils, groups of 1, 2 and 4 (the last
 group smaller) are all checked against the generic kernels, which handle one
-coil at a time. On CUDA the tiled kernels are also forced for every rank
-(``MR_AHA_CUDA_TILED_BD=1``), with coil batches of 1, 2 and 4
-(``MR_AHA_CUDA_BDT_NC``).
+coil at a time. The tiled kernels are also forced for every rank
+(``MR_AHA_<BACKEND>_TILED_BD=1``), with coil batches of 1, 2 and 4
+(``MR_AHA_<BACKEND>_BDT_NC``); on Metal also with 4, 8 and 16 locations per
+tile (``MR_AHA_METAL_BDT_P``). The generic Metal kernels stop at L = 128
+(one rank vector per thread in 32 KB), so L = 130 is checked against
+L = 130's own tiled variants only on CUDA.
 
 Reference and tolerance: the generic kernels (one coil at a time) are the
 reference; every other kernel/grouping must agree to a relative 2-norm
@@ -44,7 +47,7 @@ import mr_aha  # noqa: E402
 
 # Ranks chosen around every dispatch boundary: small L, the end of the CUDA
 # specialised range (30), the Metal specialised range (32), just above it
-# (31, 33), and larger ranks served by the CUDA tiled kernels (up to 130).
+# (31, 33), and larger ranks served by the tiled kernels (up to 130).
 RANKS = (1, 2, 5, 7, 12, 16, 20, 30, 31, 32, 33, 47, 72, 130)
 
 
@@ -91,8 +94,16 @@ def main() -> int:
         variants += [(f"tiled nc={nc} group={g}", g,
                       {"MR_AHA_CUDA_TILED_BD": "1", "MR_AHA_CUDA_BDT_NC": str(nc)})
                      for nc in (1, 2, 4) for g in (1, 4)]
+    else:
+        variants += [(f"tiled nc={nc} P={P} group={g}", g,
+                      {"MR_AHA_METAL_TILED_BD": "1", "MR_AHA_METAL_BDT_NC": str(nc),
+                       "MR_AHA_METAL_BDT_P": str(P)})
+                     for nc in (1, 2, 4) for P in (4, 8, 16) for g in (1, 4)]
     # Sweep rank x triangulation x masking.
     for L in RANKS:
+        # Metal's generic reference kernels stop at L = 128.
+        if L > 128 and mr_aha.backend() != "cuda":
+            continue
         for tri in ("lower", "upper"):
             for masked in (False, True):
                 cfg = mr_aha.make_config("2D", n_dim, L, n_coils=n_coils,
@@ -117,10 +128,6 @@ def main() -> int:
                 # Reference: the generic kernels.
                 b = apply(cfg, x, SEs, toep, mask, generic=True)
                 for label, group, env in variants:
-                    # On Metal only the generic kernels exist above the
-                    # specialised range, so there is nothing to compare.
-                    if L > 33 and mr_aha.backend() != "cuda":  # CUDA-only ranks
-                        break
                     a = apply(cfg, x, SEs, toep, mask, generic=False, group=group,
                               env=env)
                     count += 1
