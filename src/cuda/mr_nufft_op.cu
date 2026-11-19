@@ -12,7 +12,7 @@
  * (sign @f$+1@f$) and @f$\mathcal{B}@f$ multiplies the length-@f$L@f$ rank
  * vector of every sample, as a row vector from the right (see
  * @ref mr_gram), by the Gram block of its readout:
- * @f$v \leftarrow v\,\Phi_2@f$. Both NUFFTs are unnormalised, which is the
+ * @f$v \leftarrow v\,\Phi_2@f$. Both NUFFTs are unnormalized, which is the
  * convention the Toeplitz kernel of ::mr_calc_toep reproduces, so the two
  * methods of ::mr_op_create agree to within the NUFFT tolerance.
  *
@@ -21,13 +21,13 @@
  * MATLAB reference `AhA_cufinufft.m`, which the tests compare it against:
  *
  *  1. `im = x * (S_c * zmod)` for every rank (zmod: stack only, see below);
- *  2. stack only: unnormalised forward FFT along z (cuFFT);
+ *  2. stack only: unnormalized forward FFT along z (cuFFT);
  *  3. type-2 NUFFT of all `L` ranks (`L*Nz` planes for a stack) in one
  *     batched cufinufft call;
  *  4. Gram multiplication, one batched GEMM (cuBLAS) over all readouts (and
  *     kz encodes);
  *  5. type-1 NUFFT back, one batched call;
- *  6. stack only: unnormalised inverse FFT along z;
+ *  6. stack only: unnormalized inverse FFT along z;
  *  7. `out (+)= im * conj(S_c * zmod)`.
  *
  * @section mr_nufft_order Sample order
@@ -54,10 +54,10 @@
  *
  * @section mr_nufft_stack Stack of stars
  *
- * kz is Cartesian: the image is Fourier transformed along z (centred,
- * unnormalised), every kz plane goes through the same 2D NUFFT pair, and the
+ * kz is Cartesian: the image is Fourier transformed along z (centered,
+ * unnormalized), every kz plane goes through the same 2D NUFFT pair, and the
  * Gram block depends on the readout and the kz encode (`phi2` is supplied in
- * centred kz order). With @f$c = \lfloor N_z/2 \rfloor@f$, the centred DFT
+ * centered kz order). With @f$c = \lfloor N_z/2 \rfloor@f$, the centered DFT
  * is a plain FFT of the image modulated by
  * @f$\mathrm{zmod}(z) = e^{2\pi i c z/N_z}@f$, followed by a phase that
  * depends only on the kz index. Because the Gram multiplication is diagonal
@@ -298,7 +298,7 @@ void mr_nufft_eng_destroy(mr_nufft_eng *e, int alive)
  * @param[in]  dev     CUDA ordinal of the current device (the engine's).
  * @param[in]  bytes   Number of bytes to copy.
  * @param[in]  s       Stream on @p dev for the peer copy (asynchronous; the
- *                     caller synchronises before freeing the source).
+ *                     caller synchronizes before freeing the source).
  * @return ::MR_SUCCESS or a negative ::mr_status (::MR_ERR_ALLOC,
  *         ::MR_ERR_CUDA); @p *tmp is NULL after a failed allocation.
  */
@@ -406,7 +406,7 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
                 rc = MR_ERR_CUDA;
             }
         }
-        /* The temporaries are only read by the work synchronised above. */
+        /* The temporaries are only read by the work synchronized above. */
         if (tmp_t) cudaFree(tmp_t);
         if (tmp_g) cudaFree(tmp_g);
         if (rc != MR_SUCCESS) return rc;
@@ -435,7 +435,7 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
 
     /* -- Stack: z modulation and the FFT along z --------------------------- */
     /* zmod(z) = exp(2 pi i floor(Nz/2) z / Nz) turns the plain FFT along z
-     * into the centred one up to a kz-only phase that cancels between the
+     * into the centered one up to a kz-only phase that cancels between the
      * forward and adjoint transforms (see "Stack of stars" above). It is
      * computed once on the host and uploaded synchronously (pageable
      * memory, Nz values). */
@@ -495,7 +495,7 @@ static int mr_nufft_eng_build(mr_nufft_eng *e, const mr_complex *d_phi2,
     cufinufft_opts opts;
     cufinufft_default_opts(&opts);
     opts.upsampfac = (upsampfac > 0.0) ? upsampfac : 2.0;
-    opts.modeord = 0;          /* centred (CMCL) modes, like the library     */
+    opts.modeord = 0;          /* centered (CMCL) modes, like the library     */
     opts.gpu_device_id = dev;  /* cufinufft ignores the current device       */
     opts.gpu_stream = (void *)s;
     /* gpu_method 0 = the library default: type 2 keeps cufinufft's choice
@@ -590,7 +590,7 @@ int mr_nufft_eng_create(const mr_config *cfg, const mr_complex *d_phi2,
 /* ------------------------------------------------------------------------ */
 
 /**
- * @brief Stack only: unnormalised FFT along z of all ranks of the image
+ * @brief Stack only: unnormalized FFT along z of all ranks of the image
  *        buffer, in place (one cuFFT call per rank).
  * @param[in,out] e   Engine; its `d_im` buffer ([Nx, Ny, Nz] per rank, L
  *                    ranks) is transformed in place on the engine's stream.
@@ -635,7 +635,7 @@ int mr_nufft_eng_execute(mr_nufft_eng *e, const mr_complex *d_x,
                                                      e->img, e->plane, total);
         MR_KERNEL_CHECK("mr_k_nu_mul_se");
 
-        /* 2. Stack: unnormalised FFT along z. */
+        /* 2. Stack: unnormalized FFT along z. */
         if (e->stack) {
             const int rc = mr_nu_zfft(e, CUFFT_FORWARD);
             if (rc != MR_SUCCESS) return rc;
@@ -680,7 +680,7 @@ int mr_nufft_eng_execute(mr_nufft_eng *e, const mr_complex *d_x,
             MR_FAIL(MR_ERR_CUFINUFFT, "cufinufftf_execute (type 1) failed with code %d",
                     err);
 
-        /* 6. Stack: unnormalised inverse FFT along z. */
+        /* 6. Stack: unnormalized inverse FFT along z. */
         if (e->stack) {
             const int rc = mr_nu_zfft(e, CUFFT_INVERSE);
             if (rc != MR_SUCCESS) return rc;

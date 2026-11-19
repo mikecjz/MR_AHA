@@ -220,8 +220,8 @@ extern "C" int64_t mr_se_size(const mr_config *cfg)
 
 void mr_dims_from_config(const mr_config *cfg, mr_dims *d)
 {
-    /* Copy the extents and pre-compute the centre offsets floor(N/2) and
-     * floor(M/2) used by the centred <-> natural index maps of the kernels
+    /* Copy the extents and pre-compute the center offsets floor(N/2) and
+     * floor(M/2) used by the centered <-> natural index maps of the kernels
      * (integer division of non-negative values is floor). */
     memset(d, 0, sizeof(*d));
     for (int i = 0; i < 3; ++i) {

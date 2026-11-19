@@ -103,7 +103,7 @@
  * API). ::mr_op_execute is asynchronous: on several devices it orders the
  * other devices after the legacy stream with an event and makes the legacy
  * stream wait for their partial results, so the returned gpuArray is safe to
- * use from MATLAB without a host synchronisation here. The library saves and
+ * use from MATLAB without a host synchronization here. The library saves and
  * restores the current CUDA device in every call, so MATLAB's device
  * selection is never changed by this gateway.
  *
@@ -183,7 +183,7 @@ static int mex_op_device_valid(const mex_op_entry *e)
  * destroyed its CUDA context and with it everything the operator had
  * allocated there, including its streams, events, cuFFT / cufinufft plans
  * and buffers on that device. Passing such an operator to ::mr_op_destroy is
- * not safe: it synchronises those stale stream handles, which crashes inside
+ * not safe: it synchronizes those stale stream handles, which crashes inside
  * the CUDA driver (observed with R2022b: segmentation violation in
  * `cuStreamSynchronize`). A stale operator is therefore released with
  * ::mr_op_abandon, which frees what it holds on the other devices (kernel
@@ -666,7 +666,7 @@ static void mex_op_apply(int nlhs, mxArray *plhs[], int nrhs,
     mr_mex_check_complex_single(g_x, "x", MR_ID);
     mr_mex_check_numel(g_x, mr_x_size(&e->cfg), "x", MR_ID);
 
-    /* Output has the same shape as x; left uninitialised because
+    /* Output has the same shape as x; left uninitialized because
      * ::mr_op_execute overwrites every element. */
     const mwSize  nd   = mxGPUGetNumberOfDimensions(g_x);
     const mwSize *dims = mxGPUGetDimensions(g_x);

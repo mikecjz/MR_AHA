@@ -15,7 +15,7 @@
  * ::mr_op_options::devices (or `n_devices = MR_OP_ALL_DEVICES`).
  *
  * Conventions used throughout (see mr_aha.h): every array is column-major
- * and centred, single-precision complex values are interleaved (`float2` is
+ * and centered, single-precision complex values are interleaved (`float2` is
  * layout-identical to ::mr_complex), and with the CUDA backend every array
  * argument is a device pointer that the caller allocates and frees. The
  * example exits with `EXIT_FAILURE` if any MR_AHA call fails or if either
@@ -103,7 +103,7 @@ int main(void)
     /* ---- Host-side synthetic data -------------------------------------- */
     /* Random coefficients x and y (two inputs for the Hermitian check) and
      * random complex sensitivity maps, [Nx, Ny, Nz, L] and
-     * [Nx, Ny, Nz, Ncoils] column-major. The maps need not be normalised for
+     * [Nx, Ny, Nz, Ncoils] column-major. The maps need not be normalized for
      * these consistency checks. */
     unsigned seed = 12345u;
     std::vector<float2> h_x(x_elems), h_y(x_elems), h_se(se_elems);

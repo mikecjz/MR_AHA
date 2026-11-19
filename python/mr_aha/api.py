@@ -1,7 +1,7 @@
 """High-level, CuPy-friendly interface to MR_AHA.
 
 MR_AHA evaluates the forward normal operator :math:`A^H A` for non-Cartesian
-MRI with low-rank (subspace) modelling, using a Toeplitz
+MRI with low-rank (subspace) modeling, using a Toeplitz
 embedding so that no non-uniform FFT is needed inside the iteration loop.
 
 Array layout
@@ -24,7 +24,7 @@ column-major (docs, MATLAB)   row-major (this module, CuPy)
 
 Every array must be a C-contiguous CuPy array resident on the GPU; ``complex64``
 for the data arrays, ``float32`` for ``traj`` and ``int64`` for ``mask``.
-Masks use **0-based** linear indices into the centred upsampled grid.
+Masks use **0-based** linear indices into the centered upsampled grid.
 
 Gram blocks
 -----------
@@ -247,7 +247,7 @@ def make_config(
         stream: A :class:`cupy.cuda.Stream`, a raw stream handle, or ``None``.
         mem_fraction: Share of the free device memory :func:`calc_toep` may use.
         verbose: Print per-stage progress.
-        mask_radius: Neighbourhood radius of :func:`calc_mask` in upsampled
+        mask_radius: Neighborhood radius of :func:`calc_mask` in upsampled
             grid cells (>= 0): the locations within this many cells of a
             sample are kept.
 
@@ -446,11 +446,11 @@ def calc_mask(cfg: MRConfig, traj, *, radius: Optional[int] = None):
     within ``radius`` cells of such a point (Chebyshev distance, i.e. a
     ``(2r+1)^d`` box) is kept. No NUFFT is needed. The default radius 2
     matches the unmasked accuracy on densely sampled radial and 3D
-    trajectories while keeping roughly the sampled disc or ball; sparse
+    trajectories while keeping roughly the sampled disk or ball; sparse
     trajectories need a larger radius.
 
     For a stack trajectory the in-plane mask is repeated over all kz planes.
-    https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html
+    https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbor-mask.html
     has the measurements.
 
     Typical use::
@@ -465,12 +465,12 @@ def calc_mask(cfg: MRConfig, traj, *, radius: Optional[int] = None):
         cfg: Configuration from :func:`make_config`. Not modified.
         traj: ``float32`` trajectory shaped ``(ndim, Nkx, Ntrajs)`` (CuPy on
             CUDA, NumPy on Metal).
-        radius: Neighbourhood radius in upsampled grid cells (>= 0), keyword
+        radius: Neighborhood radius in upsampled grid cells (>= 0), keyword
             only. Defaults to ``cfg.mask_radius``.
 
     Returns:
         An ``int64`` array (CuPy on CUDA, NumPy on Metal) of sorted, 0-based
-        linear indices into the centred upsampled grid ``[Mx, My, Mz]``
+        linear indices into the centered upsampled grid ``[Mx, My, Mz]``
         (column-major).
 
     Raises:
@@ -571,7 +571,7 @@ def calc_toep(cfg: MRConfig, phi2, traj, mask=None, out=None,
             ``(ndim, Nkx, Ntrajs)``, in radians per unit of the un-padded image
             grid (the usual ``[-pi, pi)`` range). ``ndim`` is 2 for ``'2D'``
             and ``'stack'``, 3 for ``'3D'``.
-        mask: ``int64`` CuPy array of 0-based linear indices into the centred
+        mask: ``int64`` CuPy array of 0-based linear indices into the centered
             upsampled grid, typically from :func:`calc_mask`. Required when
             ``cfg.is_masked``.
         out: Optional pre-allocated ``complex64`` output of the right size.
@@ -772,7 +772,7 @@ class AhAOp:
       application).
     * ``_cfg`` -- the operator's private copy of the configuration.
     * ``_method`` -- ``'toeplitz'`` or ``'nufft'``.
-    * ``_info`` / ``_toep_ms`` -- Metal only: the synthesised :attr:`info`
+    * ``_info`` / ``_toep_ms`` -- Metal only: the synthesized :attr:`info`
       dict of a NUFFT operator, and the Python-measured kernel time.
     """
 
@@ -856,12 +856,12 @@ class AhAOp:
         """
         # --- Bypass __init__ (which forbids direct construction) and set the
         #     attributes close()/__del__ rely on first, so that a failure
-        #     part-way leaves an object that can be finalised safely. ---
+        #     part-way leaves an object that can be finalized safely. ---
         self = cls.__new__(cls)
         self._handle = ctypes.c_void_p()
         self._keep = ()
         self._impl = None
-        # --- Method: normalise to its canonical string. ---
+        # --- Method: normalize to its canonical string. ---
         self._method = OpMethod._TO_STR[OpMethod.parse(method)]
         is_nufft = self._method == "nufft"
         if is_nufft and cfg.is_masked:
@@ -984,7 +984,7 @@ class AhAOp:
         # --- NUFFT method: no library object at all. The MLX reference
         #     implementation is the operator; it needs SEs and phi2 at every
         #     application, so they are kept (always used in place, whatever
-        #     share_primary says). info is synthesised to mirror the CUDA
+        #     share_primary says). info is synthesized to mirror the CUDA
         #     dict for one device. ---
         if self._method == "nufft":
             from .nufft import _MlxNufft  # noqa: PLC0415
@@ -1113,7 +1113,7 @@ class AhAOp:
             MRError: If ``mr_op_info`` fails.
         """
         self._check_open()
-        # --- Metal NUFFT: return a copy of the synthesised dict. ---
+        # --- Metal NUFFT: return a copy of the synthesized dict. ---
         if self._impl is not None:
             return dict(self._info)
         # --- Metal Toeplitz with a Python-computed kernel: the library saw a
@@ -1223,7 +1223,7 @@ class AhAOp:
         self.close()
 
     def __del__(self):
-        """Finaliser: best-effort :meth:`close` when the object is collected.
+        """Finalizer: best-effort :meth:`close` when the object is collected.
 
         Errors are swallowed because at interpreter shutdown the library or
         module globals may already be gone.

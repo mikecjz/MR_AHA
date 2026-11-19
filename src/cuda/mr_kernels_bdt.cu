@@ -1,8 +1,8 @@
 /**
  * @file mr_kernels_bdt.cu
- * @brief Tiled block-diagonal kernels for ranks without a specialised kernel.
+ * @brief Tiled block-diagonal kernels for ranks without a specialized kernel.
  *
- * The specialised kernels (`mr_kernels_bd.cu`) keep a location's rank vectors
+ * The specialized kernels (`mr_kernels_bd.cu`) keep a location's rank vectors
  * in registers and stop at ::MR_BD_MAX_L, where those no longer fit. Above
  * that, the generic kernels ::mr_k_blockdiag_dense / ::mr_k_blockdiag_masked
  * (`mr_kernels.cu`) used to take over. They are slow on large ranks for three
@@ -67,7 +67,7 @@
  * 575 -> 198 ms. On the H100 the block stage drops from about 150 to 22 ms
  * (masked) and is no longer limited by DRAM bandwidth.
  *
- * The kernels have the contract of the specialised ones (in place on the
+ * The kernels have the contract of the specialized ones (in place on the
  * padded grids, masked mode through the index map of ::mr_k_mask_inverse,
  * coil groups, location ranges) and are launched through
  * ::mr_bd_launch_dense / ::mr_bd_launch_masked.
@@ -152,7 +152,7 @@ __device__ __forceinline__ void mr_bdt_panel(int c0, int L, int upper, int E,
  * primitives fall back to ordinary loads. (Double buffering the panels with
  * the same copies brought nothing on the H100, the L40S or the TITAN RTX:
  * two resident blocks per SM already overlap one block's loads with the
- * other's arithmetic.) The caller synchronises the block before reading.
+ * other's arithmetic.) The caller synchronizes the block before reading.
  */
 __device__ __forceinline__ void mr_bdt_fetch(mr_complex *dst, const mr_complex *d_toep,
                                              const long long *kidx, long long kstride,
@@ -204,7 +204,7 @@ __device__ __forceinline__ void mr_bdt_fetch(mr_complex *dst, const mr_complex *
  * @tparam MASKED Masked kernel layout and index map.
  * @param[in,out] d_pad       `[nloc, L, ncoil]` values with rank stride
  *                            `rg.vstride`.
- * @param[in]     d_toep      `[Mx, My, Mz, (L^2+L)/2]` (centred) or
+ * @param[in]     d_toep      `[Mx, My, Mz, (L^2+L)/2]` (centered) or
  *                            `[num_masked, (L^2+L)/2]` (masked).
  * @param[in]     d_inv       Masked only: grid-to-mask map of
  *                            ::mr_k_mask_inverse (-1 outside the mask).
@@ -247,7 +247,7 @@ mr_k_bdt(mr_complex *__restrict__ d_pad, const mr_complex *__restrict__ d_toep,
     const long long first = (long long)blockIdx.x * P; /* range-relative */
 
     /* 0. Resolve, once per tile, where each location's block lives in d_toep:
-     * the mask column (masked; -1 outside the mask) or the centred grid index
+     * the mask column (masked; -1 outside the mask) or the centered grid index
      * (dense). Locations past the end of the range (last tile) get -1 too.
      * The first P threads do it; the barrier publishes kidx to the block. */
     if (threadIdx.x < P) {
@@ -258,7 +258,7 @@ mr_k_bdt(mr_complex *__restrict__ d_pad, const mr_complex *__restrict__ d_toep,
             if (MASKED) {
                 k = d_inv[loc];
             } else {
-                /* Natural (FFT-order) grid index -> centred kernel index. */
+                /* Natural (FFT-order) grid index -> centered kernel index. */
                 const int j0 = (int)(loc % dims.m[0]);
                 const long long q = loc / dims.m[0];
                 const int j1 = (int)(q % dims.m[1]);
@@ -623,14 +623,14 @@ static int mr_bdt_launch(bool masked, mr_complex *d_pad, const mr_complex *d_toe
 }
 
 /* ------------------------------------------------------------------------ */
-/* Launchers shared by the specialised and the tiled kernels                */
+/* Launchers shared by the specialized and the tiled kernels                */
 /* ------------------------------------------------------------------------ */
 
 int mr_bd_launch_dense(const mr_bd_kernels &k, int threads, mr_complex *d_pad,
                        const mr_complex *d_toep, const mr_dims &dims, int ncoil,
                        mr_bd_range rg, cudaStream_t s)
 {
-    /* Tiled: the launcher picks its own geometry. Specialised: one thread per
+    /* Tiled: the launcher picks its own geometry. Specialized: one thread per
      * location, `threads` per block, no shared memory. */
     if (k.tiled)
         return mr_bdt_launch(false, d_pad, d_toep, nullptr, 0, dims, ncoil, rg, s);

@@ -145,7 +145,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     mr_mex_check_numel(g_toep, mr_phi2_toep_size(&cfg),  "phi2_toep", MR_ID);
 
     /* ---- Output: same shape as x --------------------------------------- */
-    /* Allocate the result with x's dimensions. It is left uninitialised
+    /* Allocate the result with x's dimensions. It is left uninitialized
      * because the library fully overwrites the output. */
     const mwSize  nd_x   = mxGPUGetNumberOfDimensions(g_x);
     const mwSize *dims_x = mxGPUGetDimensions(g_x);

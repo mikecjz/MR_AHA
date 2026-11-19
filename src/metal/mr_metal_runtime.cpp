@@ -14,7 +14,7 @@
  *  - **Caller arrays.** The CUDA API takes device pointers; the Metal API
  *    takes host pointers in unified memory, which must be wrapped in
  *    `MTL::Buffer` objects to be bound to a kernel (::mr_metal_view_make).
- *  - **Synchronisation.** `cudaStreamSynchronize` + `cudaGetLastError`
+ *  - **Synchronization.** `cudaStreamSynchronize` + `cudaGetLastError`
  *    become ::mr_metal_wait.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
@@ -152,7 +152,7 @@ int mr_metal_pipeline(const char *name, MTL::ComputePipelineState **out)
         if (rc != MR_SUCCESS) return rc;
     }
 
-    /* Look the kernel up by its host name (for the L-specialised templates
+    /* Look the kernel up by its host name (for the L-specialized templates
      * this is the [[host_name]] given in mr_kernels.metal, e.g.
      * "mr_k_bd_dense_8"). A missing name is a library bug, hence
      * MR_ERR_INTERNAL rather than MR_ERR_METAL. */
@@ -285,7 +285,7 @@ void mr_metal_view_finish(mr_metal_view *v)
 
 int mr_metal_wait(MTL::CommandBuffer *cb, const char *what)
 {
-    /* Submit and block until the GPU is done (the analogue of
+    /* Submit and block until the GPU is done (the analog of
      * cudaStreamSynchronize). Errors raised while the GPU executes (page
      * faults, watchdog timeouts, ...) only appear in the command buffer's
      * final status, so it is checked explicitly. The caller must already

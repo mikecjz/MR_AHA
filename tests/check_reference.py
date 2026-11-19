@@ -80,9 +80,9 @@ import mr_aha  # noqa: E402
 
 # Stored kernel variants: both packings, each unmasked and with every mask.
 TRIS = ("lower", "upper")
-#: Suffix of the stored masked variants (``mask_neighbour``,
-#: ``phi2_toep_<tri>_neighbour``, ``AhAx_<tri>_neighbour``).
-MASKS = ("neighbour",)
+#: Suffix of the stored masked variants (``mask_neighbor``,
+#: ``phi2_toep_<tri>_neighbor``, ``AhAx_<tri>_neighbor``).
+MASKS = ("neighbor",)
 STAGES = ("aha", "toep", "mask", "nufft", "op")
 
 

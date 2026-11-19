@@ -8,18 +8,18 @@
  *             \mathcal{P} \, S_c \, x ,
  * @f]
  * where @f$\mathcal{P}@f$ zero-pads onto the upsampled Toeplitz grid,
- * @f$F@f$ is an unnormalised cuFFT whose centring is realised by index remaps
+ * @f$F@f$ is an unnormalized cuFFT whose centering is realized by index remaps
  * folded into @f$\mathcal{P}@f$ and into the block-diagonal lookup, and
  * @f$\hat{T}@f$ is the per-voxel Hermitian @f$L\times L@f$ multiplication.
  *
- * The @f$1/\prod M@f$ that the unnormalised forward/inverse cuFFT pair would
+ * The @f$1/\prod M@f$ that the unnormalized forward/inverse cuFFT pair would
  * otherwise require is already carried by `phi2_toep` as produced by
  * ::mr_calc_toep, so no scaling happens in this file.
  *
  * Performance notes (see also `mr_kernels_bd.cu`):
  *  - The block-diagonal stage is memory-bound on reading `phi2_toep`, the
  *    largest array of the operator. For @f$L \le@f$ ::MR_BD_MAX_L it uses
- *    kernels specialised on @f$L@f$ (register vectors, each stored element
+ *    kernels specialized on @f$L@f$ (register vectors, each stored element
  *    read once per triangle walk), and up to ::MR_BDT_MAX_L tiled kernels
  *    with the same guarantees (`mr_kernels_bdt.cu`).
  *  - Coils are processed in groups of up to ::mr_aha_plan_s::group: the padded
@@ -35,7 +35,7 @@
  *    the tiled kernels (`mr_kernels_bdt.cu`, normally used above
  *    ::MR_BD_MAX_L) for every rank, `MR_AHA_CUDA_COIL_GROUP=n`
  *    sets the requested group size, `MR_AHA_CUDA_BD_THREADS=n` the threads
- *    per block of the specialised kernels (default ::MR_BD_THREADS, at most
+ *    per block of the specialized kernels (default ::MR_BD_THREADS, at most
  *    that). At execution, `MR_AHA_CUDA_PROFILE=1` prints the GPU time of each
  *    stage to `stderr`.
  *
@@ -67,7 +67,7 @@
  * ::mr_aha_plan_release relies on that to free only what was actually
  * created. Invariant after a successful ::mr_aha_plan_create: `group == 1`
  * whenever the generic block-diagonal kernels are used (`bd` empty), and at
- * most one of `d_compact` (generic, masked) and `d_inv` (specialised or
+ * most one of `d_compact` (generic, masked) and `d_inv` (specialized or
  * tiled, masked) is non-NULL.
  */
 struct mr_aha_plan_s {
@@ -84,8 +84,8 @@ struct mr_aha_plan_s {
     mr_complex   *d_compact; /**< `[num_masked,L]`; masked mode with the
                                   generic kernels only.                       */
     int          *d_inv;     /**< `[Mx,My,Mz]` grid-to-mask index map; masked
-                                  mode with the specialised kernels only.     */
-    mr_bd_kernels bd;        /**< Specialised block-diagonal kernels, or NULL
+                                  mode with the specialized kernels only.     */
+    mr_bd_kernels bd;        /**< Specialized block-diagonal kernels, or NULL
                                   pointers for the generic ones.              */
     int           bd_block;  /**< Threads per block for the block-diag kernel.*/
     size_t        bd_shared; /**< Dynamic shared bytes for the generic kernel.*/
@@ -309,7 +309,7 @@ static int mr_aha_plan_build_group(mr_aha_plan p, int group, size_t budget,
     const size_t c8 = sizeof(mr_complex);
     const size_t pad_bytes = (size_t)p->dims.pad_size * cfg->L * group * c8;
     /* Masked: the generic kernels (one coil per group) need a compact
-     * [num_masked, L] buffer, the specialised ones a [Mx,My,Mz] int32 map. */
+     * [num_masked, L] buffer, the specialized ones a [Mx,My,Mz] int32 map. */
     const size_t cmp_bytes = (cfg->is_masked && !mr_bd_available(p->bd, true))
                                  ? (size_t)cfg->num_masked * cfg->L * c8 : 0;
     const size_t inv_bytes = (cfg->is_masked && mr_bd_available(p->bd, true))
@@ -390,7 +390,7 @@ static int mr_aha_plan_create_impl(const mr_config *cfg, mr_aha_plan *plan_out)
     p->stream = (cudaStream_t)cfg->stream;
     mr_dims_from_config(cfg, &p->dims);
 
-    /* Block-diagonal kernels: specialised on L (register vectors, each stored
+    /* Block-diagonal kernels: specialized on L (register vectors, each stored
      * element read once, coil groups) for L <= MR_BD_MAX_L, tiled (shared-
      * memory panels, same guarantees) up to MR_BDT_MAX_L; the generic
      * shared-memory kernels (one coil at a time) otherwise or when
@@ -401,7 +401,7 @@ static int mr_aha_plan_create_impl(const mr_config *cfg, mr_aha_plan *plan_out)
      * generic kernels, which index the mask with 64-bit integers. */
     if (cfg->is_masked && cfg->num_masked > 2147483647LL)
         p->bd = mr_bd_kernels{}; /* the int32 index map is too small */
-    /* Launch geometry of the block-diagonal stage. For the specialised
+    /* Launch geometry of the block-diagonal stage. For the specialized
      * kernels the plan passes no dynamic shared memory and takes the threads
      * per block from MR_AHA_CUDA_BD_THREADS, or MR_BD_THREADS when unset or
      * outside [32, MR_BD_THREADS] (their __launch_bounds__); the tiled
@@ -463,7 +463,7 @@ static int mr_aha_plan_create_impl(const mr_config *cfg, mr_aha_plan *plan_out)
 
     if (cfg->verbose)
         printf("[mr_aha] plan: %s block-diagonal kernels, %d coil(s) per group\n",
-               p->bd.tiled ? "tiled" : p->bd.dense ? "specialised" : "generic",
+               p->bd.tiled ? "tiled" : p->bd.dense ? "specialized" : "generic",
                p->group);
 
     *plan_out = p;
@@ -531,7 +531,7 @@ static const char *const mr_stage_names[MR_N_STAGES] = {
  * When enabled, a CUDA event is recorded on the plan's stream after every
  * stage of every coil (group); ::mr_profile_end waits for the stream, sums the
  * elapsed times between consecutive events per stage and prints them to
- * `stderr`. Events do not serialise the stream, so the profiled run takes the
+ * `stderr`. Events do not serialize the stream, so the profiled run takes the
  * same time as a normal one. Disabled (the default), every call is a no-op.
  */
 struct mr_profile {
@@ -647,8 +647,8 @@ static int mr_aha_blockdiag(mr_aha_plan plan, int nc,
     const long long  nm = (long long)cfg->num_masked;
 
     /* Unmasked: phi2_toep covers every upsampled location
-     * ([Mx, My, Mz, (L^2+L)/2], centred order); the kernels convert the
-     * natural-order grid index to the centred kernel index on the fly. The
+     * ([Mx, My, Mz, (L^2+L)/2], centered order); the kernels convert the
+     * natural-order grid index to the centered kernel index on the fly. The
      * in-place kernels serve all `nc` coils of the group in one launch. */
     if (!cfg->is_masked) {
         if (mr_bd_available(plan->bd, false))
@@ -714,7 +714,7 @@ static int mr_aha_execute_impl(mr_aha_plan plan, const mr_complex *d_x,
     MR_CUDA_CHECK(mr_profile_begin(&prof, s));
 
     if (plan->d_inv) {
-        /* Grid-to-mask index map of the specialised masked kernels; rebuilt
+        /* Grid-to-mask index map of the specialized masked kernels; rebuilt
          * on every call (a cheap pass over the mask) since the caller may
          * pass a different mask each time. Counted as part of stage 0. */
         /* Fill with 0xFF bytes = -1 (int32) = "outside the mask", then
@@ -738,7 +738,7 @@ static int mr_aha_execute_impl(mr_aha_plan plan, const mr_complex *d_x,
         cufftHandle fft = (nc == plan->group) ? plan->fft : plan->fft_rem;
 
         /* 1. Zero-pad and apply each coil's sensitivity into its slot, with
-         *    the centring shift folded into the scatter (this also zeroes the
+         *    the centering shift folded into the scatter (this also zeroes the
          *    rest of the grid). */
         for (int c = 0; c < nc; ++c) {
             mr_k_pad_mul_se<<<grid_pad, MR_BLOCK, 0, s>>>(plan->d_pad + slot * c,
@@ -776,7 +776,7 @@ static int mr_aha_execute_impl(mr_aha_plan plan, const mr_complex *d_x,
     /* With profiling on, wait for the GPU and print the stage times. */
     MR_CUDA_CHECK(mr_profile_end(&prof, cfg, plan->group));
 
-    /* Verbose mode synchronises so that the message is printed after the
+    /* Verbose mode synchronizes so that the message is printed after the
      * work has actually completed (and any asynchronous error surfaces). */
     if (cfg->verbose) {
         MR_CUDA_CHECK(cudaStreamSynchronize(s));

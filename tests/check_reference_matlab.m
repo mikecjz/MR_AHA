@@ -89,13 +89,13 @@ function check_reference_matlab(ref_dir)
             rows(end+1, :) = {['AhAx_' t ' (create_op)'], rel(op * z.x, ...
                 z.(['AhAx_' t])), tol_aha}; %#ok<AGROW>
             delete(op);
-            % Masked variants: the stored keys carry the suffix 'neighbour'
-            % (the neighbourhood mask of CALC_MASK).
+            % Masked variants: the stored keys carry the suffix 'neighbor'
+            % (the neighborhood mask of CALC_MASK).
             % Masked kernel, recomputed kernel and operator object; the
             % recomputed masked kernel is judged through its AhAx only.
             cfgm = cfg; cfgm.is_masked = true;
-            mask = z.mask_neighbour + 1;
-            suf = [t '_neighbour'];
+            mask = z.mask_neighbor + 1;
+            suf = [t '_neighbor'];
             rows(end+1, :) = {['AhAx_' suf], rel(AhA_Toeplitz(z.x, z.SEs, ...
                 z.(['phi2_toep_' suf]), cfgm, mask), z.(['AhAx_' suf])), tol_aha}; %#ok<AGROW>
             Om = calc_toep(z.phi2, z.traj, cfgm, mask);
@@ -110,7 +110,7 @@ function check_reference_matlab(ref_dir)
         % calc_mask with the reference's radius (from base); index sets must
         % match exactly.
         mn = gather(calc_mask(z.traj, base));
-        rows(end+1, :) = {'mask_neighbour', setdiff_frac(mn, z.mask_neighbour + 1), 0}; %#ok<AGROW>
+        rows(end+1, :) = {'mask_neighbor', setdiff_frac(mn, z.mask_neighbor + 1), 0}; %#ok<AGROW>
         % NUFFT operator (library) and the independent NUFFT reference
         % (CUDA: needs cufinufft's MATLAB interface).
         % The library's NUFFT operator is always built; it is compared with
@@ -165,7 +165,7 @@ end
 
 function d = setdiff_frac(a, b)
 %SETDIFF_FRAC  Share of indices in exactly one of two index sets.
-    % Normalised by the size of the reference set b.
+    % Normalized by the size of the reference set b.
     d = numel(setxor(double(a(:)), double(b(:)))) / max(numel(b), 1);
 end
 

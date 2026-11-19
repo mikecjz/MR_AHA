@@ -8,10 +8,10 @@
  *   A^H A x = \sum_c S_c^H \, \mathcal{P}^H \, F^{-1} \hat{T} F \,
  *             \mathcal{P} \, S_c \, x ,
  * @f]
- * with the zero-padding @f$\mathcal{P}@f$ (and its centring remap) and the
+ * with the zero-padding @f$\mathcal{P}@f$ (and its centering remap) and the
  * block-diagonal @f$\hat{T}@f$ in `mr_kernels.metal`, and @f$F@f$ the batched
- * unnormalised VkFFT transform over the upsampled grid. `phi2_toep` already
- * carries the @f$1/\prod M@f$ of the unnormalised FFT pair.
+ * unnormalized VkFFT transform over the upsampled grid. `phi2_toep` already
+ * carries the @f$1/\prod M@f$ of the unnormalized FFT pair.
  *
  * Differences from the CUDA backend:
  *  - Arrays are host pointers in unified memory, wrapped in place as Metal
@@ -49,7 +49,7 @@ static_assert(sizeof(mr_dims) == 80,
 /** @brief Default threads per threadgroup for the block-diagonal kernels. */
 #define MR_METAL_BD_THREADS 256
 
-/** @brief Largest L with a specialised block-diagonal kernel (see
+/** @brief Largest L with a specialized block-diagonal kernel (see
  *         `mr_k_bd_dense<L>` in mr_kernels.metal). */
 #define MR_METAL_BD_MAX_L 32
 
@@ -67,7 +67,7 @@ static_assert(sizeof(mr_dims) == 80,
 /** @brief Block-diagonal kernel family of a plan. */
 enum mr_bd_kind {
     MR_BD_GENERIC = 0,  /**< mr_k_blockdiag_*: one coil, threadgroup vectors. */
-    MR_BD_SPECIALISED,  /**< mr_k_bd_*_<L>: register vectors, L <= 32.        */
+    MR_BD_SPECIALIZED,  /**< mr_k_bd_*_<L>: register vectors, L <= 32.        */
     MR_BD_TILED         /**< mr_k_bdt_*: threadgroup tiles, any larger L.     */
 };
 
@@ -82,7 +82,7 @@ struct mr_aha_plan_s {
                                        NULL when `n_coils % group == 0`.      */
     MTL::Buffer        *pad;      /**< Padded grids `[Mx,My,Mz,L,group]`.      */
     MTL::Buffer        *compact;  /**< `[num_masked,L,group]`; masked with the
-                                       specialised or generic kernels only.  */
+                                       specialized or generic kernels only.  */
     MTL::ComputePipelineState *k_pad;     /**< mr_k_pad_mul_se.               */
     MTL::ComputePipelineState *k_crop;    /**< mr_k_crop_mul_conj_se.         */
     MTL::ComputePipelineState *k_bd;      /**< Dense or masked block-diagonal. */
@@ -106,7 +106,7 @@ struct mr_aha_plan_s {
 /** @brief Release everything a (possibly half-built) plan holds. */
 static void mr_plan_free(mr_aha_plan p)
 {
-    /* Every member is NULL until created (value-initialised struct), so this
+    /* Every member is NULL until created (value-initialized struct), so this
      * serves both mr_aha_plan_destroy and the failure paths of
      * mr_aha_plan_create. Pipelines belong to the process-wide cache and are
      * not released. */
@@ -268,7 +268,7 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
     rc = mr_metal_context(&ctx);
     if (rc != MR_SUCCESS) return rc;
 
-    /* The plan struct, value-initialised so that mr_plan_free can clean up
+    /* The plan struct, value-initialized so that mr_plan_free can clean up
      * after a failure at any later step. The kernel geometry (mr_dims) is
      * derived once here and passed to every kernel with setBytes. */
     mr_aha_plan p = new (std::nothrow) mr_aha_plan_s();
@@ -287,7 +287,7 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
                 p->dims.pad_size);
     }
 
-    /* Block-diagonal kernel family: specialised on L (register vectors,
+    /* Block-diagonal kernel family: specialized on L (register vectors,
      * each stored element read once, coil groups) for L <= 32, tiled
      * (threadgroup-memory panels, same guarantees) above, and the generic
      * threadgroup-memory kernels (one coil at a time) when
@@ -298,7 +298,7 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
     if (mr_env_int("MR_AHA_METAL_GENERIC_BD", 0) != 0)
         p->bd_kind = MR_BD_GENERIC;
     else if (cfg->L <= MR_METAL_BD_MAX_L && mr_env_int("MR_AHA_METAL_TILED_BD", 0) == 0)
-        p->bd_kind = MR_BD_SPECIALISED;
+        p->bd_kind = MR_BD_SPECIALIZED;
     else if (!cfg->is_masked || cfg->num_masked <= 2147483647LL)
         p->bd_kind = MR_BD_TILED;
     else
@@ -317,7 +317,7 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
                              ctx->device->recommendedMaxWorkingSetSize() / 4))
         --group;
 
-    /* Block-diagonal pipeline and launch geometry. The specialised kernels
+    /* Block-diagonal pipeline and launch geometry. The specialized kernels
      * keep their vectors in registers and need no threadgroup memory; the
      * tiled ones choose tile, coil batch and panel from the threadgroup
      * memory (mr_bdt_pick, falling back to the generic kernels when no
@@ -340,7 +340,7 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
     p->group = group;
 
     char bd_name[64] = "";
-    if (p->bd_kind == MR_BD_SPECIALISED)
+    if (p->bd_kind == MR_BD_SPECIALIZED)
         snprintf(bd_name, sizeof(bd_name), "%s%d",
                  cfg->is_masked ? "mr_k_bd_masked_" : "mr_k_bd_dense_", cfg->L);
     else if (p->bd_kind == MR_BD_GENERIC)
@@ -360,7 +360,7 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
         mr_plan_free(p);
         return rc;
     }
-    if (p->bd_kind == MR_BD_SPECIALISED) {
+    if (p->bd_kind == MR_BD_SPECIALIZED) {
         p->bd_threads = 0; /* default threadgroup size, no threadgroup memory */
         p->bd_tgmem = 0;
     } else if (p->bd_kind == MR_BD_GENERIC &&
@@ -372,7 +372,7 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
     if (cfg->verbose)
         printf("[mr_aha] plan: %s block-diagonal kernels, %d coil(s) per group\n",
                p->bd_kind == MR_BD_TILED        ? "tiled"
-               : p->bd_kind == MR_BD_SPECIALISED ? "specialised"
+               : p->bd_kind == MR_BD_SPECIALIZED ? "specialized"
                                                  : "generic",
                p->group);
 
@@ -459,7 +459,7 @@ static const char *const mr_stage_names[MR_N_STAGES] = {
  *
  * When enabled, every stage of every coil is closed into its own command
  * buffer, run to completion and timed from the command buffer's GPU
- * timestamps, which serialises the work (the totals are therefore slightly
+ * timestamps, which serializes the work (the totals are therefore slightly
  * above the normal run time). Disabled, it costs nothing.
  */
 struct mr_profile {
@@ -538,7 +538,7 @@ static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
     if ((rc = mr_stage_end(prof, 1, cb, enc)) != MR_SUCCESS) return rc;
 
     /* 3. Hermitian block-diagonal multiplication (one pass over phi2_toep
-     *    for the whole group with the specialised kernels). The generic
+     *    for the whole group with the specialized kernels). The generic
      *    kernels ignore the coil-count argument; with them the plan's group
      *    is always 1. bd_tgmem is non-zero only for the generic kernels,
      *    which take their per-thread staging area at threadgroup index 0.
@@ -637,7 +637,7 @@ static int mr_encode_group(mr_aha_plan p, MTL::CommandBuffer *&cb,
     }
     if ((rc = mr_stage_end(prof, 2, cb, enc)) != MR_SUCCESS) return rc;
 
-    /* 4. Inverse FFT back to the padded image domain (unnormalised; the
+    /* 4. Inverse FFT back to the padded image domain (unnormalized; the
      *    1/prod(M) is already folded into phi2_toep). */
     rc = mr_metal_fft_encode(fft, cb, enc, p->pad, true);
     if (rc != MR_SUCCESS) return rc;

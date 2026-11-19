@@ -39,7 +39,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
         mexErrMsgIdAndTxt(MR_ID, "Usage: mask = calc_mask_mex(traj, config).");
     if (nlhs > 1) mexErrMsgIdAndTxt(MR_ID, "Too many output arguments.");
 
-    /* Initialise the MathWorks GPU API before any mxGPU* call. */
+    /* Initialize the MathWorks GPU API before any mxGPU* call. */
     mxInitGPU();
 
     /* ---- Configuration -------------------------------------------------- */

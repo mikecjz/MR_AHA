@@ -2,14 +2,14 @@
 
 The problem has the shape of the ``2d72`` benchmark: a 320^2 image (640^2
 upsampled grid), 12 coils, L = 72, a radial trajectory of 754 spokes x 320
-samples, and the neighbour mask that :func:`mr_aha.calc_mask` derives from
+samples, and the neighbor mask that :func:`mr_aha.calc_mask` derives from
 it. The run time of the operator does not depend on the values of the
 kernel, so ``phi2_toep`` is random and no NUFFT is needed: the script runs in
 seconds on both backends.
 
 For masked and unmasked operators it times the generic block-diagonal
 kernels (``MR_AHA_<BACKEND>_GENERIC_BD=1``, the only ones above the
-specialised range before the tiled kernels) and the default choice (the
+specialized range before the tiled kernels) and the default choice (the
 tiled kernels at L > 32 on Metal, L > 30 on CUDA), reports the median of
 ``--reps`` applications after one warm-up, and checks that both families
 give the same result.

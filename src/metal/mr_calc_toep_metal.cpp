@@ -7,9 +7,9 @@
  *  1. **Type-1 NUFFT (Python, mlx-nufft).** `mr_aha.calc_toep` packs the Gram
  *     blocks into the stored triangle, broadcasts them along each readout and
  *     evaluates the point-spread function of every triangular component with
- *     mlx-nufft (sign -1, centred modes `phi2_dim`, upsampling factor 2). There
+ *     mlx-nufft (sign -1, centered modes `phi2_dim`, upsampling factor 2). There
  *     is no C/C++ NUFFT for Apple GPUs that this library could call.
- *  2. **This file, ::mr_calc_toep_from_psf.** Centred inverse FFT (VkFFT),
+ *  2. **This file, ::mr_calc_toep_from_psf.** Centered inverse FFT (VkFFT),
  *     @f$1/\prod M@f$ scaling and the optional mask gather, i.e. steps 3-4 of
  *     the CUDA ::mr_calc_toep (`src/cuda/mr_calc_toep.cu`), with the same
  *     kernels ported to `mr_kernels.metal`.
@@ -18,8 +18,8 @@
  * ::MR_ERR_UNSUPPORTED with directions.
  *
  * See `src/cuda/mr_calc_toep.cu` for why a sign -1 type-1 followed by a
- * normalised inverse FFT is exactly the multiplier ::mr_aha_plan_execute
- * needs between its unnormalised FFTs.
+ * normalized inverse FFT is exactly the multiplier ::mr_aha_plan_execute
+ * needs between its unnormalized FFTs.
  *
  * @author Junzhou Chen (junzhou@chen.engineer)
  */
@@ -29,7 +29,7 @@
 /** @brief Mirror of `mr_reorder` in `mr_kernels.metal`. */
 struct mr_reorder {
     int m[3]; /**< Axis extents.                                  */
-    int s[3]; /**< Centring shifts, 0 on an untransformed axis.   */
+    int s[3]; /**< Centering shifts, 0 on an untransformed axis.   */
 };
 
 extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
@@ -64,8 +64,8 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
                 "fewer than 2^32 voxels (upsampled grid has %lld)", (long long)pad);
 
     /* Autorelease pool for the call (also required by VkFFT), shared context,
-     * and the two reorder pipelines: centred -> natural before the FFT, and
-     * natural -> centred with scaling (or the masked gather) after it. */
+     * and the two reorder pipelines: centered -> natural before the FFT, and
+     * natural -> centered with scaling (or the masked gather) after it. */
     mr_metal_pool pool;
     const mr_metal_ctx *ctx = nullptr;
     if ((rc = mr_metal_context(&ctx)) != MR_SUCCESS) return rc;
@@ -77,13 +77,13 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
                                 &k_out)) != MR_SUCCESS)
         return rc;
 
-    /* Geometry of the centred inverse FFT, as in mr_toep_geom (CUDA).
-     * 3D: one rank-3 transform per component, all three axes recentred.
+    /* Geometry of the centered inverse FFT, as in mr_toep_geom (CUDA).
+     * 3D: one rank-3 transform per component, all three axes recentered.
      * 2D / stack: rank-2 transforms over [Mx, My], one per kz plane and
      * component (batch Mz * n_comp; Mz = 1 in 2D). A stack's kz axis is
-     * already Cartesian, so it is neither transformed nor recentred (shift
+     * already Cartesian, so it is neither transformed nor recentered (shift
      * 0). The scale 1/prod(M) covers only the transformed axes and makes the
-     * unnormalised VkFFT inverse a normalised one. */
+     * unnormalized VkFFT inverse a normalized one. */
     const int Mx = cfg->phi2_dim[0], My = cfg->phi2_dim[1], Mz = cfg->phi2_dim[2];
     const bool is3d = cfg->traj_type == MR_TRAJ_3D;
     mr_reorder r = {{Mx, My, Mz}, {Mx / 2, My / 2, is3d ? Mz / 2 : 0}};
@@ -94,7 +94,7 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
         1.0f / (float)(is3d ? (double)Mx * My * Mz : (double)Mx * My);
 
     /* Caller arrays. The output view covers the whole phi2_toep. The PSF
-     * holds n_comp centred volumes of pad values; the mask view is empty
+     * holds n_comp centered volumes of pad values; the mask view is empty
      * when unmasked. Only the output is a writeback view. Views release
      * their buffers on return, so early returns need no cleanup. */
     const size_t c8 = sizeof(mr_complex);
@@ -127,11 +127,11 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
 
     /* All three steps go into one command buffer and one compute encoder;
      * VkFFT appends its kernels to the same encoder, so the order is kept
-     * without extra synchronisation (as on the single CUDA stream). */
+     * without extra synchronization (as on the single CUDA stream). */
     MTL::CommandBuffer *cb = ctx->queue->commandBuffer();
     MTL::ComputeCommandEncoder *enc = cb->computeCommandEncoder();
 
-    /* Centred -> natural order: the PSF's DC sits at floor(M/2), while the
+    /* Centered -> natural order: the PSF's DC sits at floor(M/2), while the
      * FFT expects it at index 0. 2-D grid of (pad, n_comp) threads. */
     enc->setComputePipelineState(k_nat);
     enc->setBuffer(work, 0, 0);
@@ -139,11 +139,11 @@ extern "C" int mr_calc_toep_from_psf(const mr_config *cfg,
     enc->setBytes(&r, sizeof(r), 2);
     mr_metal_dispatch_2d(enc, k_nat, (uint64_t)pad, (uint64_t)n_comp);
 
-    /* Unnormalised inverse FFT over the transformed axes. */
+    /* Unnormalized inverse FFT over the transformed axes. */
     rc = mr_metal_fft_encode(fft, cb, enc, work, true);
 
-    /* Natural -> centred order with 1/prod(M), or the mask gather. Masked:
-     * only the num_masked retained locations are read (back in centred
+    /* Natural -> centered order with 1/prod(M), or the mask gather. Masked:
+     * only the num_masked retained locations are read (back in centered
      * order) and written to columns [t0, t0 + n_comp) of the
      * [num_masked, ntri] output; the kernel takes t0 and binds the whole
      * output. Unmasked: the output buffer is bound at the byte offset of

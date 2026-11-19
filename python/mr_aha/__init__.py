@@ -59,7 +59,7 @@ Example:
     ...     y = op(x)
 """
 
-# Public, array-aware API (validation, pointer marshalling, operator object).
+# Public, array-aware API (validation, pointer marshaling, operator object).
 # Importing .api imports ._lib, which loads the shared library immediately.
 from .api import (
     DEFAULT_MASK_RADIUS,

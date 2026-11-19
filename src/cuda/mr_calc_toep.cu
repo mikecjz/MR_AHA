@@ -12,13 +12,13 @@
  * Write @f$p^{\pm}[d] = \sum_m w_m e^{\pm i k_m d}@f$ for the point-spread
  * function of the sampling pattern on the upsampled grid; a type-1 NUFFT with
  * `iflag = ±1` evaluates exactly that. Since @f$p^{-}[d] = p^{+}[-d]@f$, the
- * *normalised inverse* DFT of @f$p^{-}@f$ equals the forward DFT of
+ * *normalized inverse* DFT of @f$p^{-}@f$ equals the forward DFT of
  * @f$p^{+}@f$ divided by @f$\prod M@f$:
  * @f[
  *   \mathrm{IDFT}(p^{-})[k] \;=\; \frac{1}{\prod M}\,\mathrm{DFT}(p^{+})[k].
  * @f]
  * The right-hand side is precisely the multiplier required between the
- * unnormalised forward and inverse cuFFTs of the @f$A^H A@f$ pipeline, so the
+ * unnormalized forward and inverse cuFFTs of the @f$A^H A@f$ pipeline, so the
  * pseudo-code's "run ifft" both matches the literature convention and removes
  * every remaining scaling factor from the hot loop.
  *
@@ -43,7 +43,7 @@
 struct mr_toep_workspace {
     mr_complex     *d_tri;   /**< Packed Gram blocks `[nbatch, ntri]`.        */
     mr_complex     *d_c;     /**< cufinufft strengths for one chunk.          */
-    mr_complex     *d_fk;    /**< cufinufft output slab, centred order.       */
+    mr_complex     *d_fk;    /**< cufinufft output slab, centered order.       */
     mr_complex     *d_work;  /**< Natural-order scratch for the inverse FFT.  */
     cufinufftf_plan nufft;   /**< Type-1 plan, reused across chunks.          */
     cufftHandle     fft;     /**< Batched inverse cuFFT over one chunk.       */
@@ -52,9 +52,9 @@ struct mr_toep_workspace {
 /**
  * @brief Release every buffer held by a workspace. Safe on partial failure.
  *
- * Every member starts zeroed (the owning ::mr_toep_ctx is value-initialised),
+ * Every member starts zeroed (the owning ::mr_toep_ctx is value-initialized),
  * so a NULL / 0 member simply means "never created" and is skipped. Members
- * are reset after release, so a second call is a no-op. Does not synchronise:
+ * are reset after release, so a second call is a no-op. Does not synchronize:
  * the caller must make sure no work still reads these buffers.
  */
 static void mr_toep_workspace_free(mr_toep_workspace *w)
@@ -149,7 +149,7 @@ static int mr_toep_pick_chunk(const mr_config *cfg, int64_t pad_size,
 }
 
 /**
- * @brief Geometry of the centred inverse FFT that turns point-spread functions
+ * @brief Geometry of the centered inverse FFT that turns point-spread functions
  *        into `phi2_toep` (steps 3-4 of ::mr_calc_toep).
  */
 struct mr_toep_fft_geom {
@@ -158,7 +158,7 @@ struct mr_toep_fft_geom {
     int   dist;   /**< Elements between consecutive transforms.               */
     int   per_comp; /**< Transforms per triangular component (Nkz for a stack). */
     float scale;  /**< 1/prod(M) over the transformed axes.                   */
-    int   s[3];   /**< Centring shifts, 0 on an axis that is not transformed. */
+    int   s[3];   /**< Centering shifts, 0 on an axis that is not transformed. */
 };
 
 /**
@@ -177,7 +177,7 @@ static void mr_toep_geom(const mr_config *cfg, mr_toep_fft_geom *g)
     const int Mx = cfg->phi2_dim[0], My = cfg->phi2_dim[1], Mz = cfg->phi2_dim[2];
     if (cfg->traj_type == MR_TRAJ_3D) {
         /* One 3D transform per component over the whole upsampled volume;
-         * every axis is centred and contributes to the 1/prod(M) scaling. */
+         * every axis is centered and contributes to the 1/prod(M) scaling. */
         g->rank = 3;
         g->n[0] = Mz; g->n[1] = My; g->n[2] = Mx;
         g->dist = Mx * My * Mz;
@@ -188,7 +188,7 @@ static void mr_toep_geom(const mr_config *cfg, mr_toep_fft_geom *g)
         /* 2D / stack: one 2D transform per kz plane. The Mz planes of a
          * component are contiguous `[Mx, My]` slabs `Mx*My` apart, so they
          * form Mz consecutive batch entries of cufftPlanMany. Mz == 1 in 2D.
-         * kz stays in centred order (s[2] = 0) and is not part of the
+         * kz stays in centered order (s[2] = 0) and is not part of the
          * scaling. */
         g->rank = 2;
         g->n[0] = My; g->n[1] = Mx; g->n[2] = 1;
@@ -231,11 +231,11 @@ struct mr_toep_ctx {
 };
 
 /**
- * @brief Free a context's resources without synchronising (error paths).
+ * @brief Free a context's resources without synchronizing (error paths).
  *
  * Used directly by the failure paths of ::mr_toep_ctx_create, where at most
  * the Gram-packing kernel can be in flight, and by ::mr_toep_ctx_destroy after
- * it has synchronised. Events are created lazily by ::mr_toep_ctx_run, so
+ * it has synchronized. Events are created lazily by ::mr_toep_ctx_run, so
  * they may legitimately be NULL here.
  */
 static void mr_toep_ctx_release(mr_toep_ctx *c)
@@ -251,7 +251,7 @@ int mr_toep_ctx_create(const mr_config *cfg, const mr_complex *d_phi2,
                        int64_t max_chunk, mr_toep_ctx **ctx_out)
 {
     /* -- 0. Host-side state -------------------------------------------------- */
-    /* `new T()` value-initialises the aggregate, so every pointer / handle in
+    /* `new T()` value-initializes the aggregate, so every pointer / handle in
      * the workspace and both events start NULL / 0; mr_toep_ctx_release
      * relies on that to free only what was created. The configuration is
      * copied so the context does not depend on the caller's struct. */
@@ -326,7 +326,7 @@ int mr_toep_ctx_create(const mr_config *cfg, const mr_complex *d_phi2,
 
     /* -- 2. Size the chunking against the free device memory ---------------- */
     /* A chunk is the number of triangular components pushed through one
-     * cufinufft execute + one batched cuFFT. Larger chunks amortise launch
+     * cufinufft execute + one batched cuFFT. Larger chunks amortize launch
      * and spreading overheads; the budget keeps the transient slabs inside
      * mem_fraction of what is free now. nufft_budget is the half of the
      * budget left for cufinufft's internal fine grids (used in step 3). */
@@ -353,7 +353,7 @@ int mr_toep_ctx_create(const mr_config *cfg, const mr_complex *d_phi2,
      * last one is zero-padded by mr_k_fill_strengths), so these buffers and
      * both plans are sized once and reused:
      *  - d_c:    `[M_nu, Nkz_eff, chunk]` strengths = ntr transforms of M_nu;
-     *  - d_fk:   `[Mx, My, Mz, chunk]` cufinufft output, centred order;
+     *  - d_fk:   `[Mx, My, Mz, chunk]` cufinufft output, centered order;
      *  - d_work: same shape, natural order, transformed in place by cuFFT.
      * For a stack, the ntr = Nkz_eff*chunk 2D transforms of `[Mx, My]` modes
      * are laid out kz-major within a component, i.e. exactly `[Mx, My, Mz]`
@@ -378,15 +378,15 @@ int mr_toep_ctx_create(const mr_config *cfg, const mr_complex *d_phi2,
 
     /* -- 3. Plan the type-1 NUFFT once and reuse it for every chunk --------- */
     /* The plan evaluates, for each of the ntr transforms of a chunk,
-     *   fk[k] = sum_m c[m] exp(-i k.x_m),   k in the centred phi2_dim grid,
+     *   fk[k] = sum_m c[m] exp(-i k.x_m),   k in the centered phi2_dim grid,
      * i.e. the point-spread function of the sampling weighted by one Gram
      * component (sign -1, see the file comment for why). upsampfac 2.0 is
      * cufinufft's standard accuracy/size trade-off; the plan runs on our
-     * stream so all steps of a chunk serialise without host syncs. */
+     * stream so all steps of a chunk serialize without host syncs. */
     cufinufft_opts opts;
     cufinufft_default_opts(&opts);
     opts.upsampfac = 2.0;
-    opts.modeord   = 0; /* CMCL / centred mode order, matching our convention */
+    opts.modeord   = 0; /* CMCL / centered mode order, matching our convention */
     opts.gpu_stream = cfg->stream;
     opts.gpu_device_id = dev;
     opts.debug = cfg->verbose ? 1 : 0;
@@ -463,7 +463,7 @@ int mr_toep_ctx_create(const mr_config *cfg, const mr_complex *d_phi2,
         }
     }
 
-    /* -- 4. Plan the centred inverse FFT over one chunk --------------------- */
+    /* -- 4. Plan the centered inverse FFT over one chunk --------------------- */
     /* Contiguous batched C2C (stride 1, dist = one transform's volume) over
      * per_comp * chunk transforms, executed in place on d_work. The plan is
      * bound to the context's stream; with the legacy default stream (s ==
@@ -558,7 +558,7 @@ int mr_toep_ctx_run(mr_toep_ctx *ctx, const int64_t *d_mask, int64_t t_begin,
         /* 5b. Type-1 NUFFT: the point-spread function on the upsampled grid.
          *     All ntr transforms of the chunk in one call (cufinufft splits
          *     them into gpu_maxbatchsize batches internally); output d_fk is
-         *     in centred (CMCL) mode order. */
+         *     in centered (CMCL) mode order. */
         {
             const int err = cufinufftf_execute(w.nufft, w.d_c, w.d_fk);
             if (err != 0)
@@ -566,8 +566,8 @@ int mr_toep_ctx_run(mr_toep_ctx *ctx, const int64_t *d_mask, int64_t t_begin,
                         err);
         }
 
-        /* 5c. Centred inverse FFT: shift to natural order, transform, then
-         *     shift back while applying the 1/prod(M) normalisation.
+        /* 5c. Centered inverse FFT: shift to natural order, transform, then
+         *     shift back while applying the 1/prod(M) normalization.
          *     The shift into d_work (out of place) is a pure index remap with
          *     the per-axis offsets g.s (0 on kz for a stack); the cuFFT then
          *     runs in place on d_work. The shift back and the scaling are
@@ -592,7 +592,7 @@ int mr_toep_ctx_run(mr_toep_ctx *ctx, const int64_t *d_mask, int64_t t_begin,
          *     from d_work, so the zero-padded tail of the last chunk is
          *     dropped here. */
         if (cfg->is_masked) {
-            /* Masked: gather num_masked centred locations per component into
+            /* Masked: gather num_masked centered locations per component into
              * column (t - t_out0) of the `[num_masked, ...]` output. One
              * thread per (location, component). */
             const long long total = (long long)cfg->num_masked * valid;
@@ -605,7 +605,7 @@ int mr_toep_ctx_run(mr_toep_ctx *ctx, const int64_t *d_mask, int64_t t_begin,
                         "mr_k_gather_masked_scale failed to launch: %s",
                         cudaGetErrorString(cudaGetLastError()));
         } else {
-            /* Unmasked: whole `[Mx, My, Mz]` volumes back to centred order,
+            /* Unmasked: whole `[Mx, My, Mz]` volumes back to centered order,
              * written at slab offset pad_size * (t0 - t_out0). */
             const long long total = pad_size * valid;
             const int grid = (int)mr_ceil_div(total, MR_BLOCK);
@@ -646,7 +646,7 @@ int mr_toep_ctx_run(mr_toep_ctx *ctx, const int64_t *d_mask, int64_t t_begin,
 int mr_toep_ctx_destroy(mr_toep_ctx *ctx)
 {
     if (ctx == NULL) return MR_SUCCESS;
-    /* Synchronise before freeing the scratch the asynchronous work reads.
+    /* Synchronize before freeing the scratch the asynchronous work reads.
      * With the legacy default stream (NULL) the whole device is synced. The
      * context is released even if the sync failed (its error is reported
      * afterwards), so destroy never leaks. */
@@ -655,7 +655,7 @@ int mr_toep_ctx_destroy(mr_toep_ctx *ctx)
     mr_toep_ctx_release(ctx);
     if (ce != cudaSuccess) {
         cudaGetLastError();
-        MR_FAIL(MR_ERR_CUDA, "synchronisation after calc_toep failed: %s",
+        MR_FAIL(MR_ERR_CUDA, "synchronization after calc_toep failed: %s",
                 cudaGetErrorString(ce));
     }
     return MR_SUCCESS;
@@ -734,7 +734,7 @@ extern "C" int mr_calc_toep(const mr_config *cfg, const mr_complex *d_phi2,
  * all @p n_comp components at once (the caller bounds memory through
  * @p n_comp). Not
  * reusable: scratch and plan are created and destroyed per call, and the call
- * synchronises the stream before returning.
+ * synchronizes the stream before returning.
  */
 static int mr_calc_toep_from_psf_impl(const mr_config *cfg,
                                       const mr_complex *d_psf, int64_t t0,
@@ -773,20 +773,20 @@ static int mr_calc_toep_from_psf_impl(const mr_config *cfg,
      * later steps are skipped, and the shared tail below always syncs and
      * frees the scratch and plan. */
     int rc = MR_SUCCESS;
-    /* Centred -> natural order (5c of mr_toep_ctx_run). */
+    /* Centered -> natural order (5c of mr_toep_ctx_run). */
     mr_k_to_natural<<<(int)mr_ceil_div(slab, MR_BLOCK), MR_BLOCK, 0, s>>>(
         d_work, d_psf, Mx, My, Mz, g.s[0], g.s[1], g.s[2], n_comp);
     if (cudaGetLastError() != cudaSuccess) {
         rc = MR_ERR_CUDA;
         mr_set_error("mr_k_to_natural failed to launch in mr_calc_toep_from_psf");
     }
-    /* Unnormalised inverse FFT, in place. */
+    /* Unnormalized inverse FFT, in place. */
     if (rc == MR_SUCCESS &&
         cufftExecC2C(fft, d_work, d_work, CUFFT_INVERSE) != CUFFT_SUCCESS) {
         rc = MR_ERR_CUFFT;
         mr_set_error("cufftExecC2C failed in mr_calc_toep_from_psf");
     }
-    /* Natural -> centred order with the 1/prod(M) scaling, written to
+    /* Natural -> centered order with the 1/prod(M) scaling, written to
      * components [t0, t0 + n_comp) of the WHOLE output (masked: columns of
      * `[num_masked, ntri]`; unmasked: slabs at offset pad_size * t0). Other
      * components of d_phi2_toep are left untouched. */
@@ -815,7 +815,7 @@ static int mr_calc_toep_from_psf_impl(const mr_config *cfg,
         (s != NULL) ? cudaStreamSynchronize(s) : cudaDeviceSynchronize();
     if (rc == MR_SUCCESS && ce != cudaSuccess) {
         rc = MR_ERR_CUDA;
-        mr_set_error("synchronisation failed in mr_calc_toep_from_psf: %s",
+        mr_set_error("synchronization failed in mr_calc_toep_from_psf: %s",
                      cudaGetErrorString(ce));
     }
     cufftDestroy(fft);

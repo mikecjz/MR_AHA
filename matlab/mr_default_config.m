@@ -19,7 +19,7 @@ function config = mr_default_config(traj_type, n_dim, L, varargin)
 %     'n_coils'        left empty by default and inferred from size(SEs).
 %     'eps'            NUFFT tolerance for CALC_TOEP, MR_AHA (both
 %                      methods) and AHA_CUFINUFFT, default 1e-6.
-%     'mask_radius'    neighbourhood radius of CALC_MASK in upsampled grid
+%     'mask_radius'    neighborhood radius of CALC_MASK in upsampled grid
 %                      cells (locations within this many cells of a sample
 %                      are kept), default 2.
 %     'mem_fraction'   share of free GPU memory CALC_TOEP and MR_AHA may

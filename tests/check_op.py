@@ -4,7 +4,7 @@ The operator is built from the Gram blocks, the trajectory and the maps, with
 either method, on one GPU or several. This script checks it against the
 stateless primitives and the independent reference, on random inputs for 2D,
 stack and 3D problems (odd sizes, coil counts that do and do not divide the
-number of GPUs, a rank above the specialised block-diagonal kernels' limit):
+number of GPUs, a rank above the specialized block-diagonal kernels' limit):
 
 **One GPU** (always run):
 
@@ -74,10 +74,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 import mr_aha  # noqa: E402
 
 # Test problems. They cover the three trajectory families and deliberately
-# awkward cases: odd image sizes (the centring remap must be exact for odd
+# awkward cases: odd image sizes (the centering remap must be exact for odd
 # dimensions), coil counts 2..5 (some do not divide the GPU count, which
 # exercises the multi-GPU remainder handling), and L = 33 > 30, above the limit
-# of the L-specialised CUDA block-diagonal kernels, so the generic kernels run.
+# of the L-specialized CUDA block-diagonal kernels, so the generic kernels run.
 #: name -> (traj_type, n_dim, L, n_coils, Ntrajs, Nkx)
 PROBLEMS = {
     "2d": ("2D", (40, 36), 5, 3, 60, 48),
@@ -113,7 +113,7 @@ def free_bytes(devices) -> list:
     # would hide (or fake) changes in the library's own allocations.
     cp.get_default_memory_pool().free_all_blocks()
     out = []
-    # Synchronise each device so asynchronous frees have completed before
+    # Synchronize each device so asynchronous frees have completed before
     # querying cudaMemGetInfo.
     for d in devices:
         with cp.cuda.Device(d):
@@ -161,7 +161,7 @@ def synthetic(name: str, rng):
         phi2 = phi2[:, :, 0, :]
     # Image-space arrays in row-major order: x is (L, [Nz,] Ny, Nx) and the
     # maps are (Ncoils, [Nz,] Ny, Nx), i.e. column-major [Nx, Ny, (Nz,) L|C].
-    # Both are random complex; the maps need not be normalised for these
+    # Both are random complex; the maps need not be normalized for these
     # operator-consistency checks.
     img = tuple(reversed(n))
     x = rng.standard_normal((L,) + img) + 1j * rng.standard_normal((L,) + img)

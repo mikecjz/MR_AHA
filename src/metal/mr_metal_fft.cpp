@@ -92,7 +92,7 @@ int mr_metal_fft_create(const mr_metal_ctx *ctx, int rank, const int dims[3],
     cfg.device = ctx->device;
     cfg.queue = ctx->queue;
     cfg.bufferSize = &f->bytes;     /* VkFFT keeps this pointer. */
-    cfg.normalize = 0;              /* unnormalised inverse, like cuFFT */
+    cfg.normalize = 0;              /* unnormalized inverse, like cuFFT */
     cfg.coalescedMemory = 32;
 
     /* Plan creation: VkFFT generates the Metal kernels for both directions

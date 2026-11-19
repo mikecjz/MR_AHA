@@ -2,7 +2,7 @@
 
 Transparent, self-contained SVGs for composing banners. Each file holds one named group
 (`<g id="...">`) and no background, so it drops onto either mode. Light and dark versions
-carry the colours of that mode.
+carry the colors of that mode.
 
 | Element | Intrinsic size (px) | Used in |
 |---|---|---|
@@ -20,9 +20,9 @@ Notes:
   and square files use a `0 0` local origin. The assembled banner SVGs are the canonical
   arrangements and already have every element in a named group — copy a group from there
   when you need an exact placement rather than re-measuring a cropped element.
-* `caption-*.svg` is left-aligned at 23/20 with a 35 px baseline gap. C centres each line
+* `caption-*.svg` is left-aligned at 23/20 with a 35 px baseline gap. C centers each line
   separately; the positions are in the table below.
-* `toeplitz-field-*.svg` is the band field only. Banner B places a background-coloured
+* `toeplitz-field-*.svg` is the band field only. Banner B places a background-colored
   `channel` rectangle over it before the wordmark.
 
 ## Layout reference (1600 × 400 canvas)
@@ -57,11 +57,11 @@ system.
 | Layer | Placement |
 |---|---|
 | matrix-214 | top-left (84, 93) |
-| toeplitz-square | top-left (1063, 93), 214 × 214 (centre 1170, 200) |
+| toeplitz-square | top-left (1063, 93), 214 × 214 (center 1170, 200) |
 | wordmark | call origin (469.5, 210), size 108 |
-| caption | line 1 call x = 392.8, line 2 call x = 485.6, baselines 274 / 309; both centred on x = 680.5 |
+| caption | line 1 call x = 392.8, line 2 call x = 485.6, baselines 274 / 309; both centered on x = 680.5 |
 | rule | x = 1330, y = 86 → 312 |
 | backends | right edge 1560, top 96 |
 
-The rules are 1 px lines in the theme rule colour; they are the only layer without a
-separate element file. The B channel is likewise a simple background-coloured rectangle.
+The rules are 1 px lines in the theme rule color; they are the only layer without a
+separate element file. The B channel is likewise a simple background-colored rectangle.

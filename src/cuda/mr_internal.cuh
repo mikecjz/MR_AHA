@@ -76,8 +76,8 @@
  * (bad grid size, too much shared memory, missing image for the GPU
  * architecture) are only recorded as the runtime's (non-sticky) "last error".
  * MR_KERNEL_CHECK reads and clears it right after a launch. It does not
- * synchronise, so faults that happen *while* the kernel runs surface later,
- * at the next synchronising call on that stream.
+ * synchronize, so faults that happen *while* the kernel runs surface later,
+ * at the next synchronizing call on that stream.
  */
 /** @brief Check for a pending asynchronous kernel-launch error. */
 #define MR_KERNEL_CHECK(name)                                                  \
@@ -91,7 +91,7 @@
 /*
  * Index conventions used by the helpers below
  * -------------------------------------------
- * The public arrays (`phi2_toep`, masks, images) are stored in *centred*
+ * The public arrays (`phi2_toep`, masks, images) are stored in *centered*
  * order: index k of an axis of extent M stands for the signed coordinate
  * k - floor(M/2), so the DC term sits in the middle. cuFFT works in *natural*
  * (FFT) order, where index j stands for coordinate j for j < M - floor(M/2)
@@ -106,12 +106,12 @@
 /* ------------------------------------------------------------------------ */
 
 /**
- * @brief Map a centred index to the corresponding natural (FFT-order) index.
+ * @brief Map a centered index to the corresponding natural (FFT-order) index.
  *
- * A centred index @p k in `[0, M)` denotes frequency/position `k - floor(M/2)`;
+ * A centered index @p k in `[0, M)` denotes frequency/position `k - floor(M/2)`;
  * the natural index of that frequency is `(k - floor(M/2)) mod M`.
  *
- * @param[in] k Centred index.
+ * @param[in] k Centered index.
  * @param[in] M Extent of the axis.
  * @param[in] c `floor(M/2)`, pre-computed by the host.
  * @return Natural index in `[0, M)`.
@@ -125,11 +125,11 @@ __host__ __device__ __forceinline__ int mr_cent2nat(int k, int M, int c)
 }
 
 /**
- * @brief Map a natural (FFT-order) index to the corresponding centred index.
+ * @brief Map a natural (FFT-order) index to the corresponding centered index.
  * @param[in] j Natural index.
  * @param[in] M Extent of the axis.
  * @param[in] c `floor(M/2)`, pre-computed by the host.
- * @return Centred index in `[0, M)`.
+ * @return Centered index in `[0, M)`.
  */
 __host__ __device__ __forceinline__ int mr_nat2cent(int j, int M, int c)
 {
@@ -235,7 +235,7 @@ int mr_calc_toep_impl(const mr_config *cfg, const mr_complex *d_phi2,
  * @brief Opaque per-device state of the Toeplitz pre-computation.
  *
  * ::mr_calc_toep evaluates the @f$(L^2+L)/2@f$ packed triangular components
- * of `phi2_toep` independently of one another (one type-1 NUFFT, one centred
+ * of `phi2_toep` independently of one another (one type-1 NUFFT, one centered
  * inverse FFT and one scaling each). A context holds everything that does not
  * depend on *which* components are evaluated (packed Gram blocks, chunk
  * buffers, cufinufft and cuFFT plans), so that ::mr_toep_ctx_run can evaluate
@@ -326,7 +326,7 @@ int mr_toep_ctx_run(mr_toep_ctx *ctx, const int64_t *d_mask, int64_t t_begin,
 /**
  * @brief Wait for the context's stream, then free everything it holds.
  * @param[in] ctx Context, or NULL (no-op). Current device: its device.
- * @return ::MR_SUCCESS, or ::MR_ERR_CUDA when the synchronisation reported
+ * @return ::MR_SUCCESS, or ::MR_ERR_CUDA when the synchronization reported
  *         an error (the context is freed regardless).
  */
 int mr_toep_ctx_destroy(mr_toep_ctx *ctx);
@@ -403,7 +403,7 @@ struct mr_toep_dist_report {
  * thread per device; the caller's thread only waits.
  *
  * @param[in]  cfg     Validated configuration. ::mr_config::stream (primary
- *                     device) is synchronised first, so inputs produced on it
+ *                     device) is synchronized first, so inputs produced on it
  *                     are complete.
  * @param[in]  devs    Devices; `devs[0]` is the primary, which holds the
  *                     inputs, and must be a receiver. No duplicates.
