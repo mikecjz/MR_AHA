@@ -90,7 +90,7 @@ function check_reference_matlab(ref_dir)
                 z.(['AhAx_' t])), tol_aha}; %#ok<AGROW>
             delete(op);
             % Masked variants: the stored keys carry the suffix 'neighbour'
-            % (the neighbourhood mask of CALC_MASK).
+            % (the neighborhood mask of CALC_MASK).
             % Masked kernel, recomputed kernel and operator object; the
             % recomputed masked kernel is judged through its AhAx only.
             cfgm = cfg; cfgm.is_masked = true;
@@ -165,7 +165,7 @@ end
 
 function d = setdiff_frac(a, b)
 %SETDIFF_FRAC  Share of indices in exactly one of two index sets.
-    % Normalised by the size of the reference set b.
+    % Normalized by the size of the reference set b.
     d = numel(setxor(double(a(:)), double(b(:)))) / max(numel(b), 1);
 end
 

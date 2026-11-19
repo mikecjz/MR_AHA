@@ -15,7 +15,7 @@ non-uniform sample, as a row vector from the right (MATLAB
 ``reshape(k, [], L) * Phi2``), by the Gram block
 :math:`\\Phi_2 = \\Phi\\Phi^H` of its readout, :math:`\\Phi` being the
 rank x time temporal basis (see :mod:`mr_aha.api`). Both
-NUFFTs are unnormalised, which is precisely the convention the Toeplitz kernel
+NUFFTs are unnormalized, which is precisely the convention the Toeplitz kernel
 of :func:`mr_aha.calc_toep` reproduces, so ``aha_nufft_plan.apply`` and the
 operator of :func:`mr_aha.create_op` (either method) agree to within the
 NUFFT tolerance.
@@ -36,13 +36,13 @@ benchmarks. The engine follows the loaded backend (:func:`mr_aha.backend`):
   type-1 step is one batched call.
 
 For a stack-of-stars trajectory, kz is Cartesian: the image is first Fourier
-transformed along z (centred, unnormalised), every kz plane then goes through
+transformed along z (centered, unnormalized), every kz plane then goes through
 the same 2D NUFFT pair, and the Gram block depends on both the readout and
-the kz encode. The z transform pair is unnormalised in both directions, again
+the kz encode. The z transform pair is unnormalized in both directions, again
 matching the Toeplitz implementation.
 
-The centring of the z transform costs no data movement. With
-:math:`c = \\lfloor N_z/2 \\rfloor`, the centred DFT is
+The centering of the z transform costs no data movement. With
+:math:`c = \\lfloor N_z/2 \\rfloor`, the centered DFT is
 
 .. math::
 
@@ -164,14 +164,14 @@ class _MlxNufft:
         coords = tuple(np.ascontiguousarray(traj[d].ravel(), dtype=np.float64)
                        for d in reversed(range(ndim_traj)))
         # --- NUFFT plans: type-2 forward (sign -1) and type-1 adjoint
-        #     (sign +1) over the same points, centred modes, sigma = 2. ---
+        #     (sign +1) over the same points, centered modes, sigma = 2. ---
         tol = max(float(eps), 1e-6)  # mlx-nufft's fp32 floor
         self._t2 = Type2PlanND(coords, self._modes, eps=tol, isign=-1,
                                upsampfac=2.0)
         self._t1 = Type1PlanND(coords, self._modes, eps=tol, isign=+1,
                                upsampfac=2.0)
         # --- Stack only: image-domain modulation exp(2 pi i c n / Nz),
-        #     c = Nz // 2, that turns the plain z FFT into the centred one
+        #     c = Nz // 2, that turns the plain z FFT into the centered one
         #     (see the module docstring); shaped (Nz, 1, 1) to broadcast over
         #     a (Nz, Ny, Nx) map. ---
         self._zmod = None
@@ -222,7 +222,7 @@ class _MlxNufft:
             se = SEs[c] * self._zmod if stack else SEs[c]
             im = x * se
             if stack:
-                im = mx.fft.fft(im, axis=1)          # unnormalised, centred via zmod
+                im = mx.fft.fft(im, axis=1)          # unnormalized, centered via zmod
             im = im.reshape((self._ntr,) + self._modes)
             # Type-2, one vector per call.
             k = mx.stack([self._t2.execute(im[i], return_np=False)
@@ -243,13 +243,13 @@ class _MlxNufft:
             del k, kk
             im = im.reshape((L,) + img)
             if stack:
-                # Unnormalised inverse along z (MLX's ifft divides by Nz).
+                # Unnormalized inverse along z (MLX's ifft divides by Nz).
                 im = mx.fft.ifft(im, axis=1) * float(self._Nz)
             # Adjoint coil map (and z demodulation), accumulated; evaluating
             # here keeps the lazy graph from growing across coils.
             acc = acc + im * mx.conj(se)
             mx.eval(acc)
-        # --- Back to NumPy; honour a caller-supplied output buffer. ---
+        # --- Back to NumPy; honor a caller-supplied output buffer. ---
         res = np.array(acc)
         if out is not None:
             out.reshape(res.shape)[...] = res
@@ -308,7 +308,7 @@ class aha_nufft_plan:  # noqa: N801  (same name as the MATLAB class)
         type2_opts: Same for the type-2 (forward) plan.
         **nufft_opts: Extra cufinufft options forwarded to both plans, e.g.
             ``gpu_method=2`` or ``upsampfac=1.25`` (default 2). ``modeord``
-            is always 0 (centred modes).
+            is always 0 (centered modes).
 
     On the Metal backend the constructor delegates everything to
     :class:`_MlxNufft` (``type1_opts``, ``type2_opts`` and ``nufft_opts``
@@ -375,7 +375,7 @@ class aha_nufft_plan:  # noqa: N801  (same name as the MATLAB class)
         #     default, **nufft_opts, type{1,2}_opts; modeord is forced to 0
         #     last, whatever the caller passed. ---
         tol = float(cfg.eps if eps is None else eps)
-        # Centred (CMCL) mode order, like the library; upsampfac pinned to 2 so
+        # Centered (CMCL) mode order, like the library; upsampfac pinned to 2 so
         # that the MATLAB and Python references run the same transform.
         opts = dict(upsampfac=2.0)
         opts.update(nufft_opts)
@@ -395,7 +395,7 @@ class aha_nufft_plan:  # noqa: N801  (same name as the MATLAB class)
         self._pts = pts
 
         # Stack: image-domain modulation that turns the plain z FFT into the
-        # centred one (see the module docstring), shaped to broadcast over a
+        # centered one (see the module docstring), shaped to broadcast over a
         # (Nz, Ny, Nx) coil map.
         self._zmod = None
         if self._tt == TrajType.STACK:
@@ -444,7 +444,7 @@ class aha_nufft_plan:  # noqa: N801  (same name as the MATLAB class)
         ``k[i, kx] <- sum_j k[j, kx] Phi2_t[j, i]`` (row-major
         ``phi2[i, j, ...]`` is ``Phi2_t[j, i]``), with a single
         :func:`cupy.einsum`, which CuPy maps onto a batched GEMM without
-        materialising any broadcast intermediate. On the 3D test case this was
+        materializing any broadcast intermediate. On the 3D test case this was
         about 1.5x faster than an explicit transpose + :func:`cupy.matmul`
         and 8x faster than a broadcast-and-accumulate loop.
 
@@ -495,7 +495,7 @@ class aha_nufft_plan:  # noqa: N801  (same name as the MATLAB class)
         # --- Metal delegate. ---
         if self._impl is not None:
             return self._impl.apply(x, SEs, phi2, out=out)
-        # --- Normalise the inputs to explicit shapes (views, no copies);
+        # --- Normalize the inputs to explicit shapes (views, no copies);
         #     the coil count is inferred from SEs.size. ---
         cupy, _ = _modules()
         L = self._L
@@ -518,11 +518,11 @@ class aha_nufft_plan:  # noqa: N801  (same name as the MATLAB class)
         is_stack = self._tt == TrajType.STACK
         for c in range(nc):
             # 1. Coil sensitivity, broadcast over the ranks. For a stack it
-            #    carries the z modulation that centres the z FFT.
+            #    carries the z modulation that centers the z FFT.
             se = SEs[c] * self._zmod if is_stack else SEs[c]
             im = x * se
 
-            # 2. Stack only: unnormalised FFT along z (centred via the
+            # 2. Stack only: unnormalized FFT along z (centered via the
             #    modulation above; the k-side phases cancel).
             if is_stack:
                 im = cupy.fft.fft(im, axis=1)
@@ -541,7 +541,7 @@ class aha_nufft_plan:  # noqa: N801  (same name as the MATLAB class)
             del k
             im = im.reshape((L,) + img)
 
-            # 6. Stack only: unnormalised inverse FFT along z (norm="forward"
+            # 6. Stack only: unnormalized inverse FFT along z (norm="forward"
             #    puts the 1/Nz on the forward transform, so ifft is unscaled).
             if is_stack:
                 im = cupy.fft.ifft(im, axis=1, norm="forward")

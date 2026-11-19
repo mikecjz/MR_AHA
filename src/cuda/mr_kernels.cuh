@@ -26,7 +26,7 @@
  * or masked via mr_k_mask_inverse's map), or the generic fallback
  * mr_k_blockdiag_dense, resp. mr_k_blockdiag_masked + memset +
  * mr_k_scatter_masked. All work on the padded [Mx, My, Mz, L] grid in natural
- * (FFT) order; only phi2_toep and the mask use centred order. */
+ * (FFT) order; only phi2_toep and the mask use centered order. */
 
 /**
  * @brief Multiply by one coil sensitivity map and scatter onto the padded grid.
@@ -37,8 +37,8 @@
  *
  * The destination is stored in **natural** (FFT) order: image index @f$x_d@f$
  * maps to padded index @f$(x_d - \lfloor N_d/2 \rfloor) \bmod M_d@f$. Folding
- * the centring shift into the scatter makes the subsequent unnormalised cuFFT
- * an exact *centred* DFT, with no phase modulation and no half-sample bias for
+ * the centering shift into the scatter makes the subsequent unnormalized cuFFT
+ * an exact *centered* DFT, with no phase modulation and no half-sample bias for
  * odd matrix sizes.
  *
  * @param[out] d_pad  Padded working buffer `[Mx, My, Mz, L]`, fully written.
@@ -78,7 +78,7 @@ __global__ void mr_k_crop_mul_conj_se(mr_complex *d_out, const mr_complex *d_pad
  * convention), @f$y = v A@f$, i.e. @f$y_i = \sum_j v_j A_{ji}@f$, with the
  * unstored half reconstructed as @f$A_{ji} = \overline{A_{ij}}@f$.
  *
- * The working buffer is in natural FFT order while `phi2_toep` is centred, so
+ * The working buffer is in natural FFT order while `phi2_toep` is centered, so
  * the kernel converts indices on the fly; this is what removes the need for any
  * explicit fftshift pass between the cuFFTs.
  *
@@ -86,7 +86,7 @@ __global__ void mr_k_crop_mul_conj_se(mr_complex *d_out, const mr_complex *d_pad
  * memory to stage each thread's input vector.
  *
  * @param[in,out] d_pad       Padded k-space `[Mx, My, Mz, L]`, natural order.
- * @param[in]     d_phi2_toep Packed blocks `[Mx, My, Mz, (L^2+L)/2]`, centred.
+ * @param[in]     d_phi2_toep Packed blocks `[Mx, My, Mz, (L^2+L)/2]`, centered.
  * @param[in]     dims        Geometry descriptor.
  */
 __global__ void mr_k_blockdiag_dense(mr_complex *d_pad,
@@ -98,14 +98,14 @@ __global__ void mr_k_blockdiag_dense(mr_complex *d_pad,
  * Gathers the rank vectors at the ::mr_config::num_masked retained locations,
  * applies the corresponding packed blocks, and writes the result to a compact
  * `[num_masked, L]` buffer. The caller then zeroes the padded grid and calls
- * ::mr_k_scatter_masked, which realises the "zero outside the mask" semantics.
+ * ::mr_k_scatter_masked, which realizes the "zero outside the mask" semantics.
  *
  * Requires `blockDim.x * L * sizeof(mr_complex)` bytes of dynamic shared memory.
  *
  * @param[out] d_compact    Result buffer `[num_masked, L]`.
  * @param[in]  d_pad        Padded k-space `[Mx, My, Mz, L]`, natural order.
  * @param[in]  d_phi2_toep  Packed blocks `[num_masked, (L^2+L)/2]`.
- * @param[in]  d_mask       0-based centred linear indices, length @p num_masked.
+ * @param[in]  d_mask       0-based centered linear indices, length @p num_masked.
  * @param[in]  num_masked   Number of retained locations.
  * @param[in]  dims         Geometry descriptor.
  */
@@ -117,15 +117,15 @@ __global__ void mr_k_blockdiag_masked(mr_complex *d_compact,
 
 /**
  * @brief Build the natural-order grid-to-mask index map used by the
- *        specialised masked block-diagonal kernels.
+ *        specialized masked block-diagonal kernels.
  *
  * Writes `d_inv[j] = i` for every mask entry `i`, where `j` is the natural
- * (FFT-order) linear index of the centred location `d_mask[i]`. The caller
+ * (FFT-order) linear index of the centered location `d_mask[i]`. The caller
  * must first fill @p d_inv with -1 (`cudaMemset` to `0xFF`), which then marks
  * the locations outside the mask.
  *
  * @param[out] d_inv      `[Mx, My, Mz]` int32 map, natural order.
- * @param[in]  d_mask     0-based centred linear indices.
+ * @param[in]  d_mask     0-based centered linear indices.
  * @param[in]  num_masked Number of retained locations (< 2^31).
  * @param[in]  dims       Geometry descriptor.
  */
@@ -136,12 +136,12 @@ __global__ void mr_k_mask_inverse(int *d_inv, const int64_t *d_mask,
  * @brief Scatter a compact `[num_masked, L]` buffer back onto the padded grid.
  *
  * The padded grid must have been zeroed beforehand; locations outside the mask
- * therefore stay zero, which is the intended behaviour of a masked Toeplitz
+ * therefore stay zero, which is the intended behavior of a masked Toeplitz
  * operator.
  *
  * @param[out] d_pad      Padded k-space `[Mx, My, Mz, L]`, natural order.
  * @param[in]  d_compact  Result buffer `[num_masked, L]`.
- * @param[in]  d_mask     0-based centred linear indices.
+ * @param[in]  d_mask     0-based centered linear indices.
  * @param[in]  num_masked Number of retained locations.
  * @param[in]  dims       Geometry descriptor.
  */
@@ -150,27 +150,27 @@ __global__ void mr_k_scatter_masked(mr_complex *d_pad, const mr_complex *d_compa
                                     mr_dims dims);
 
 /* ------------------------------------------------------------------------ */
-/* Block-diagonal kernels specialised on L (mr_kernels_bd.cu)               */
+/* Block-diagonal kernels specialized on L (mr_kernels_bd.cu)               */
 /* ------------------------------------------------------------------------ */
 
-/** @brief Threads per block of the specialised block-diagonal kernels (also
+/** @brief Threads per block of the specialized block-diagonal kernels (also
  *         their `__launch_bounds__`). */
 #define MR_BD_THREADS 256
 
-/** @brief Largest rank with a specialised block-diagonal kernel. Larger ranks
+/** @brief Largest rank with a specialized block-diagonal kernel. Larger ranks
  *         use the tiled kernels (mr_kernels_bdt.cu). Above about L = 30 one
- *         coil's vectors no longer fit the register file and the specialised
+ *         coil's vectors no longer fit the register file and the specialized
  *         kernels spill (TITAN RTX, 384^2 2D, 8 coils: L = 28 73 vs 79 ms,
- *         L = 30 88 vs 89 ms, L = 32 105 vs 102 ms, specialised vs the old
+ *         L = 30 88 vs 89 ms, L = 32 105 vs 102 ms, specialized vs the old
  *         generic kernels). */
 #define MR_BD_MAX_L 30
 
-/** @brief Largest rank whose specialised kernels process coils in pairs (see
+/** @brief Largest rank whose specialized kernels process coils in pairs (see
  *         `MR_BD_PAIR` in mr_kernels_bd.cu). */
 #define MR_BD_PAIR_MAX_L 16
 
 /**
- * @brief Range of grid locations processed by a specialised block-diagonal
+ * @brief Range of grid locations processed by a specialized block-diagonal
  *        kernel, and the layout of its data.
  *
  * The kernels process the natural-order locations `[loc0, loc0 + nloc)`;
@@ -191,12 +191,12 @@ inline mr_bd_range mr_bd_whole(const mr_dims &dims)
     return mr_bd_range{0, dims.pad_size, dims.pad_size};
 }
 
-/** @brief Signature of the specialised dense kernel `mr_k_bd_dense_t<L>`:
+/** @brief Signature of the specialized dense kernel `mr_k_bd_dense_t<L>`:
  *         `(d_pad, d_phi2_toep, dims, ncoil, range)`. */
 typedef void (*mr_bd_dense_fn)(mr_complex *, const mr_complex *, mr_dims, int,
                                mr_bd_range);
 
-/** @brief Signature of the specialised masked kernel `mr_k_bd_masked_t<L>`:
+/** @brief Signature of the specialized masked kernel `mr_k_bd_masked_t<L>`:
  *         `(d_pad, d_phi2_toep, d_inv, num_masked, dims, ncoil, range)`; it
  *         works in place on the padded grids through the index map of
  *         ::mr_k_mask_inverse. */
@@ -204,19 +204,19 @@ typedef void (*mr_bd_masked_fn)(mr_complex *, const mr_complex *, const int *,
                                 long long, mr_dims, int, mr_bd_range);
 
 /**
- * @brief The in-place block-diagonal kernels of one rank: specialised on
+ * @brief The in-place block-diagonal kernels of one rank: specialized on
  *        @f$L@f$ (`mr_kernels_bd.cu`) or tiled (`mr_kernels_bdt.cu`).
  *
  * Both families share one contract (in place on the padded grids, masked
  * mode through ::mr_k_mask_inverse's map, a group of coils per launch, a
  * location range) and are launched with ::mr_bd_launch_dense /
- * ::mr_bd_launch_masked. A zero-initialised struct means "none": the caller
+ * ::mr_bd_launch_masked. A zero-initialized struct means "none": the caller
  * falls back to the generic kernels ::mr_k_blockdiag_dense /
  * ::mr_k_blockdiag_masked. Use ::mr_bd_available to test.
  */
 struct mr_bd_kernels {
-    mr_bd_dense_fn  dense;   /**< Specialised dense kernel, or NULL.          */
-    mr_bd_masked_fn masked;  /**< Specialised masked kernel, or NULL.         */
+    mr_bd_dense_fn  dense;   /**< Specialized dense kernel, or NULL.          */
+    mr_bd_masked_fn masked;  /**< Specialized masked kernel, or NULL.         */
     int             pair;    /**< Non-zero when coils are processed in pairs. */
     int             tiled;   /**< Non-zero: use the tiled kernels instead.    */
 };
@@ -235,7 +235,7 @@ inline bool mr_bd_available(const mr_bd_kernels &k, bool masked)
 /**
  * @brief Look up the in-place block-diagonal kernels of rank @p L.
  *
- * For @f$L \le@f$ ::MR_BD_MAX_L these are the kernels specialised on
+ * For @f$L \le@f$ ::MR_BD_MAX_L these are the kernels specialized on
  * @f$L@f$ (`mr_k_bd_dense_t<L>` / `mr_k_bd_masked_t<L>`, mr_kernels_bd.cu):
  * the rank vectors live in registers, each stored element of `phi2_toep` is
  * read once per triangle walk, and one launch serves a group of `ncoil`
@@ -255,10 +255,10 @@ mr_bd_kernels mr_bd_lookup(int L);
  * @brief Launch the dense in-place kernel of @p k on the current device.
  *
  * @param[in]     k       Kernels from ::mr_bd_lookup (::mr_bd_available).
- * @param[in]     threads Threads per block of a specialised kernel (at most
+ * @param[in]     threads Threads per block of a specialized kernel (at most
  *                        ::MR_BD_THREADS); the tiled kernels choose their own.
  * @param[in,out] d_pad   `[nloc, L, ncoil]` values, see ::mr_k_bd_dense_t.
- * @param[in]     d_toep  `[Mx, My, Mz, (L^2+L)/2]`, centred order.
+ * @param[in]     d_toep  `[Mx, My, Mz, (L^2+L)/2]`, centered order.
  * @param[in]     dims    Geometry descriptor.
  * @param[in]     ncoil   Coils in the group.
  * @param[in]     rg      Location range (::mr_bd_range).
@@ -322,15 +322,15 @@ __global__ void mr_k_fill_strengths(mr_complex *d_c, const mr_complex *d_tri,
                                     long long ntri);
 
 /**
- * @brief Copy a batch of volumes from centred to natural (FFT) index order.
+ * @brief Copy a batch of volumes from centered to natural (FFT) index order.
  *
  * A per-axis shift of zero leaves that axis untouched, which is how the kz axis
  * of a stack-of-stars kernel is carried through without a transform.
  *
  * @param[out] dst    Destination `[m0, m1, m2, batch]`, natural order.
- * @param[in]  src    Source `[m0, m1, m2, batch]`, centred order.
+ * @param[in]  src    Source `[m0, m1, m2, batch]`, centered order.
  * @param[in]  m0,m1,m2 Axis extents.
- * @param[in]  s0,s1,s2 Per-axis centre offsets `floor(m/2)`, or 0 to skip.
+ * @param[in]  s0,s1,s2 Per-axis center offsets `floor(m/2)`, or 0 to skip.
  * @param[in]  batch  Number of volumes.
  */
 __global__ void mr_k_to_natural(mr_complex *dst, const mr_complex *src,
@@ -338,15 +338,15 @@ __global__ void mr_k_to_natural(mr_complex *dst, const mr_complex *src,
                                 long long batch);
 
 /**
- * @brief Copy a batch of volumes from natural to centred order, with scaling.
+ * @brief Copy a batch of volumes from natural to centered order, with scaling.
  *
- * @param[out] dst    Destination `[m0, m1, m2, batch]`, centred order.
+ * @param[out] dst    Destination `[m0, m1, m2, batch]`, centered order.
  * @param[in]  src    Source `[m0, m1, m2, batch]`, natural order.
  * @param[in]  m0,m1,m2 Axis extents.
- * @param[in]  s0,s1,s2 Per-axis centre offsets `floor(m/2)`, or 0 to skip.
+ * @param[in]  s0,s1,s2 Per-axis center offsets `floor(m/2)`, or 0 to skip.
  * @param[in]  batch  Number of volumes.
  * @param[in]  scale  Real factor applied to every element (the @f$1/\prod M@f$
- *                    of the unnormalised inverse cuFFT).
+ *                    of the unnormalized inverse cuFFT).
  */
 __global__ void mr_k_to_centered_scale(mr_complex *dst, const mr_complex *src,
                                        int m0, int m1, int m2,
@@ -356,16 +356,16 @@ __global__ void mr_k_to_centered_scale(mr_complex *dst, const mr_complex *src,
 /**
  * @brief Gather masked locations from a natural-order batch, with scaling.
  *
- * Fuses the centring shift, the inverse-FFT scaling and the mask gather into a
+ * Fuses the centering shift, the inverse-FFT scaling and the mask gather into a
  * single pass, writing directly into the `[num_masked, (L^2+L)/2]` output.
  *
  * @param[out] dst        Output `[num_masked, ntri]`; this chunk fills columns
  *                        `[t0, t0+batch)`.
  * @param[in]  src        Source `[m0, m1, m2, batch]`, natural order.
- * @param[in]  d_mask     0-based centred linear indices.
+ * @param[in]  d_mask     0-based centered linear indices.
  * @param[in]  num_masked Number of retained locations.
  * @param[in]  m0,m1,m2   Axis extents.
- * @param[in]  s0,s1,s2   Per-axis centre offsets, or 0 to skip.
+ * @param[in]  s0,s1,s2   Per-axis center offsets, or 0 to skip.
  * @param[in]  t0         First triangular component of this chunk.
  * @param[in]  batch      Number of volumes in this chunk.
  * @param[in]  scale      Real factor applied to every element.

@@ -29,8 +29,8 @@ using namespace metal;
 struct mr_dims {
     int  n[3];       /**< Image size `[Nx, Ny, Nz]`, unused entries 1.     */
     int  m[3];       /**< Upsampled size `[Mx, My, Mz]`, unused entries 1. */
-    int  c_n[3];     /**< Image centre offsets `floor(N_d/2)`.             */
-    int  c_m[3];     /**< Upsampled centre offsets `floor(M_d/2)`.         */
+    int  c_n[3];     /**< Image center offsets `floor(N_d/2)`.             */
+    int  c_m[3];     /**< Upsampled center offsets `floor(M_d/2)`.         */
     int  L;          /**< Rank.                                            */
     int  tri_upper;  /**< 1 when the upper triangle is stored, else 0.     */
     long image_size; /**< `Nx*Ny*Nz`.                                      */
@@ -62,14 +62,14 @@ static inline uint3 mr_decompose3(uint idx, uint d0, uint d1)
     return uint3(i0, idx % d1, idx / d1);
 }
 
-/** @brief Centred index -> natural (FFT-order) index, see `mr_cent2nat`. */
+/** @brief Centered index -> natural (FFT-order) index, see `mr_cent2nat`. */
 static inline int mr_cent2nat(int k, int M, int c)
 {
     const int j = k - c;
     return (j < 0) ? (j + M) : j;
 }
 
-/** @brief Natural (FFT-order) index -> centred index, see `mr_nat2cent`. */
+/** @brief Natural (FFT-order) index -> centered index, see `mr_nat2cent`. */
 static inline int mr_nat2cent(int j, int M, int c)
 {
     const int k = j + c;
@@ -122,7 +122,7 @@ static inline float2 mr_apply_block_row(threadgroup const float2 *v,
     return acc;
 }
 
-/** @brief Natural-order linear index of a centred linear mask index. */
+/** @brief Natural-order linear index of a centered linear mask index. */
 static inline ulong mr_mask_to_natural(long kidx, constant mr_dims &d)
 {
     const uint3 kc = mr_decompose3((uint)kidx, (uint)d.m[0], (uint)d.m[1]);
@@ -228,7 +228,7 @@ kernel void mr_k_blockdiag_dense(device float2         *pad  [[buffer(0)]],
     if ((long)tid >= d.pad_size) return;
     threadgroup float2 *v = sh + lid * (uint)d.L;
 
-    /* The working buffer is in natural FFT order; phi2_toep is centred. */
+    /* The working buffer is in natural FFT order; phi2_toep is centered. */
     const uint3 jc = mr_decompose3(tid, (uint)d.m[0], (uint)d.m[1]);
     const ulong k0 = (ulong)mr_nat2cent((int)jc.x, d.m[0], d.c_m[0]);
     const ulong k1 = (ulong)mr_nat2cent((int)jc.y, d.m[1], d.c_m[1]);
@@ -273,7 +273,7 @@ kernel void mr_k_blockdiag_masked(device float2       *compact    [[buffer(0)]],
 }
 
 /* ------------------------------------------------------------------------ */
-/* Block-diagonal kernels specialised on L                                  */
+/* Block-diagonal kernels specialized on L                                  */
 /* ------------------------------------------------------------------------ */
 
 /**
@@ -345,7 +345,7 @@ static inline void mr_block_apply2(thread const float2 (&v0)[L],
 
 /**
  * @brief In-place block-diagonal multiplication over the whole grid,
- *        specialised on L (host names `mr_k_bd_dense_<L>`, L = 1..32).
+ *        specialized on L (host names `mr_k_bd_dense_<L>`, L = 1..32).
  *
  * Same contract as ::mr_k_blockdiag_dense, without threadgroup memory, and
  * applied to @p ncoil coils whose `[Mx, My, Mz, L]` grids follow one another
@@ -391,7 +391,7 @@ kernel void mr_k_bd_dense(device float2       *pad   [[buffer(0)]],
 }
 
 /**
- * @brief Masked block-diagonal multiplication specialised on L (host names
+ * @brief Masked block-diagonal multiplication specialized on L (host names
  *        `mr_k_bd_masked_<L>`). Same contract as ::mr_k_blockdiag_masked,
  *        for a group of @p ncoil coils as in ::mr_k_bd_dense (`[num_masked,
  *        L]` compact slots and `[Mx, My, Mz, L]` grid slots, one per coil).
@@ -461,7 +461,7 @@ MR_BD_INSTANTIATE(29) MR_BD_INSTANTIATE(30) MR_BD_INSTANTIATE(31) MR_BD_INSTANTI
 #undef MR_BD_INSTANTIATE
 
 /* ------------------------------------------------------------------------ */
-/* Tiled block-diagonal kernels for ranks above the specialised range       */
+/* Tiled block-diagonal kernels for ranks above the specialized range       */
 /* ------------------------------------------------------------------------ */
 
 /**
@@ -487,7 +487,7 @@ static inline int mr_bdt_collen(int c, int L, int upper)
  *        (host names `mr_k_bdt_{dense,masked}_nc<NC>_opt<OPT>`).
  *
  * Port of `mr_k_bdt` in `src/cuda/mr_kernels_bdt.cu`; see that file for the
- * full derivation. The specialised kernels above keep a location's rank
+ * full derivation. The specialized kernels above keep a location's rank
  * vectors in registers and stop at L = 32; the generic ones stage one rank
  * vector per thread in threadgroup memory (few threads per threadgroup at
  * large L), fetch every off-diagonal element of `phi2_toep` twice and handle
@@ -519,7 +519,7 @@ static inline int mr_bdt_collen(int c, int L, int upper)
  * (host `mr_bdt_pick` in mr_aha_metal.cpp).
  *
  * @param pad        `[pad_size, L, ncoil]` grids, transformed in place.
- * @param toep       `[Mx, My, Mz, (L^2+L)/2]` (centred) or
+ * @param toep       `[Mx, My, Mz, (L^2+L)/2]` (centered) or
  *                   `[num_masked, (L^2+L)/2]` (masked).
  * @param inv        Masked only: grid-to-mask map (-1 outside the mask).
  * @param num_masked Masked only: number of retained locations.
@@ -554,7 +554,7 @@ kernel void mr_k_bdt(device float2       *pad        [[buffer(0)]],
     const long nloc = d.pad_size;
     const long first = (long)tg * P;
 
-    /* 0. Where each location's block lives in toep: centred grid index
+    /* 0. Where each location's block lives in toep: centered grid index
      * (dense) or mask column (masked); -1 = no work. */
     if ((int)lid < P) {
         const long i = first + (long)lid;
@@ -808,18 +808,18 @@ kernel void mr_k_zero(device float2 *p     [[buffer(0)]],
 /* ------------------------------------------------------------------------ */
 
 /**
- * @brief Extents and per-axis centring shifts of a reorder kernel.
+ * @brief Extents and per-axis centering shifts of a reorder kernel.
  *
  * A shift of 0 leaves that axis untouched, which is how the kz axis of a
  * stack-of-stars kernel is carried through without a transform.
  */
 struct mr_reorder {
     int m[3]; /**< Axis extents `[m0, m1, m2]`.                         */
-    int s[3]; /**< Centre offsets `floor(m/2)`, or 0 to skip that axis. */
+    int s[3]; /**< Center offsets `floor(m/2)`, or 0 to skip that axis. */
 };
 
 /**
- * @brief Batch of volumes from centred to natural (FFT) order.
+ * @brief Batch of volumes from centered to natural (FFT) order.
  *
  * Grid: `(m0*m1*m2, batch)`, one thread per element. Port of
  * `mr_k_to_natural`.
@@ -844,7 +844,7 @@ kernel void mr_k_to_natural(device float2       *dst [[buffer(0)]],
 }
 
 /**
- * @brief Batch of volumes from natural to centred order, scaled.
+ * @brief Batch of volumes from natural to centered order, scaled.
  *
  * Grid: `(m0*m1*m2, batch)`. Port of `mr_k_to_centered_scale`.
  */
@@ -918,7 +918,7 @@ struct mr_mark_params {
  * axis `a`, wrapped periodically; that location is set to 1 (concurrent
  * writes of the same value are benign). Same arithmetic as the CUDA
  * `mr_k_mark_samples` (`rint` rounds half to even, like `rintf`), so the
- * neighbourhood mask is bit-identical across backends.
+ * neighborhood mask is bit-identical across backends.
  */
 kernel void mr_k_mark_samples(device float             *marks [[buffer(0)]],
                               device const float       *traj  [[buffer(1)]],
@@ -939,7 +939,7 @@ kernel void mr_k_mark_samples(device float             *marks [[buffer(0)]],
 }
 
 /**
- * @brief One axis of a separable, periodic max-filter (grey-scale dilation).
+ * @brief One axis of a separable, periodic max-filter (gray-scale dilation).
  *
  * Port of `mr_k_dilate_axis`: each location receives the maximum of the
  * input up to @p r cells away along one axis, wrapping periodically.

@@ -14,7 +14,7 @@ Six wide banners for the top of the repository README: the three directions **A 
 
 ## Displaying both modes on GitHub
 
-GitHub honours `prefers-color-scheme` inside `<picture>`, so one snippet serves the right
+GitHub honors `prefers-color-scheme` inside `<picture>`, so one snippet serves the right
 cut automatically:
 
 ```html
@@ -31,7 +31,7 @@ Swap the file name for B or C.
 
 ## The directions
 
-* **A — MATRIX.** Lower-triangular Gram grid beside the lockup. The cells use a five-colour
+* **A — MATRIX.** Lower-triangular Gram grid beside the lockup. The cells use a five-color
   spectrum; hue follows the column and the shade deepens down the row, so the diagonal
   steps through all five hues. Light uses the saturated spectrum, dark uses a lifted
   variant built for the dark background.
@@ -39,8 +39,8 @@ Swap the file name for B or C.
   The channel is flush left with the same 40 px margin as the top and bottom, and the
   caption sits below on the open background. The field is a muted spectrum in both modes:
   dusty mid-tones on light, dark muted tones on dark.
-* **C — SQUARE.** The matrix and a 214 px Toeplitz-band square flank a centred lockup. The
-  square's centre band is green and lies on the square's diagonal; the outermost bands are
+* **C — SQUARE.** The matrix and a 214 px Toeplitz-band square flank a centered lockup. The
+  square's center band is green and lies on the square's diagonal; the outermost bands are
   placed so their outer edges land on the corners, making every edge band a full-height
   triangle rather than a corner sliver. The Toeplitz square uses the matrix spectrum for
   the mode.
@@ -53,7 +53,7 @@ every element inside the assembled SVGs is a named group:
 `background`, `matrix`, `wordmark`, `caption`, `toeplitz-field`, `channel`,
 `toeplitz-square`, `rule`, `backends`.
 
-You can therefore either open an assembled SVG and move/recolour whole groups, or compose
+You can therefore either open an assembled SVG and move/recolor whole groups, or compose
 new layouts from the element files. See [`elements/README.md`](elements/README.md) for the
 sizes and the layout reference (positions, scales, baselines).
 
@@ -70,7 +70,7 @@ sizes and the layout reference (positions, scales, baselines).
 | matrix spectrum | `#D36C12` → `#12D38C` → `#1299D3` → `#122CD3` → `#7312D3` | `#F18322` → `#22F1A5` → `#22B3F1` → `#223EF1` → `#8A22F1` |
 | B field | `#8A93A0`, `#A87563`, `#6E9C7C`, `#63989C`, `#6C7DA0`, `#8578A6` | `#1B2634`, `#6F4B3E`, `#3E6F53`, `#3E6A6F`, `#3E4F6F`, `#4D3E6F` |
 | C square | matrix light base row | matrix dark base row |
-| green centre band | `#12D38C` | `#22F1A5` |
+| green center band | `#12D38C` | `#22F1A5` |
 
 The right-hand block reads **BACKENDS** — CUDA, Apple Silicon; **LANGUAGES SUPPORT** —
 MATLAB · Python, C / C++.

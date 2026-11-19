@@ -48,7 +48,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     if (nlhs > 1)
         mexErrMsgIdAndTxt(MR_ID, "Too many output arguments.");
 
-    /* Initialise the MathWorks GPU API before any mxGPU* call. */
+    /* Initialize the MathWorks GPU API before any mxGPU* call. */
     mxInitGPU();
 
     /* ---- Configuration -------------------------------------------------- */
@@ -100,7 +100,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
 
     /* ---- Output ------------------------------------------------------- */
     /* Allocate phi2_toep as [Mx, My, (Mz,) (L^2+L)/2], or [num_masked,
-     * (L^2+L)/2] when masked. Uninitialised: the library writes every entry. */
+     * (L^2+L)/2] when masked. Uninitialized: the library writes every entry. */
     mwSize dims_out[4];
     const mwSize nd_out = mr_mex_toep_dims(&cfg, dims_out);
     mxGPUArray *g_out = mxGPUCreateGPUArray(nd_out, dims_out, mxSINGLE_CLASS,
@@ -109,7 +109,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     /* ---- Run ------------------------------------------------------------ */
     /* Extract raw device pointers and run the pre-computation: pack the
      * triangle of each Gram block, type-1 NUFFT onto the upsampled grid, then
-     * centred inverse FFT (and the optional mask gather). */
+     * centered inverse FFT (and the optional mask gather). */
     const mr_complex *p_phi2 = (const mr_complex *)mxGPUGetDataReadOnly(g_phi2);
     const float      *p_traj = (const float *)mxGPUGetDataReadOnly(g_traj);
     const int64_t    *p_mask =

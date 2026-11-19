@@ -160,7 +160,7 @@ static void mr_mex_string(const mxArray *s, const char *name, char *buf,
 /**
  * @brief Translate the MATLAB `config` struct into an ::mr_config.
  *
- * Recognised fields (see the repository documentation for the full contract):
+ * Recognized fields (see the repository documentation for the full contract):
  * `traj_type`, `n_dim`, `L`, `triangulation`, `phi2_dim`, `is_masked`, and the
  * optional `num_masked`, `n_coils`, `eps`, `mem_fraction`, `gpu_device_id`,
  * `verbose` and `mask_radius`.

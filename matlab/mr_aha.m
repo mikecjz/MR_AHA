@@ -60,7 +60,7 @@ classdef mr_aha < handle
 %     phi2    complex single Gram blocks Phi*Phi' (convention: see
 %             CALC_TOEP):
 %               [Ntrajs, L, L]          for '2D' and '3D'
-%               [Ntrajs, Nkz, L, L]     for 'stack' (centred kz order)
+%               [Ntrajs, Nkz, L, L]     for 'stack' (centered kz order)
 %     traj    real single trajectory [Ntrajs, Nkx, ndim] in radians, as for
 %             CALC_TOEP (ndim = 2 for '2D'/'stack', 3 for '3D').
 %     config  struct from MR_DEFAULT_CONFIG, as for AHA_TOEPLITZ and
@@ -93,7 +93,7 @@ classdef mr_aha < handle
 %                      operator to change this, 0 disables the check). INFO
 %                      reports the choice.
 %     'mask'           'toeplitz' with config.is_masked only: 1-based linear
-%                      indices into the centred upsampled grid
+%                      indices into the centered upsampled grid
 %                      config.phi2_dim (as for CALC_TOEP and AHA_TOEPLITZ).
 %                      When omitted, the mask is derived from traj with
 %                      CALC_MASK, as CALC_TOEP does.

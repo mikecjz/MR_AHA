@@ -2,7 +2,7 @@
 
 Python bindings for **MR_AHA**, a GPU library (CUDA or Apple-silicon Metal) that evaluates the
 forward normal operator `AᴴA` for non-Cartesian MRI with low-rank (subspace)
-modelling, using a Toeplitz embedding.
+modeling, using a Toeplitz embedding.
 
 Documentation: <https://mikecjz.github.io/MR_AHA_docs/>
 (Python guide: <https://mikecjz.github.io/MR_AHA_docs/getting-started/python.html>).

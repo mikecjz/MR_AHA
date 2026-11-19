@@ -1,6 +1,6 @@
 /**
  * @file mr_kernels_bd.cu
- * @brief Block-diagonal kernels specialised on the rank @f$L@f$.
+ * @brief Block-diagonal kernels specialized on the rank @f$L@f$.
  *
  * The generic kernels ::mr_k_blockdiag_dense / ::mr_k_blockdiag_masked
  * (`mr_kernels.cu`) handle any rank, but
@@ -144,7 +144,7 @@ __device__ __forceinline__ void mr_block_apply(const mr_complex (&v)[NC][L],
 
 /**
  * @brief In-place dense block-diagonal multiplication for a group of coils,
- *        specialised on @p L.
+ *        specialized on @p L.
  *
  * Same contract as ::mr_k_blockdiag_dense, without shared memory, applied to
  * the @p ncoil coils whose `[Mx, My, Mz, L]` grids follow one another in
@@ -163,7 +163,7 @@ __device__ __forceinline__ void mr_block_apply(const mr_complex (&v)[NC][L],
  * @param[in,out] d_pad       `[nloc, L, ncoil]` values with rank stride
  *                            `rg.vstride` (`[Mx, My, Mz, L, ncoil]`, natural
  *                            order, for the whole grid).
- * @param[in]     d_phi2_toep `[Mx, My, Mz, (L^2+L)/2]`, centred order.
+ * @param[in]     d_phi2_toep `[Mx, My, Mz, (L^2+L)/2]`, centered order.
  * @param[in]     dims        Geometry descriptor (`dims.L == L`).
  * @param[in]     ncoil       Number of coils in the group.
  * @param[in]     rg          Locations `[loc0, loc0 + nloc)` (natural-order
@@ -183,7 +183,7 @@ mr_k_bd_dense_t(mr_complex *__restrict__ d_pad,
     if (tid >= rg.nloc) return;
     const long long loc = rg.loc0 + tid;
 
-    /* Natural (FFT-order) grid index -> centred kernel index. */
+    /* Natural (FFT-order) grid index -> centered kernel index. */
     const int j0 = (int)(loc % dims.m[0]);
     const long long q = loc / dims.m[0];
     const int j1 = (int)(q % dims.m[1]);
@@ -239,7 +239,7 @@ mr_k_bd_dense_t(mr_complex *__restrict__ d_pad,
 
 /**
  * @brief In-place masked block-diagonal multiplication for a group of coils,
- *        specialised on @p L.
+ *        specialized on @p L.
  *
  * Same result as ::mr_k_blockdiag_masked followed by the memset and
  * ::mr_k_scatter_masked, in a single in-place pass without the
@@ -354,7 +354,7 @@ mr_k_bd_masked_t(mr_complex *__restrict__ d_pad,
 
 mr_bd_kernels mr_bd_lookup(int L)
 {
-    /* Start from "nothing available"; the switch fills in the specialised
+    /* Start from "nothing available"; the switch fills in the specialized
      * pair for L <= MR_BD_MAX_L unless the environment forces the tiled
      * kernels (any non-zero integer in MR_AHA_CUDA_TILED_BD). */
     mr_bd_kernels k = {nullptr, nullptr, 0, 0};

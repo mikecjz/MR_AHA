@@ -11,7 +11,7 @@ function mask = calc_mask(traj, config)
 %   within config.mask_radius cells of such a point (a (2r+1)^d box) is
 %   kept. No NUFFT is needed. The default radius 2 matches the unmasked
 %   accuracy on densely sampled radial and 3D trajectories while keeping
-%   roughly the sampled disc or ball of k-space; sparse trajectories need a
+%   roughly the sampled disk or ball of k-space; sparse trajectories need a
 %   larger radius.
 %
 %   For a 'stack' trajectory the in-plane mask is repeated on every kz plane.
@@ -26,7 +26,7 @@ function mask = calc_mask(traj, config)
 %
 %   OUTPUT
 %     mask       int64 gpuArray column of sorted, 1-based linear indices into
-%                the centred upsampled grid config.phi2_dim. Pass it to
+%                the centered upsampled grid config.phi2_dim. Pass it to
 %                MR_AHA.CREATE_OP ('mask'), or to CALC_TOEP and
 %                AHA_TOEPLITZ. (Both MR_AHA.CREATE_OP and CALC_TOEP call
 %                CALC_MASK themselves when a masked config comes without a

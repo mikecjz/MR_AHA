@@ -1,6 +1,6 @@
-"""Specialised vs generic block-diagonal kernels (CUDA and Metal backends).
+"""Specialized vs generic block-diagonal kernels (CUDA and Metal backends).
 
-Both backends use block-diagonal kernels specialised on ``L`` (CUDA:
+Both backends use block-diagonal kernels specialized on ``L`` (CUDA:
 ``mr_k_bd_dense_t<L>`` / ``mr_k_bd_masked_t<L>``; Metal: ``mr_k_bd_dense<L>``
 / ``mr_k_bd_masked<L>``; L = 1..30 on CUDA, 1..32 on Metal). Above that both
 use tiled shared/threadgroup-memory kernels (``mr_k_bdt``); both backends
@@ -10,7 +10,7 @@ so this test applies the operator with both kernel families on random inputs
 for many ranks (including the tiled kernels at L = 31..130 with 32 and 16
 locations per tile), both triangulations,
 unmasked and masked, and checks that they agree to single-precision rounding.
-The specialised kernels also process coils in groups
+The specialized kernels also process coils in groups
 (``MR_AHA_<BACKEND>_COIL_GROUP``); with 5 coils, groups of 1, 2 and 4 (the last
 group smaller) are all checked against the generic kernels, which handle one
 coil at a time. The tiled kernels are also forced for every rank
@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 import mr_aha  # noqa: E402
 
 # Ranks chosen around every dispatch boundary: small L, the end of the CUDA
-# specialised range (30), the Metal specialised range (32), just above it
+# specialized range (30), the Metal specialized range (32), just above it
 # (31, 33), and larger ranks served by the tiled kernels (up to 130).
 RANKS = (1, 2, 5, 7, 12, 16, 20, 30, 31, 32, 33, 47, 72, 130)
 

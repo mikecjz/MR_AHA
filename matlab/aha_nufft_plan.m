@@ -23,12 +23,12 @@ classdef aha_nufft_plan < handle
 %       im = type-1 NUFFT(k)                    % k-space -> image, sign +1
 %       AhAx = AhAx + im .* conj(SEs(:,:,..,c))
 %
-%   Both NUFFTs are unnormalised, the convention reproduced by the Toeplitz
+%   Both NUFFTs are unnormalized, the convention reproduced by the Toeplitz
 %   kernel of CALC_TOEP, so APPLY and AHA_TOEPLITZ agree to within the NUFFT
 %   tolerance. For a 'stack' trajectory the image is first transformed along
-%   z (centred, unnormalised FFT), the 2D NUFFT pair is applied to every kz
+%   z (centered, unnormalized FFT), the 2D NUFFT pair is applied to every kz
 %   plane with the Gram block of that kz, and the result is transformed back
-%   (unnormalised inverse FFT). The centring is realised by a phase
+%   (unnormalized inverse FFT). The centering is realized by a phase
 %   modulation folded into the coil map rather than by fftshift copies.
 %
 %   ROLE: this is the independent REFERENCE of the NUFFT route, not the
@@ -55,7 +55,7 @@ classdef aha_nufft_plan < handle
 %     'type2_opts'  same for the type-2 (forward) plan.
 %     Any other name is a cufinufft option (e.g. 'gpu_method', 'upsampfac',
 %     'gpu_maxbatchsize') forwarded to both plans. 'upsampfac' defaults to 2
-%     and 'modeord' is always 0 (centred modes, the library convention).
+%     and 'modeord' is always 0 (centered modes, the library convention).
 %
 %   APPLY INPUTS
 %     x       complex single gpuArray, [Nx, Ny, L] ('2D') or [Nx, Ny, Nz, L].
@@ -64,7 +64,7 @@ classdef aha_nufft_plan < handle
 %             rank-by-time basis Phi_rt, and the block of a readout is
 %             Phi_rt(:,idx)*Phi_rt(:,idx)'),
 %               [Ntrajs, L, L]        '2D' / '3D'
-%               [Ntrajs, Nkz, L, L]   'stack' (centred kz order, Nkz == Nz)
+%               [Ntrajs, Nkz, L, L]   'stack' (centered kz order, Nkz == Nz)
 %             Blocks stored [L, L, Ntrajs, Nz] are permute(Phi2, [3 4 1 2])
 %             (fftshift along kz if needed).
 %   Host inputs are moved to the GPU.
@@ -76,7 +76,7 @@ classdef aha_nufft_plan < handle
 %   form a row vector multiplied from the right by the Gram block,
 %   k(1,:) <- k(1,:) * Phi2, i.e. k_l <- sum_m k_m Phi2(m, l). It is
 %   evaluated with PAGEMTIMES, one Nkx-by-L times L-by-L product per readout,
-%   which avoids materialising the [Ntrajs, Nkx, L, L] broadcast intermediate.
+%   which avoids materializing the [Ntrajs, Nkx, L, L] broadcast intermediate.
 %
 %   DELETE(plan), or clearing the last reference, frees the cufinufft plans.
 %
@@ -106,7 +106,7 @@ classdef aha_nufft_plan < handle
         ntr         % transforms per NUFFT call
         t1          % type-1 cufinufft plan
         t2          % type-2 cufinufft plan
-        zmod        % stack: z modulation that centres the z FFT
+        zmod        % stack: z modulation that centers the z FFT
         py          % Metal: the Python mr_aha.aha_nufft_plan
     end
 
@@ -136,8 +136,8 @@ classdef aha_nufft_plan < handle
                        'folder holding cufinufft.mexa64.']);
             end
 
-            % cufinufft options: single precision, centred mode ordering
-            % (modeord 0, matching the library's centred arrays) and
+            % cufinufft options: single precision, centered mode ordering
+            % (modeord 0, matching the library's centered arrays) and
             % upsampfac 2. 'type1_opts' / 'type2_opts' apply to one plan only;
             % every other name-value pair goes to both. MR_MERGE re-imposes
             % floatprec and modeord, so callers cannot override them.
@@ -203,15 +203,15 @@ classdef aha_nufft_plan < handle
 
             % Plan both transforms once and sort the points once per plan
             % (setpts), so APPLY only executes. Type 2 (forward) uses sign -1,
-            % type 1 (adjoint) sign +1; neither is normalised.
+            % type 1 (adjoint) sign +1; neither is normalized.
             obj.t2 = cufinufft_plan(2, modes, -1, obj.ntr, tol, opts2);
             obj.t2.setpts(xj, yj, zj);
             obj.t1 = cufinufft_plan(1, modes, +1, obj.ntr, tol, opts1);
             obj.t1.setpts(xj, yj, zj);
 
             % Stack: image-domain modulation exp(2i*pi*c*n/Nz), c = floor(Nz/2),
-            % which turns a plain FFT along z into the centred one. The
-            % k-dependent phases of the centred transform cancel between the
+            % which turns a plain FFT along z into the centered one. The
+            % k-dependent phases of the centered transform cancel between the
             % forward and adjoint directions because phi2 is diagonal in kz, so
             % this is all that is needed; APPLY folds it into the coil map.
             if strcmp(obj.traj_type, 'stack')
@@ -266,13 +266,13 @@ classdef aha_nufft_plan < handle
             AhAx = zeros([img, L], 'like', x);
             for c = 1:nc
                 % 1. Coil sensitivity, broadcast over the ranks. For a stack it
-                %    also carries the z modulation that centres the z FFT, so
+                %    also carries the z modulation that centers the z FFT, so
                 %    no fftshift copies are needed.
                 se = reshape(SEs(:, c), img);
                 if stack, se = se .* obj.zmod; end
                 im = x .* se;
 
-                % 2. Stack only: unnormalised FFT along z.
+                % 2. Stack only: unnormalized FFT along z.
                 if stack
                     im = fft(im, [], 3);
                 end
@@ -298,7 +298,7 @@ classdef aha_nufft_plan < handle
                 im = reshape(obj.t1.execute(reshape(k, [], obj.ntr)), [img, L]);
                 clear k
 
-                % 6. Stack only: unnormalised inverse FFT along z.
+                % 6. Stack only: unnormalized inverse FFT along z.
                 if stack
                     im = ifft(im, [], 3) * Nz;
                 end

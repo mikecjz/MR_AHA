@@ -9,7 +9,7 @@
  * method:
  *
  * - ::MR_OP_TOEPLITZ: an ordinary single-GPU ::mr_aha_plan (coil groups,
- *   specialised block-diagonal kernels, cuFFT plans) plus a device-resident
+ *   specialized block-diagonal kernels, cuFFT plans) plus a device-resident
  *   copy of the kernel `phi2_toep` and the mask;
  * - ::MR_OP_NUFFT: a ::mr_nufft_eng (cufinufft type-2 / type-1 plans, the
  *   reordered Gram blocks and trajectory, cuBLAS; `mr_nufft_op.cu`).
@@ -148,7 +148,7 @@ struct mr_op_s {
     int          nsplit;     /**< Remaining coils split by rank (0: off).      */
     int          split0;     /**< First of the split coils.                    */
     mr_dims      dims;       /**< Geometry descriptor.                         */
-    mr_bd_kernels bd;        /**< Specialised block-diagonal kernels.          */
+    mr_bd_kernels bd;        /**< Specialized block-diagonal kernels.          */
     mr_op_dev    dev[MR_OP_MAX_DEVICES]; /**< Per-device state.                */
     mr_op_info_t info;       /**< What ::mr_op_info reports.                   */
     /* How phi2_toep was obtained; copied into @ref info at the end of the
@@ -484,7 +484,7 @@ static int mr_op_split_setup(mr_op p, mr_op_dev *d, const mr_complex *d_SEs)
     }
     /* Copy the remaining coils' maps (coils split0 .. C-1 of the caller's
      * array on the primary) to this device. Asynchronous on the slot's
-     * stream; the synchronisation at the end of the function completes it. */
+     * stream; the synchronization at the end of the function completes it. */
     MR_CUDA_CHECK(cudaMemcpyPeerAsync(
         d->d_SEs_rem, d->dev, d_SEs + (size_t)mr_image_size(cfg) * p->split0,
         p->primary, se_bytes, d->stream));
@@ -711,7 +711,7 @@ static int mr_op_dev_setup(mr_op p, mr_op_dev *d, const mr_op_inputs *in,
      * split) the engine is issued straight onto the caller's stream, so the
      * caller's own stream ordering covers it and no event is needed.
      * Otherwise each device gets a private non-blocking stream (it must not
-     * serialise with the legacy default stream) and a `done` event that the
+     * serialize with the legacy default stream) and a `done` event that the
      * caller's stream waits on in mr_op_execute_impl. */
     MR_CUDA_CHECK(cudaSetDevice(d->dev));
     if (p->direct) {
@@ -1019,7 +1019,7 @@ extern "C" int mr_op_options_defaults(mr_op_options *opt)
  *
  * Remainder split (Toeplitz, see @ref mr_op_split): all G candidates take
  * q = floor(C/G) whole coils and the r = C % G remaining coils are split by
- * rank. A candidate when the coils do not divide over G, the specialised
+ * rank. A candidate when the coils do not divide over G, the specialized
  * block-diagonal kernels are available (they take a location range) and the
  * problem is not tiny. `auto` uses it when the cost model predicts a gain of
  * at least 5 %:
@@ -1079,7 +1079,7 @@ static int mr_op_create_impl(const mr_config *cfg, const mr_op_inputs *in,
     /* Operator struct, zeroed (calloc): every handle starts NULL / 0, which
      * is what makes mr_op_release safe on a partially built operator.
      * gpu_device_id is pinned to the resolved primary (it may have been -1,
-     * "current device"). The specialised block-diagonal kernels are looked
+     * "current device"). The specialized block-diagonal kernels are looked
      * up for L (Toeplitz only), unless MR_AHA_CUDA_GENERIC_BD forces the
      * generic ones; the remainder split requires them. */
     mr_op p = (mr_op)calloc(1, sizeof(struct mr_op_s));
@@ -1631,7 +1631,7 @@ extern "C" int mr_op_abandon(mr_op op)
     int prev = 0;
     const cudaError_t ce = cudaGetDevice(&prev);
     /* Work still queued on the other devices may wait for events of the dead
-     * primary; synchronising could hang, so their streams are destroyed
+     * primary; synchronizing could hang, so their streams are destroyed
      * directly (cudaStreamDestroy returns at once and releases the stream
      * when its work is done). */
     mr_op_release(op, 1);

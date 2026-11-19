@@ -145,7 +145,7 @@ function check_op_matlab(varargin)
 
     % Save the three environment variables the checks modify and restore them
     % when this function exits (onCleanup also runs on error). The kernel
-    % distribution override is cleared so that 'toep_dist' is honoured.
+    % distribution override is cleared so that 'toep_dist' is honored.
     env = {'MR_AHA_MGPU_MIN_WORK', 'MR_AHA_MGPU_SPLIT', 'MR_AHA_TOEP_SPLIT'};
     old_env = cellfun(@getenv, env, 'UniformOutput', false);
     restore_env = onCleanup(@() cellfun(@setenv, env, old_env));
@@ -156,7 +156,7 @@ function check_op_matlab(varargin)
     nfail = 0;
 
     % Problems: traj_type, image size, rank. Even and odd sizes.
-    % Odd sizes test the exact centring remap for odd dimensions; every
+    % Odd sizes test the exact centering remap for odd dimensions; every
     % problem is run with 5 and 3 coils (with the default coil group of 4,
     % one full group plus a remainder, and a single partial group).
     cases = {'2D',    [32 32],    3;

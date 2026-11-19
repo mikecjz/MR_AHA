@@ -40,11 +40,11 @@ key                   row-major shape (saved)          column-major (C API docs)
 ``T = L (L + 1) / 2``. ``phi2[j, i, ...]`` holds entry ``(i, j)`` of the
 Hermitian Gram block ``Phi Phi^H`` (rank x time ``Phi``, MR-Multitasking
 convention, recorded as ``gram_convention`` in ``config_json``). Mask indices are 0-based linear indices into the
-centred upsampled grid ``[Mx, My, Mz]`` in column-major order, which equals
+centered upsampled grid ``[Mx, My, Mz]`` in column-major order, which equals
 the flat index of the row-major ``(Mz, My, Mx)`` array. For a stack the mask
 repeats the in-plane selection over all ``Mz = Nz`` planes. The masked
-variants carry the suffix ``neighbour``, after the neighbourhood construction
-of :func:`mr_aha.calc_mask`. All k-space arrays have the centre in the middle
+variants carry the suffix ``neighbour``, after the neighborhood construction
+of :func:`mr_aha.calc_mask`. All k-space arrays have the center in the middle
 of the array (index ``M // 2``).
 
 Scalar metadata is stored both as individual keys (``traj_type``, ``n_dim``,
@@ -118,12 +118,12 @@ LAYOUT_NOTE = (
     "Arrays are row-major NumPy order as used by the mr_aha Python binding "
     "(column-major shapes of the documentation reversed; identical memory "
     "layout). Mask indices are 0-based column-major linear indices into the "
-    "centred upsampled grid [Mx, My, Mz]. k-space centre at index M//2."
+    "centered upsampled grid [Mx, My, Mz]. k-space center at index M//2."
 )
 
 # Each case: image size, rank L, coil count, spoke count / samples per spoke
 # and the RNG seed. Together they cover every trajectory family, L = 1 (scalar
-# blocks), odd image sizes (exact centring for odd N), an explicit odd
+# blocks), odd image sizes (exact centering for odd N), an explicit odd
 # upsampled grid, and odd Nz for a stack (Mz = Nz must stay odd).
 #: The synthetic cases. ``phi2_dim=None`` means the library default
 #: (``2 * n_dim``, ``Mz = Nz`` for a stack).
@@ -147,7 +147,7 @@ CASES = [
 
 # Both packings of the Hermitian L x L blocks are generated for every case.
 TRIS = ("lower", "upper")
-#: Suffix of the masked variants (the neighbourhood mask of
+#: Suffix of the masked variants (the neighborhood mask of
 #: :func:`mr_aha.calc_mask`).
 MASKS = ("neighbour",)
 GOLDEN = (np.sqrt(5.0) - 1.0) / 2.0  # golden-angle fraction
@@ -244,7 +244,7 @@ def cfg_dict(cfg) -> dict:
     """Plain-Python snapshot of an :class:`mr_aha.MRConfig` (no stream)."""
     out = {}
     # Walk the ctypes fields of the configuration struct; the stream pointer
-    # is skipped (not meaningful, not JSON-serialisable) and fixed-size arrays
+    # is skipped (not meaningful, not JSON-serializable) and fixed-size arrays
     # (n_dim, phi2_dim) become lists.
     for name, _ in cfg._fields_:
         if name == "stream":
@@ -282,7 +282,7 @@ def run_case(traj_type, n_dim, L, n_coils, traj, phi2, x, SEs, phi2_dim=None,
     out, meta = {}, {"calls": {}}
 
     # The unmasked default configuration ('lower' triangulation) is used for
-    # the mask and the NUFFT reference. The neighbourhood mask is computed
+    # the mask and the NUFFT reference. The neighborhood mask is computed
     # with the configuration's default radius and saved as mask_neighbour.
     base = mr_aha.make_config(traj_type, n_dim, L, **kw)
     meta["base_config"] = cfg_dict(base)
@@ -348,7 +348,7 @@ def save_case(name: str, inputs: dict, outputs: dict, meta: dict) -> Path:
         name: Case name (file stem).
         inputs: Input arrays and scalar metadata.
         outputs: Output arrays from :func:`run_case`.
-        meta: JSON-serialisable metadata, stored as ``config_json``.
+        meta: JSON-serializable metadata, stored as ``config_json``.
 
     Returns:
         Path of the written file.

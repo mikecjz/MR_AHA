@@ -46,7 +46,7 @@ function AhAx = AhA_Toeplitz(x, SEs, phi2_toep, config, mask)
 %                See MR_DEFAULT_CONFIG.
 %
 %     mask       (optional, required when config.is_masked is true) linear
-%                indices, in MATLAB's 1-based convention, into the centred
+%                indices, in MATLAB's 1-based convention, into the centered
 %                upsampled Cartesian grid of size config.phi2_dim.
 %
 %   OUTPUT

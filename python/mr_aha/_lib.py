@@ -203,7 +203,7 @@ class MRConfig(ctypes.Structure):
     * ``mem_fraction`` -- share of free device memory the library may use
       for working buffers (clamped to ``(0, 0.95]`` by the library).
     * ``verbose`` -- non-zero to print per-stage timing.
-    * ``mask_radius`` -- neighbourhood radius of ``mr_calc_mask``.
+    * ``mask_radius`` -- neighborhood radius of ``mr_calc_mask``.
     """
 
     # Order and C types must stay identical to ``struct mr_config`` in
@@ -258,7 +258,7 @@ class OpMethod:
     """Type-2 NUFFT, Gram multiplication, type-1 NUFFT per coil; no kernel."""
 
     # String <-> enum tables. _TO_STR doubles as the set of valid integers in
-    # :meth:`parse` and is used by mr_aha.api to normalise ``method`` and to
+    # :meth:`parse` and is used by mr_aha.api to normalize ``method`` and to
     # name ``mr_op_info_t.method``.
     _FROM_STR = {"toeplitz": TOEPLITZ, "nufft": NUFFT}
     _TO_STR = {TOEPLITZ: "toeplitz", NUFFT: "nufft"}
@@ -493,7 +493,7 @@ def _candidate_paths():
 
     The bare file names (no directory) are handed to the platform loader as
     is, so ``LD_LIBRARY_PATH`` / ``DYLD_LIBRARY_PATH`` / ``PATH`` and the
-    system library directories are honoured; :func:`ctypes.util.find_library`
+    system library directories are honored; :func:`ctypes.util.find_library`
     is tried last as a further fallback.
 
     Yields:
@@ -692,7 +692,7 @@ lib.mr_calc_mask.argtypes = [
     _cfg_p, _c_ptr, ctypes.c_int64, ctypes.c_int64, _c_ptr,
     ctypes.POINTER(ctypes.c_int64)]
 
-#: Default neighbourhood radius of :func:`mr_aha.calc_mask` (in upsampled grid
+#: Default neighborhood radius of :func:`mr_aha.calc_mask` (in upsampled grid
 #: cells), mirroring ``MR_DEFAULT_MASK_RADIUS``.
 DEFAULT_MASK_RADIUS = 2
 

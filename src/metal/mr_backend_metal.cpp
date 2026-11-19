@@ -33,7 +33,7 @@ extern "C" const char *mr_backend(void) { return "metal"; }
 int mr_metal_context(const mr_metal_ctx **ctx_out)
 {
     /* Function-local statics: the context lives for the whole process and is
-     * initialised exactly once, even when MATLAB or Python threads call in
+     * initialized exactly once, even when MATLAB or Python threads call in
      * concurrently (std::call_once is the thread-safe one-time guard). */
     static mr_metal_ctx ctx = {nullptr, nullptr};
     static std::once_flag once;

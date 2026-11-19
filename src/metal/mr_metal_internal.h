@@ -186,11 +186,11 @@ int mr_metal_wait(MTL::CommandBuffer *cb, const char *what);
 struct mr_metal_fft;
 
 /**
- * @brief Create a batched, in-place, unnormalised complex FFT plan.
+ * @brief Create a batched, in-place, unnormalized complex FFT plan.
  *
  * Transforms @p batch consecutive column-major volumes of extents
  * `dims[0] x ... x dims[rank-1]` (`dims[0]` fastest), with a batch stride of
- * their product, in both directions without normalisation, exactly like the
+ * their product, in both directions without normalization, exactly like the
  * `cufftPlanMany` plans of the CUDA backend. VkFFT generates and compiles its
  * kernels here, which takes 0.2-0.3 s for a new size (cached by macOS for
  * later processes). A batch must hold fewer than 2^31 complex values (VkFFT's
@@ -214,7 +214,7 @@ int mr_metal_fft_create(const mr_metal_ctx *ctx, int rank, const int dims[3],
  * @param enc     Open compute encoder; the FFT kernels are encoded into it.
  * @param buf     Buffer holding the volumes at offset 0, transformed in place.
  * @param inverse False for the forward (`exp(-i...)`) transform, true for the
- *                unnormalised inverse.
+ *                unnormalized inverse.
  * @return ::MR_SUCCESS or ::MR_ERR_VKFFT.
  */
 int mr_metal_fft_encode(mr_metal_fft *fft, MTL::CommandBuffer *cb,

@@ -100,8 +100,8 @@ void mr_backend_clear_error(void);
 struct mr_dims {
     int n[3];            /**< Image size `[Nx, Ny, Nz]`, unused entries 1.     */
     int m[3];            /**< Upsampled size `[Mx, My, Mz]`, unused entries 1. */
-    int c_n[3];          /**< Image centre offsets `floor(N_d/2)`.             */
-    int c_m[3];          /**< Upsampled centre offsets `floor(M_d/2)`.         */
+    int c_n[3];          /**< Image center offsets `floor(N_d/2)`.             */
+    int c_m[3];          /**< Upsampled center offsets `floor(M_d/2)`.         */
     int L;               /**< Rank.                                            */
     int tri_upper;       /**< 1 when the upper triangle is stored, else 0.     */
     long long image_size;/**< `Nx*Ny*Nz`.                                      */

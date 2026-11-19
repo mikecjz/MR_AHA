@@ -6,11 +6,11 @@ builds ``phi2_toep`` in two stages there:
 1. **Point-spread functions (this module).** The Gram blocks are packed into
    the stored triangle (:class:`~mr_aha.Triangulation`), each stored element is
    broadcast along its readout to give the non-uniform strengths, and a type-1
-   NUFFT with sign -1, centred (``modeord = 0``) modes ``phi2_dim`` and
+   NUFFT with sign -1, centered (``modeord = 0``) modes ``phi2_dim`` and
    upsampling factor 2 (see :func:`toep_upsampfac`) evaluates the
    point-spread function of each triangular component. This is exactly what the CUDA ``mr_calc_toep`` does with
    cufinufft before its inverse FFT.
-2. **The library** (``mr_calc_toep_from_psf``): centred inverse FFT,
+2. **The library** (``mr_calc_toep_from_psf``): centered inverse FFT,
    ``1/prod(M)`` scaling and the optional mask gather.
 
 The components are processed in chunks that bound the transient memory. Two
@@ -149,7 +149,7 @@ def _strengths(phi2: np.ndarray, pairs: list, comps: range, Nkx: int,
         v = v if is_stack else v[None, :]               # (Nkz, Ntrajs)
         # Repeat each readout's value over its Nkx samples (a zero-copy
         # broadcast view), then flatten to (Nkz, Nkx*Ntrajs) in the
-        # traj[d].ravel() order; reshape materialises the copy here.
+        # traj[d].ravel() order; reshape materializes the copy here.
         rows.append(np.broadcast_to(v[:, None, :], (v.shape[0], Nkx, v.shape[1]))
                     .reshape(v.shape[0], -1))
     # Stack all components (component-major, kz within) into one contiguous
@@ -164,7 +164,7 @@ class _Type1:
     the C-ordered output has ``x`` fastest, i.e. it is the column-major
     ``[Mx, My(, Mz)]`` grid of the C API.
 
-    The transform has sign -1 and centred mode order, matching what
+    The transform has sign -1 and centered mode order, matching what
     ``mr_calc_toep`` computes with cufinufft and what
     ``mr_calc_toep_from_psf`` expects as input.
 
@@ -347,7 +347,7 @@ def calc_toep_two_stage(cfg: MRConfig, phi2, traj, mask, out, engine: str,
         # [Mx, My, Mz, n] layout mr_calc_toep_from_psf expects.
         psf = xp.ascontiguousarray(xp.asarray(psf, dtype=xp.complex64)
                                    .reshape(n * nkz * int(np.prod(modes_rev))))
-        # Stage 2: library finishes these components (centred inverse FFT,
+        # Stage 2: library finishes these components (centered inverse FFT,
         # 1/prod(M) scaling, optional mask gather) directly into `out`.
         check(
             lib.mr_calc_toep_from_psf(
@@ -360,5 +360,5 @@ def calc_toep_two_stage(cfg: MRConfig, phi2, traj, mask, out, engine: str,
         )
         # Release this chunk's buffers before building the next one, so that
         # peak memory stays at one chunk. This is safe on CUDA because
-        # mr_calc_toep_from_psf synchronises its stream before returning.
+        # mr_calc_toep_from_psf synchronizes its stream before returning.
         del psf, cs

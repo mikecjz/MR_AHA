@@ -19,12 +19,12 @@ is **not** built by the top-level `CMakeLists.txt` and it is not maintained.
   (`extern "C"`) surface, so MATLAB, Python and plain C/C++ all call the same
   code. Nothing in the core depends on MATLAB headers any more.
 * The `cufinufftf_deconvolve` shortcut is gone. `calc_toep` now builds the
-  Toeplitz kernel explicitly with a stock type-1 cufinufft plus a centred
+  Toeplitz kernel explicitly with a stock type-1 cufinufft plus a centered
   inverse FFT, so an unmodified upstream FINUFFT works.
 * 2D, 3D and stack-of-stars trajectories are all supported, not just
   stack-of-stars, and the upsampled Toeplitz grid is an explicit parameter
   (`config.phi2_dim`) rather than being hard-coded to `2*N`.
 * The Hermitian `L x L` blocks are stored in packed triangular form, with the
   masked variant available for sparse upsampled grids.
-* Centring is realised by exact index remapping instead of phase modulation,
+* Centering is realized by exact index remapping instead of phase modulation,
   which removes the half-sample bias for odd matrix sizes.

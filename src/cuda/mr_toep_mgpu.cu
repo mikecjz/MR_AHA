@@ -4,7 +4,7 @@
  *
  * ::mr_calc_toep evaluates the @f$T = (L^2+L)/2@f$ packed triangular
  * components of `phi2_toep` independently of one another: each is one type-1
- * NUFFT, one centred inverse FFT and one scaling, and lands in its own
+ * NUFFT, one centered inverse FFT and one scaling, and lands in its own
  * contiguous slab of the output (`Mx*My*Mz` elements unmasked,
  * `num_masked` elements masked). A range of components is therefore one
  * contiguous byte range, which can be computed on any device and moved with a
@@ -169,7 +169,7 @@ int mr_toep_dist_resolve(int requested, int *mode_out)
                     "broadcast (off)", e);
     }
     /* Public enum -> internal mode. An out-of-range option value (e.g. an
-     * uninitialised field from a binding) is rejected rather than guessed. */
+     * uninitialized field from a binding) is rejected rather than guessed. */
     switch (m) {
     case MR_TOEP_DIST_AUTO:      *mode_out = MR_TDIST_AUTO; break;
     case MR_TOEP_DIST_SPLIT:     *mode_out = MR_TDIST_EXCHANGE; break;
@@ -256,7 +256,7 @@ static void mr_tparallel(mr_tjob *job, void (*fn)(mr_tjob *, int))
 {
     /* One thread per slot, because each slot's work is host-driven
      * (cufinufft / cuFFT calls, per-chunk callbacks) and a CUDA device is
-     * selected per host thread; a single thread would serialise the issue of
+     * selected per host thread; a single thread would serialize the issue of
      * all devices' work. std::thread throws std::system_error when it cannot
      * start a thread, hence the try/catch. */
     std::thread th[MR_OP_MAX_DEVICES];
@@ -315,7 +315,7 @@ static int mr_tpush_chunk(void *user, int64_t t0, int64_t n)
     MR_CUDA_CHECK(cudaEventRecord(d->ev, d->s));
     MR_CUDA_CHECK(cudaStreamWaitEvent(d->cs, d->ev, 0));
     /* Rotated destinations k+1, k+2, ... (mod G); the sender itself (s = 0)
-     * and helpers (no d_full) are skipped. The copies are serialised on cs,
+     * and helpers (no d_full) are skipped. The copies are serialized on cs,
      * which is what bounds each link to about one transfer at a time. */
     for (int s = 1; s < job->G; ++s) {
         mr_tdev *r = &job->d[(pu->k + s) % job->G];
@@ -338,7 +338,7 @@ static int mr_tphase1_body(mr_tjob *job, int k)
     const int primary = job->d[0].dev;
 
     /* This thread's device and its private streams. Non-blocking streams do
-     * not synchronise with the legacy default stream, so other work on the
+     * not synchronize with the legacy default stream, so other work on the
      * device (e.g. the caller's) cannot stall the computation or the copies.
      * The event is timing-free: it only orders the copy stream after the
      * compute stream (see mr_tpush_chunk). */
@@ -351,7 +351,7 @@ static int mr_tphase1_body(mr_tjob *job, int k)
      * needs them on its own device (cufinufft keeps the trajectory pointer
      * and the packing kernel reads phi2 locally). They are small next to the
      * kernel, so each device takes a full copy rather than a share. The
-     * primary's stream was synchronised by mr_toep_distribute, so the sources
+     * primary's stream was synchronized by mr_toep_distribute, so the sources
      * are complete; the copies are queued on d->s, so the context created
      * below reads them only after they have landed. */
     if (k == 0) {
@@ -513,7 +513,7 @@ static void mr_tphase2(mr_tjob *job, int k)
  * @brief Release everything slot @p d holds except the receiver's kernel.
  *
  * Safe on a slot in any state (partially set up, failed, or complete): every
- * resource is checked before release. Streams are synchronised before they
+ * resource is checked before release. Streams are synchronized before they
  * and the buffers they use are destroyed, so a failed run cannot leave
  * in-flight work reading freed memory. Errors are swallowed (cleanup must
  * not mask the first diagnostic) and the last (non-sticky) error is cleared.
@@ -524,7 +524,7 @@ static void mr_tcleanup(mr_tdev *d)
         cudaGetLastError();
         return;
     }
-    if (d->ctx) mr_toep_ctx_destroy(d->ctx); /* synchronises its stream */
+    if (d->ctx) mr_toep_ctx_destroy(d->ctx); /* synchronizes its stream */
     d->ctx = NULL;
     /* The copy stream reads d_own (d_slice for a helper): drain it before
      * d_slice is freed below. */
@@ -625,7 +625,7 @@ static int mr_tprobe(mr_tjob *job, double *gbs)
     /* Release on every path. After a failed round some copies may still be
      * pending; this relies on cudaStreamDestroy deferring the release of the
      * stream until its work is done and on cudaFree's implicit
-     * synchronisation. */
+     * synchronization. */
     for (int i = 0; i < G; ++i) {
         if (cudaSetDevice(job->d[i].dev) != cudaSuccess) continue;
         if (st[i]) cudaStreamDestroy(st[i]);
@@ -663,7 +663,7 @@ int mr_toep_distribute(const mr_config *cfg, const mr_toep_dist_dev *devs, int G
     const int64_t slab = cfg->is_masked ? (int64_t)cfg->num_masked : mr_pad_size(cfg);
 
     /* Helpers beyond the number of components would have nothing to do.
-     * Slots are zero-initialised (calloc), which mr_tcleanup relies on; n
+     * Slots are zero-initialized (calloc), which mr_tcleanup relies on; n
      * counts the slots kept, and receivers are always kept because they need
      * the kernel even without a range. */
     mr_tdev *d = (mr_tdev *)calloc(MR_OP_MAX_DEVICES, sizeof(mr_tdev));

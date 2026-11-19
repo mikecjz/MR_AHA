@@ -48,7 +48,7 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
 %                .mem_fraction (share of free GPU memory the chunking may use,
 %                default 0.5), .mask_radius (see CALC_MASK), .verbose.
 %
-%     mask       (optional) 1-based linear indices into the centred upsampled
+%     mask       (optional) 1-based linear indices into the centered upsampled
 %                grid config.phi2_dim at which the operator is retained. Only
 %                used when config.is_masked is true; when it is omitted the
 %                mask is derived from the trajectory with CALC_MASK and
@@ -64,7 +64,7 @@ function [phi2_toep, mask] = calc_toep(phi2, traj, config, varargin)
 %     mask       the mask that was used (int64 gpuArray, 1-based), or [] for
 %                an unmasked operator. Pass it on to AHA_TOEPLITZ.
 %
-%   The result already absorbs the 1/prod(config.phi2_dim) normalisation of the
+%   The result already absorbs the 1/prod(config.phi2_dim) normalization of the
 %   FFT pair used by AHA_TOEPLITZ, so no further scaling is required anywhere.
 %
 %   BACKENDS

@@ -11,7 +11,7 @@
 “AHA! It’s so fast!”
 
 MR_AHA is a highly optimized GPU library for evaluating the forward normal operator $A^H A$ for
-**non-Cartesian MRI with low-rank (subspace) modelling**. It uses a Toeplitz embedding; a
+**non-Cartesian MRI with low-rank (subspace) modeling**. It uses a Toeplitz embedding; a
 NUFFT-based operator with the same interface is included as the reference.
 
 In the literature, most low-rank reconstructions, such as MR Multitasking, MR fingerprinting,

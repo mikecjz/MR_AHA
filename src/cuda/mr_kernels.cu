@@ -13,7 +13,7 @@
  *    @f$B@f$ is ::mr_k_blockdiag_dense or ::mr_k_blockdiag_masked (+
  *    ::mr_k_scatter_masked). The FFTs in between are cuFFT calls on the host
  *    side. These generic block-diagonal kernels are the fallback used when
- *    ::mr_bd_lookup offers neither a specialised nor a tiled kernel;
+ *    ::mr_bd_lookup offers neither a specialized nor a tiled kernel;
  *  - the *calc_toep* kernels that build `phi2_toep`: pack the Gram blocks
  *    (::mr_k_extract_tri), broadcast them as NUFFT strengths
  *    (::mr_k_fill_strengths), and reorder / scale / gather the inverse-FFT
@@ -78,7 +78,7 @@ __device__ __forceinline__ mr_complex mr_apply_block_row(const mr_complex *v,
     /* Dot product of v with column i of the full Hermitian block. Each call
      * rebuilds the column from the triangle, so a caller evaluating all L
      * outputs reads every off-diagonal stored element twice (once directly,
-     * once conjugated); the specialised / tiled kernels avoid this. */
+     * once conjugated); the specialized / tiled kernels avoid this. */
     mr_complex acc = make_cuFloatComplex(0.0f, 0.0f);
     for (int j = 0; j < L; ++j) {
         int do_conj = 0;
@@ -148,7 +148,7 @@ __global__ void mr_k_crop_mul_conj_se(mr_complex *d_out, const mr_complex *d_pad
     /* One thread per *image* location: the crop only reads the part of the
      * padded grid that the image covers; everything else is discarded. Each
      * thread owns its output element, so the accumulation needs no atomics
-     * (coils are serialised by the caller, one launch per coil). */
+     * (coils are serialized by the caller, one launch per coil). */
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= dims.image_size) return;
 
@@ -192,7 +192,7 @@ __global__ void mr_k_blockdiag_dense(mr_complex *d_pad,
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= dims.pad_size) return;
 
-    /* The working buffer is in natural FFT order; phi2_toep is centred. */
+    /* The working buffer is in natural FFT order; phi2_toep is centered. */
     int jc[3];
     mr_decompose3(tid, dims.m[0], dims.m[1], jc);
     long long pc = 0, stride = 1;
@@ -207,8 +207,8 @@ __global__ void mr_k_blockdiag_dense(mr_complex *d_pad,
     for (int l = 0; l < dims.L; ++l) v[l] = d_pad[tid + dims.pad_size * l];
 
     /* Packed component t of this location's block is at base[t * pad_size]
-     * (phi2_toep is [Mx, My, Mz, ntri], location fastest, so neighbouring
-     * threads read neighbouring addresses for a given t). Evaluate y = v A
+     * (phi2_toep is [Mx, My, Mz, ntri], location fastest, so neighboring
+     * threads read neighboring addresses for a given t). Evaluate y = v A
      * one output at a time and write it in place. */
     const mr_complex *base = d_phi2_toep + pc;
     for (int i = 0; i < dims.L; ++i) {
@@ -234,7 +234,7 @@ __global__ void mr_k_blockdiag_masked(mr_complex *d_compact,
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_masked) return;
 
-    /* The mask stores centred linear indices; convert to natural order. */
+    /* The mask stores centered linear indices; convert to natural order. */
     int kc[3];
     mr_decompose3((long long)d_mask[tid], dims.m[0], dims.m[1], kc);
     long long jj = 0, stride = 1;
@@ -262,7 +262,7 @@ __global__ void mr_k_mask_inverse(int *d_inv, const int64_t *d_mask,
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_masked) return;
 
-    /* Centred linear index -> natural (FFT-order) linear index. */
+    /* Centered linear index -> natural (FFT-order) linear index. */
     int kc[3];
     mr_decompose3((long long)d_mask[tid], dims.m[0], dims.m[1], kc);
     long long jj = 0, stride = 1;
@@ -282,7 +282,7 @@ __global__ void mr_k_scatter_masked(mr_complex *d_pad, const mr_complex *d_compa
                                     mr_dims dims)
 {
     /* One thread per mask entry: the inverse of the gather in
-     * mr_k_blockdiag_masked (same centred -> natural conversion). */
+     * mr_k_blockdiag_masked (same centered -> natural conversion). */
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_masked) return;
 
@@ -375,7 +375,7 @@ __global__ void mr_k_to_natural(mr_complex *dst, const mr_complex *src,
     long long b = tid / vol;
     long long idx = tid - b * vol;
 
-    /* Natural index j of the destination holds centred index
+    /* Natural index j of the destination holds centered index
      * k = (j + s) mod m of the source (mr_nat2cent); s = 0 is the identity. */
     int jc[3];
     mr_decompose3(idx, m0, m1, jc);
@@ -405,7 +405,7 @@ __global__ void mr_k_to_centered_scale(mr_complex *dst, const mr_complex *src,
     long long b = tid / vol;
     long long idx = tid - b * vol;
 
-    /* Centred index k of the destination comes from natural index
+    /* Centered index k of the destination comes from natural index
      * j = (k - s) mod m of the source (mr_cent2nat); s = 0 is the identity.
      * The scale is folded into the same pass to save a read/write sweep. */
     int kc[3];
@@ -441,7 +441,7 @@ __global__ void mr_k_gather_masked_scale(mr_complex *dst, const mr_complex *src,
     long long i = tid % num_masked;   /* masked location                       */
     long long b = tid / num_masked;   /* component within this chunk           */
 
-    /* The mask holds centred linear indices; find the matching natural-order
+    /* The mask holds centered linear indices; find the matching natural-order
      * element of volume b, exactly as in mr_k_to_centered_scale. */
     int kc[3];
     mr_decompose3((long long)d_mask[i], m0, m1, kc);

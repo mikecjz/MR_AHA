@@ -16,7 +16,7 @@
  * @f$\hat{T}(\mathbf{k}) = \sum_m (\Phi\Phi^H)_m\,
  * D(\mathbf{k}-\mathbf{k}_m)@f$, where @f$D@f$ is the Dirichlet kernel of the
  * upsampled grid. Its main lobe around each sample spans a few cells, which
- * the neighbourhood of radius @f$r@f$ keeps; far from every sample only the
+ * the neighborhood of radius @f$r@f$ keeps; far from every sample only the
  * slowly decaying tails remain, and @f$\hat{T}@f$ is small there whatever the
  * subspace. Measurements are in the documentation
  * (https://mikecjz.github.io/MR_AHA_docs/benchmarks/neighbour-mask.html).
@@ -52,7 +52,7 @@
  * marked location is set to 1; concurrent writes of the same value are
  * benign. The buffer must be zeroed beforehand.
  *
- * @param[out] d_marks   Marks `[m0, m1, m2]`, centred order, pre-zeroed.
+ * @param[out] d_marks   Marks `[m0, m1, m2]`, centered order, pre-zeroed.
  * @param[in]  d_traj    Trajectory `[n_samples, ndim]` (i.e. `[Ntrajs, Nkx,
  *                       ndim]` with the first two axes flattened).
  * @param[in]  n_samples `Ntrajs * Nkx`.
@@ -68,7 +68,7 @@ __global__ void mr_k_mark_samples(float *d_marks, const float *d_traj,
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_samples) return;
     /* Per axis: scale radians to grid cells, round to the nearest cell, shift
-     * so that k = 0 lands on the centre index M/2 (centred order), wrap
+     * so that k = 0 lands on the center index M/2 (centered order), wrap
      * periodically (the C `%` can be negative, hence the fix-up), and
      * accumulate the column-major linear index. Coordinate a of sample tid is
      * at d_traj[tid + n_samples * a] (the coordinate axis is slowest). */
@@ -87,7 +87,7 @@ __global__ void mr_k_mark_samples(float *d_marks, const float *d_traj,
 }
 
 /**
- * @brief One axis of a separable, periodic max-filter (grey-scale dilation).
+ * @brief One axis of a separable, periodic max-filter (gray-scale dilation).
  *
  * Each output location receives the largest input value among the locations
  * up to @p r cells away along one axis, wrapping periodically like the DFT
@@ -108,16 +108,16 @@ __global__ void mr_k_dilate_axis(float *d_out, const float *d_in, long long n,
                                  int m, long long stride, int r)
 {
     /* One thread per grid element. Reads come from d_in and writes go to a
-     * separate d_out, so neighbouring threads never see partially filtered
+     * separate d_out, so neighboring threads never see partially filtered
      * values (the filter cannot run in place). */
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
     /* i = this element's coordinate along the filtered axis; base = the
-     * element with the same other coordinates and i = 0, so the neighbours
+     * element with the same other coordinates and i = 0, so the neighbors
      * along the axis are base + j * stride. */
     const int       i    = (int)((tid / stride) % m);
     const long long base = tid - (long long)i * stride;
-    /* Max over the 2r+1 neighbours i-r .. i+r, wrapped into [0, m). If
+    /* Max over the 2r+1 neighbors i-r .. i+r, wrapped into [0, m). If
      * 2r+1 > m some cells are visited twice, which is harmless for a max. */
     float v = d_in[tid];
     for (int d = -r; d <= r; ++d) {
@@ -157,7 +157,7 @@ __global__ void mr_k_replicate_planes(int64_t *d_mask, long long n_plane,
 
 /** @brief Thrust predicate: is the location at linear index @p i marked? */
 struct mr_is_marked {
-    const float *marks; /**< Dilated 0/1 sample marks, centred order. */
+    const float *marks; /**< Dilated 0/1 sample marks, centered order. */
 
     /** @brief Evaluate the predicate at linear index @p i. */
     __host__ __device__ bool operator()(int64_t i) const { return marks[i] > 0.5f; }
@@ -323,7 +323,7 @@ static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
     cudaStream_t s = (cudaStream_t)cfg->stream;
 
     /* Step 3: stream compaction over the linear indices 0 .. n-1. With an
-     * output buffer, copy_if writes the marked indices (centred-order linear
+     * output buffer, copy_if writes the marked indices (centered-order linear
      * indices, as the mask format requires); without one (a size query),
      * count_if only counts them. Both run on the caller's stream. */
     int64_t n_kept = 0;
@@ -369,13 +369,13 @@ static int mr_calc_mask_impl(const mr_config *cfg, const float *d_traj,
 
     /* The mask is written asynchronously; wait so that it is complete (and
      * any asynchronous error surfaces) when mr_calc_mask returns. A count-only
-     * call already synchronised inside thrust::count_if, which returns a
+     * call already synchronized inside thrust::count_if, which returns a
      * host value. */
     if (d_mask != NULL) {
         const cudaError_t ce = (s != NULL) ? cudaStreamSynchronize(s)
                                            : cudaDeviceSynchronize();
         if (ce != cudaSuccess)
-            MR_FAIL(MR_ERR_CUDA, "synchronisation after mr_calc_mask failed: %s",
+            MR_FAIL(MR_ERR_CUDA, "synchronization after mr_calc_mask failed: %s",
                     cudaGetErrorString(ce));
     }
 

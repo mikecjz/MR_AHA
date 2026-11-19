@@ -3,7 +3,7 @@
  * @brief Public C API of the MR_AHA library.
  *
  * MR_AHA evaluates the forward normal operator @f$A^H A@f$ for non-Cartesian
- * MRI with low-rank (subspace) modelling on the GPU, using a
+ * MRI with low-rank (subspace) modeling on the GPU, using a
  * Toeplitz embedding so that no non-uniform FFT is required inside the
  * iteration loop.
  *
@@ -24,8 +24,8 @@
  * array is a row-major `[L, Nz, Ny, Nx]` array with the *same* linear memory
  * layout, so no data movement is ever required.
  *
- * All image-space and k-space arrays are assumed to be **centred**, i.e. the
- * origin (DC / image centre) sits in the middle of the array at index
+ * All image-space and k-space arrays are assumed to be **centered**, i.e. the
+ * origin (DC / image center) sits in the middle of the array at index
  * `floor(dim/2)`, not in the corner. The library performs the required
  * (i)fftshifts internally, by index remapping rather than by phase modulation,
  * so the convention is exact for both even and odd dimensions.
@@ -187,7 +187,7 @@ typedef struct MR_ALIGN8 mr_complex_s {
 /* ------------------------------------------------------------------------ */
 
 /**
- * @brief Default neighbourhood radius of ::mr_calc_mask, in upsampled grid cells.
+ * @brief Default neighborhood radius of ::mr_calc_mask, in upsampled grid cells.
  *
  * Installed into ::mr_config::mask_radius by ::mr_config_defaults.
  *
@@ -343,7 +343,7 @@ typedef struct mr_config {
 
     /** Image matrix size `[Nx, Ny, Nz]`. Entries beyond ::n_spatial must be 1.
      *  Every entry must be >= 1. Defines the shape of `x`, `AhAx` and the
-     *  sensitivity maps; the image centre is at `floor(N/2)` on each axis. */
+     *  sensitivity maps; the image center is at `floor(N/2)` on each axis. */
     int n_dim[3];
 
     /** Upsampled (Toeplitz) matrix size `[Mx, My, Mz]`. Entries beyond
@@ -402,11 +402,11 @@ typedef struct mr_config {
     double mem_fraction;
 
     /** Non-zero to print per-stage timing to stdout. Default 0. In
-     *  ::mr_aha_plan_execute this also synchronises ::stream before
+     *  ::mr_aha_plan_execute this also synchronizes ::stream before
      *  printing, so leave it off in timing-critical loops. */
     int verbose;
 
-    /** Neighbourhood radius of ::mr_calc_mask, in upsampled grid cells: every
+    /** Neighborhood radius of ::mr_calc_mask, in upsampled grid cells: every
      *  location within this many cells of the grid point nearest to a sample
      *  is kept. Default ::MR_DEFAULT_MASK_RADIUS. Must be >= 0; 0 keeps only
      *  the grid point nearest to each sample. */
@@ -426,7 +426,7 @@ typedef struct mr_config {
  * ::mr_config::L, ::mr_config::n_coils) must then be set by the caller; the
  * result of this function alone describes a trivial 1-voxel problem.
  *
- * @param[out] cfg       Configuration to initialise. Must be non-NULL.
+ * @param[out] cfg       Configuration to initialize. Must be non-NULL.
  * @param[in]  traj_type Trajectory family the operator will be used for.
  * @return ::MR_SUCCESS, or ::MR_ERR_INVALID_ARG if @p cfg is NULL.
  */
@@ -542,7 +542,7 @@ typedef struct mr_aha_plan_s *mr_aha_plan;
  * re-planning or re-allocating.
  *
  * CUDA backend: for @f$L \le 30@f$ the block-diagonal stage uses kernels
- * specialised on @f$L@f$, and coils are processed in groups whose padded
+ * specialized on @f$L@f$, and coils are processed in groups whose padded
  * grids are transformed by one batched cuFFT and multiplied by one kernel
  * pass, which reads `phi2_toep` once per group instead of once per coil. The
  * plan holds `group * Mx*My*Mz*L` ::mr_complex of padded grids, the cuFFT work
@@ -558,7 +558,7 @@ typedef struct mr_aha_plan_s *mr_aha_plan;
  * more than @f$2^{31}-1@f$ retained locations) and `MR_AHA_CUDA_PROFILE=1`
  * prints the GPU time of each stage at every execution. Ranks
  * @f$30 < L \le 512@f$ use tiled shared-memory kernels that keep the coil
- * groups and the read-once guarantee of the specialised ones.
+ * groups and the read-once guarantee of the specialized ones.
  *
  * The call validates @p cfg, makes ::mr_config::gpu_device_id current for
  * its duration (restoring the caller's device on return), queries the free
@@ -586,13 +586,13 @@ MR_EXPORT int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out);
  *                 \hat{T} \, F \, \mathcal{P} \, S_c \, x ,
  * @f]
  * where @f$\mathcal{P}@f$ zero-pads the image onto the upsampled Toeplitz grid
- * (with the centring index remap folded in), @f$F@f$ is the centred DFT over
+ * (with the centering index remap folded in), @f$F@f$ is the centered DFT over
  * the upsampled grid, and @f$\hat{T}@f$ is the block-diagonal multiplication by
  * the Hermitian @f$L \times L@f$ block @f$B@f$ held in `phi2_toep` at every
  * upsampled k-space location, applied to the rank row
  * vector from the right, @f$v \leftarrow v B@f$ (see @ref mr_gram). The
  * scaling of `phi2_toep` produced by ::mr_calc_toep
- * already absorbs the @f$1/(M_xM_yM_z)@f$ of the unnormalised cuFFT pair, so no
+ * already absorbs the @f$1/(M_xM_yM_z)@f$ of the unnormalized cuFFT pair, so no
  * further scaling is applied here.
  *
  * Per coil group the stages are: (1) multiply by the sensitivity maps and
@@ -603,7 +603,7 @@ MR_EXPORT int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out);
  *
  * Asynchronous with respect to the host: all work is enqueued on the plan's
  * stream (::mr_config::stream) and the call returns before it completes
- * (except with ::mr_config::verbose, which synchronises). The input arrays
+ * (except with ::mr_config::verbose, which synchronizes). The input arrays
  * must stay valid and unchanged until the stream has reached that point.
  * Different @p d_SEs, @p d_phi2_toep and @p d_mask may be passed on every
  * call as long as their sizes match the plan's configuration.
@@ -619,7 +619,7 @@ MR_EXPORT int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out);
  *                         `[Mx, My, Mz, (L^2+L)/2]` when unmasked, or
  *                         `[num_masked, (L^2+L)/2]` when masked.
  * @param[in]  d_mask      Device array of ::mr_config::num_masked **0-based**
- *                         linear indices into the centred upsampled grid
+ *                         linear indices into the centered upsampled grid
  *                         `[Mx, My, Mz]`. Must be NULL when
  *                         ::mr_config::is_masked is zero, non-NULL otherwise.
  * @param[out] d_AhAx      Device output array, same shape and size as @p d_x.
@@ -628,7 +628,7 @@ MR_EXPORT int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out);
  *         missing mask), ::MR_ERR_CUDA / ::MR_ERR_CUFFT for launch and
  *         cuFFT failures, or ::MR_ERR_UNSUPPORTED from the block-diagonal
  *         kernel launcher. Errors raised asynchronously by the kernels
- *         surface only at a later synchronisation.
+ *         surface only at a later synchronization.
  *
  * @note @p d_AhAx must not alias @p d_x.
  */
@@ -644,7 +644,7 @@ MR_EXPORT int mr_aha_plan_execute(mr_aha_plan         plan,
  *
  * Frees the cuFFT plans, the padded grids, the cuFFT work area and the mask
  * buffers on the plan's device, then the plan itself. It does not
- * synchronise the stream: `cudaFree` already waits for outstanding work on
+ * synchronize the stream: `cudaFree` already waits for outstanding work on
  * the device. The caller's input and output arrays are never touched.
  *
  * @param[in] plan Plan from ::mr_aha_plan_create, or NULL (no-op).
@@ -826,7 +826,7 @@ typedef struct mr_op_inputs {
     int64_t           Ntrajs;
     /** Samples per trajectory. */
     int64_t           Nkx;
-    /** Mask of ::mr_config::num_masked 0-based indices into the centred
+    /** Mask of ::mr_config::num_masked 0-based indices into the centered
      *  upsampled grid when ::mr_config::is_masked (::MR_OP_TOEPLITZ only),
      *  else NULL. */
     const int64_t    *d_mask;
@@ -844,7 +844,7 @@ typedef struct mr_op_inputs {
 /**
  * @brief Options of ::mr_op_create. Fill with ::mr_op_options_defaults, then
  *        override fields; new fields are added at the end with defaults that
- *        keep the previous behaviour.
+ *        keep the previous behavior.
  */
 typedef struct mr_op_options {
     /** Method, ::MR_OP_TOEPLITZ by default. */
@@ -961,7 +961,7 @@ typedef struct mr_op_info_t {
  * choice). Fields added in later versions are thereby given their
  * backwards-compatible defaults as well.
  *
- * @param[out] opt Options to initialise. Must be non-NULL.
+ * @param[out] opt Options to initialize. Must be non-NULL.
  * @return ::MR_SUCCESS or ::MR_ERR_INVALID_ARG.
  */
 MR_EXPORT int mr_op_options_defaults(mr_op_options *opt);
@@ -975,13 +975,13 @@ MR_EXPORT int mr_op_options_defaults(mr_op_options *opt);
  * - ::MR_OP_TOEPLITZ: the kernel `phi2_toep` (computed with ::mr_calc_toep,
  *   distributed per ::mr_op_options::toep_dist, or the supplied
  *   ::mr_op_inputs::d_phi2_toep), the device's maps and mask, and a
- *   ::mr_aha_plan for its coils (coil groups, cuFFT plans, specialised
+ *   ::mr_aha_plan for its coils (coil groups, cuFFT plans, specialized
  *   block-diagonal kernels). Memory per device: the kernel
  *   (::mr_phi2_toep_size values) plus the plan's buffers, sized within
  *   ::mr_config::mem_fraction; while it is computed, also the transients of
  *   ::mr_calc_toep.
  * - ::MR_OP_NUFFT: one type-2 (sign -1) and one type-1 (sign +1) cufinufft
- *   plan with ::mr_config::eps, centred modes `n_dim` and `L` transforms
+ *   plan with ::mr_config::eps, centered modes `n_dim` and `L` transforms
  *   (`L*Nz` for ::MR_TRAJ_STACK, with a cuFFT along z), the points set once,
  *   the Gram blocks reordered for a batched GEMM (cuBLAS), and buffers of
  *   one coil: the image (`Nx*Ny*Nz*L` values) and twice the samples
@@ -1029,7 +1029,7 @@ MR_EXPORT int mr_op_execute(mr_op op, const mr_complex *d_x, mr_complex *d_AhAx)
  * @brief Describe how an operator was built and distributes the work.
  *
  * Copies the report recorded by ::mr_op_create; host-only, no GPU work and
- * no synchronisation.
+ * no synchronization.
  *
  * @param[in]  op   Operator.
  * @param[out] info Receives the description (a full struct copy).
@@ -1099,19 +1099,19 @@ MR_EXPORT int mr_op_abandon(mr_op op);
  *   1. packs each @f$L \times L@f$ block into the requested triangle,
  *   2. evaluates a type-1 cufinufft (sign @f$-1@f$) of the packed strengths
  *      onto the upsampled grid `phi2_dim`, giving the point-spread function,
- *   3. applies a centred **inverse** FFT (index remap + unnormalised cuFFT +
+ *   3. applies a centered **inverse** FFT (index remap + unnormalized cuFFT +
  *      @f$1/\prod M@f$), and
  *   4. optionally gathers the result at the masked locations.
  *
- * Step 2 with sign @f$-1@f$ followed by the normalised inverse FFT of step 3
+ * Step 2 with sign @f$-1@f$ followed by the normalized inverse FFT of step 3
  * is algebraically identical to the forward FFT of the sign @f$+1@f$
  * point-spread function divided by @f$\prod M@f$, which is exactly the
- * multiplier ::mr_aha_plan_execute needs between its unnormalised forward and
+ * multiplier ::mr_aha_plan_execute needs between its unnormalized forward and
  * inverse cuFFTs. No further scaling is required anywhere.
  *
  * For ::MR_TRAJ_STACK the type-1 transform is two-dimensional and is repeated
  * for every kz encode; no transform and no shift is applied along z, because kz
- * is already Cartesian and `phi2` is supplied in centred kz order.
+ * is already Cartesian and `phi2` is supplied in centered kz order.
  *
  * Work is chunked over the @f$(L^2+L)/2@f$ triangular components so that the
  * transient buffers respect ::mr_config::mem_fraction of the free device
@@ -1140,7 +1140,7 @@ MR_EXPORT int mr_op_abandon(mr_op op);
  *                          One Gram block is shared by the whole readout.
  * @param[in]  Nkx          Number of k-space samples per trajectory.
  * @param[in]  d_mask       Device array of ::mr_config::num_masked **0-based**
- *                          linear indices into the centred upsampled grid, or
+ *                          linear indices into the centered upsampled grid, or
  *                          NULL when ::mr_config::is_masked is zero.
  * @param[out] d_phi2_toep  Device output array of ::mr_phi2_toep_size elements:
  *                          `[Mx, My, Mz, (L^2+L)/2]` when unmasked, or
@@ -1158,7 +1158,7 @@ MR_EXPORT int mr_calc_toep(const mr_config  *cfg,
 /**
  * @brief Finish `phi2_toep` from externally computed point-spread functions.
  *
- * Steps 3 and 4 of ::mr_calc_toep (centred inverse FFT with the
+ * Steps 3 and 4 of ::mr_calc_toep (centered inverse FFT with the
  * @f$1/\prod M@f$ scaling, then the optional mask gather) for a batch of
  * triangular components whose type-1 NUFFT (step 2) was computed outside the
  * library. This is how the Metal backend builds `phi2_toep`: the type-1 NUFFT
@@ -1167,7 +1167,7 @@ MR_EXPORT int mr_calc_toep(const mr_config  *cfg,
  * can be validated against the one-shot ::mr_calc_toep on CUDA as well.
  *
  * Component @f$t@f$ of the point-spread function is the type-1 NUFFT, with
- * sign @f$-1@f$, centred (CMCL, `modeord = 0`) mode order and modes
+ * sign @f$-1@f$, centered (CMCL, `modeord = 0`) mode order and modes
  * `phi2_dim`, of the strengths obtained by broadcasting stored triangular
  * element @f$t@f$ (see ::mr_triangulation) of every trajectory's Gram block
  * along its readout:
@@ -1183,7 +1183,7 @@ MR_EXPORT int mr_calc_toep(const mr_config  *cfg,
  *                         (::mr_config::is_masked and ::mr_config::num_masked
  *                         describe @p d_phi2_toep).
  * @param[in]  d_psf       @p n_comp consecutive point-spread functions, each
- *                         `[Mx, My, Mz]` in centred order (`Mz` = kz planes for
+ *                         `[Mx, My, Mz]` in centered order (`Mz` = kz planes for
  *                         a stack, 1 in 2D): `[Mx, My, Mz, n_comp]`. Not
  *                         modified.
  * @param[in]  t0          Index of the first component, `0 <= t0`.
@@ -1217,9 +1217,9 @@ MR_EXPORT int mr_calc_toep_from_psf(const mr_config  *cfg,
  * ::mr_config::mask_radius. Every location within @f$r@f$ cells (Chebyshev
  * distance) of a sample's grid point is kept. No NUFFT is needed. Samples lie
  * between grid points and each one's Dirichlet kernel spreads over the
- * neighbouring cells, so @f$r = 0@f$ is far too small; the default
+ * neighboring cells, so @f$r = 0@f$ is far too small; the default
  * @f$r = 2@f$ reaches the unmasked accuracy on densely sampled radial and 3D
- * trajectories while keeping roughly the sampled disc / ball of k-space.
+ * trajectories while keeping roughly the sampled disk / ball of k-space.
  *
  * Locations far from every sample carry little of the Toeplitz kernel, so
  * dropping them from `phi2_toep` saves memory with an error controlled by the
@@ -1243,7 +1243,7 @@ MR_EXPORT int mr_calc_toep_from_psf(const mr_config  *cfg,
  * @param[in]  Ntrajs         Number of trajectories.
  * @param[in]  Nkx            Samples per trajectory.
  * @param[out] d_mask         Device array receiving the retained **0-based**
- *                            linear indices into the centred upsampled grid
+ *                            linear indices into the centered upsampled grid
  *                            `[Mx, My, Mz]`, in ascending order. Must have room
  *                            for ::mr_pad_size entries (the worst case). May be
  *                            NULL to only count the retained locations.
