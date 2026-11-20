@@ -76,8 +76,8 @@ import mr_aha  # noqa: E402
 # Test problems. They cover the three trajectory families and deliberately
 # awkward cases: odd image sizes (the centering remap must be exact for odd
 # dimensions), coil counts 2..5 (some do not divide the GPU count, which
-# exercises the multi-GPU remainder handling), and L = 33 > 30, above the limit
-# of the L-specialized CUDA block-diagonal kernels, so the generic kernels run.
+# exercises the multi-GPU remainder handling), and L = 33 > 16, above the limit
+# of the L-specialized CUDA block-diagonal kernels, so the tiled kernels run.
 #: name -> (traj_type, n_dim, L, n_coils, Ntrajs, Nkx)
 PROBLEMS = {
     "2d": ("2D", (40, 36), 5, 3, 60, 48),

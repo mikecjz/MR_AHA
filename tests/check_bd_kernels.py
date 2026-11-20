@@ -2,12 +2,12 @@
 
 Both backends use block-diagonal kernels specialized on ``L`` (CUDA:
 ``mr_k_bd_dense_t<L>`` / ``mr_k_bd_masked_t<L>``; Metal: ``mr_k_bd_dense<L>``
-/ ``mr_k_bd_masked<L>``; L = 1..30 on CUDA, 1..32 on Metal). Above that both
+/ ``mr_k_bd_masked<L>``; L = 1..16 on CUDA, 1..5 on Metal). Above that both
 use tiled shared/threadgroup-memory kernels (``mr_k_bdt``); both backends
 fall back to the generic shared/threadgroup-memory kernels otherwise or when
 ``MR_AHA_<BACKEND>_GENERIC_BD=1``. The reference data cover only a few ranks,
 so this test applies the operator with both kernel families on random inputs
-for many ranks (including the tiled kernels at L = 31..130 with 32 and 16
+for many ranks (including the tiled kernels up to L = 130 with 32 and 16
 locations per tile), both triangulations,
 unmasked and masked, and checks that they agree to single-precision rounding.
 The specialized kernels also process coils in groups
@@ -45,10 +45,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 
 import mr_aha  # noqa: E402
 
-# Ranks chosen around every dispatch boundary: small L, the end of the CUDA
-# specialized range (30), the Metal specialized range (32), just above it
-# (31, 33), and larger ranks served by the tiled kernels (up to 130).
-RANKS = (1, 2, 5, 7, 12, 16, 20, 30, 31, 32, 33, 47, 72, 130)
+# Ranks chosen around every dispatch boundary: small L, the end of the Metal
+# specialized range (5) and just above it (6), the end of the CUDA specialized
+# range (16) and just above it (17), and larger ranks served by the tiled
+# kernels (up to 130).
+RANKS = (1, 2, 5, 6, 7, 12, 16, 17, 20, 30, 31, 32, 33, 47, 72, 130)
 
 
 def apply(cfg, x, SEs, toep, mask, generic: bool, group: int = 4,

@@ -10,7 +10,7 @@ seconds on both backends.
 For masked and unmasked operators it times the generic block-diagonal
 kernels (``MR_AHA_<BACKEND>_GENERIC_BD=1``, the only ones above the
 specialized range before the tiled kernels) and the default choice (the
-tiled kernels at L > 32 on Metal, L > 30 on CUDA), reports the median of
+tiled kernels at L > 5 on Metal, L > 16 on CUDA), reports the median of
 ``--reps`` applications after one warm-up, and checks that both families
 give the same result.
 
