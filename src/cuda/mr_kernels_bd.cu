@@ -365,10 +365,6 @@ mr_bd_kernels mr_bd_lookup(int L)
         MR_BD_CASE(5)  MR_BD_CASE(6)  MR_BD_CASE(7)  MR_BD_CASE(8)
         MR_BD_CASE(9)  MR_BD_CASE(10) MR_BD_CASE(11) MR_BD_CASE(12)
         MR_BD_CASE(13) MR_BD_CASE(14) MR_BD_CASE(15) MR_BD_CASE(16)
-        MR_BD_CASE(17) MR_BD_CASE(18) MR_BD_CASE(19) MR_BD_CASE(20)
-        MR_BD_CASE(21) MR_BD_CASE(22) MR_BD_CASE(23) MR_BD_CASE(24)
-        MR_BD_CASE(25) MR_BD_CASE(26) MR_BD_CASE(27) MR_BD_CASE(28)
-        MR_BD_CASE(29) MR_BD_CASE(30)
         /* Keep in sync with MR_BD_MAX_L. */
         default: break;
     }

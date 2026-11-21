@@ -541,7 +541,7 @@ typedef struct mr_aha_plan_s *mr_aha_plan;
  * iterative reconstruction can call ::mr_aha_plan_execute many times without
  * re-planning or re-allocating.
  *
- * CUDA backend: for @f$L \le 30@f$ the block-diagonal stage uses kernels
+ * CUDA backend: for @f$L \le 16@f$ the block-diagonal stage uses kernels
  * specialized on @f$L@f$, and coils are processed in groups whose padded
  * grids are transformed by one batched cuFFT and multiplied by one kernel
  * pass, which reads `phi2_toep` once per group instead of once per coil. The
@@ -557,7 +557,7 @@ typedef struct mr_aha_plan_s *mr_aha_plan;
  * coil at a time; also used for @f$L > 512@f$, and for masked plans with
  * more than @f$2^{31}-1@f$ retained locations) and `MR_AHA_CUDA_PROFILE=1`
  * prints the GPU time of each stage at every execution. Ranks
- * @f$30 < L \le 512@f$ use tiled shared-memory kernels that keep the coil
+ * @f$16 < L \le 512@f$ use tiled shared-memory kernels that keep the coil
  * groups and the read-once guarantee of the specialized ones.
  *
  * The call validates @p cfg, makes ::mr_config::gpu_device_id current for

@@ -158,15 +158,18 @@ __global__ void mr_k_scatter_masked(mr_complex *d_pad, const mr_complex *d_compa
 #define MR_BD_THREADS 256
 
 /** @brief Largest rank with a specialized block-diagonal kernel. Larger ranks
- *         use the tiled kernels (mr_kernels_bdt.cu). Above about L = 30 one
- *         coil's vectors no longer fit the register file and the specialized
- *         kernels spill (TITAN RTX, 384^2 2D, 8 coils: L = 28 73 vs 79 ms,
- *         L = 30 88 vs 89 ms, L = 32 105 vs 102 ms, specialized vs the old
- *         generic kernels). */
-#define MR_BD_MAX_L 30
+ *         use the tiled kernels (mr_kernels_bdt.cu). Chosen from the MRAHA-15
+ *         sweep of specialized vs tiled kernels (whole A^H A, L = 1..32, 2D
+ *         384^2/8 coils and 256^2/16 coils, masked and unmasked): the tiled
+ *         kernels are faster from L = 9..11 on TITAN RTX, RTX 5090 and L40S
+ *         (tied on L40S up to L = 17) and from L = 17..18 on A100 and H100,
+ *         and faster on every GPU above L = 17 (1.7-2.7x at L = 30). 16 is
+ *         within 18 % of the best choice on all of these GPUs. */
+#define MR_BD_MAX_L 16
 
 /** @brief Largest rank whose specialized kernels process coils in pairs (see
- *         `MR_BD_PAIR` in mr_kernels_bd.cu). */
+ *         `MR_BD_PAIR` in mr_kernels_bd.cu). Equal to ::MR_BD_MAX_L, so every
+ *         specialized rank currently uses coil pairs. */
 #define MR_BD_PAIR_MAX_L 16
 
 /**

@@ -345,7 +345,7 @@ static inline void mr_block_apply2(thread const float2 (&v0)[L],
 
 /**
  * @brief In-place block-diagonal multiplication over the whole grid,
- *        specialized on L (host names `mr_k_bd_dense_<L>`, L = 1..32).
+ *        specialized on L (host names `mr_k_bd_dense_<L>`, L = 1..5).
  *
  * Same contract as ::mr_k_blockdiag_dense, without threadgroup memory, and
  * applied to @p ncoil coils whose `[Mx, My, Mz, L]` grids follow one another
@@ -432,7 +432,7 @@ kernel void mr_k_bd_masked(device float2       *compact    [[buffer(0)]],
     }
 }
 
-/* Explicit instantiations, L = 1..32. Larger ranks use the tiled kernels
+/* Explicit instantiations, L = 1..MR_METAL_BD_MAX_L (mr_aha_metal.cpp). Larger ranks use the tiled kernels
  * (mr_k_bdt) below. */
 #define MR_BD_INSTANTIATE(L)                                                     \
     template [[host_name("mr_k_bd_dense_" #L)]] [[kernel]] void                 \
@@ -451,13 +451,7 @@ kernel void mr_k_bd_masked(device float2       *compact    [[buffer(0)]],
                       constant int &ncoil [[buffer(6)]],                         \
                       uint tid [[thread_position_in_grid]]);
 MR_BD_INSTANTIATE(1)  MR_BD_INSTANTIATE(2)  MR_BD_INSTANTIATE(3)  MR_BD_INSTANTIATE(4)
-MR_BD_INSTANTIATE(5)  MR_BD_INSTANTIATE(6)  MR_BD_INSTANTIATE(7)  MR_BD_INSTANTIATE(8)
-MR_BD_INSTANTIATE(9)  MR_BD_INSTANTIATE(10) MR_BD_INSTANTIATE(11) MR_BD_INSTANTIATE(12)
-MR_BD_INSTANTIATE(13) MR_BD_INSTANTIATE(14) MR_BD_INSTANTIATE(15) MR_BD_INSTANTIATE(16)
-MR_BD_INSTANTIATE(17) MR_BD_INSTANTIATE(18) MR_BD_INSTANTIATE(19) MR_BD_INSTANTIATE(20)
-MR_BD_INSTANTIATE(21) MR_BD_INSTANTIATE(22) MR_BD_INSTANTIATE(23) MR_BD_INSTANTIATE(24)
-MR_BD_INSTANTIATE(25) MR_BD_INSTANTIATE(26) MR_BD_INSTANTIATE(27) MR_BD_INSTANTIATE(28)
-MR_BD_INSTANTIATE(29) MR_BD_INSTANTIATE(30) MR_BD_INSTANTIATE(31) MR_BD_INSTANTIATE(32)
+MR_BD_INSTANTIATE(5)
 #undef MR_BD_INSTANTIATE
 
 /* ------------------------------------------------------------------------ */
@@ -488,7 +482,7 @@ static inline int mr_bdt_collen(int c, int L, int upper)
  *
  * Port of `mr_k_bdt` in `src/cuda/mr_kernels_bdt.cu`; see that file for the
  * full derivation. The specialized kernels above keep a location's rank
- * vectors in registers and stop at L = 32; the generic ones stage one rank
+ * vectors in registers and stop at L = 5; the generic ones stage one rank
  * vector per thread in threadgroup memory (few threads per threadgroup at
  * large L), fetch every off-diagonal element of `phi2_toep` twice and handle
  * one coil per dispatch. Here:

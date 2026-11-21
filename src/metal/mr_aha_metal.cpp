@@ -50,8 +50,13 @@ static_assert(sizeof(mr_dims) == 80,
 #define MR_METAL_BD_THREADS 256
 
 /** @brief Largest L with a specialized block-diagonal kernel (see
- *         `mr_k_bd_dense<L>` in mr_kernels.metal). */
-#define MR_METAL_BD_MAX_L 32
+ *         `mr_k_bd_dense<L>` in mr_kernels.metal). Larger ranks use the tiled
+ *         kernels. Chosen from the MRAHA-15 sweep of specialized vs tiled
+ *         kernels on the M3 Ultra (whole A^H A, L = 1..32, 2D 384^2/8 coils
+ *         and 256^2/16 coils, masked and unmasked): the tiled kernels are
+ *         faster from L = 5 (masked) or 7..9 (unmasked), and about 2x faster
+ *         at L = 30..32. Keep in sync with the instantiations there. */
+#define MR_METAL_BD_MAX_L 5
 
 /** @brief Default number of coils per group (see the file comment). Measured
  *         on the M3 Ultra; `MR_AHA_METAL_COIL_GROUP` overrides it. */
@@ -67,7 +72,7 @@ static_assert(sizeof(mr_dims) == 80,
 /** @brief Block-diagonal kernel family of a plan. */
 enum mr_bd_kind {
     MR_BD_GENERIC = 0,  /**< mr_k_blockdiag_*: one coil, threadgroup vectors. */
-    MR_BD_SPECIALIZED,  /**< mr_k_bd_*_<L>: register vectors, L <= 32.        */
+    MR_BD_SPECIALIZED,  /**< mr_k_bd_*_<L>: register vectors, L <= 5.         */
     MR_BD_TILED         /**< mr_k_bdt_*: threadgroup tiles, any larger L.     */
 };
 
@@ -288,7 +293,8 @@ extern "C" int mr_aha_plan_create(const mr_config *cfg, mr_aha_plan *plan_out)
     }
 
     /* Block-diagonal kernel family: specialized on L (register vectors,
-     * each stored element read once, coil groups) for L <= 32, tiled
+     * each stored element read once, coil groups) for L <=
+     * MR_METAL_BD_MAX_L, tiled
      * (threadgroup-memory panels, same guarantees) above, and the generic
      * threadgroup-memory kernels (one coil at a time) when
      * MR_AHA_METAL_GENERIC_BD=1 or when nothing else fits.
